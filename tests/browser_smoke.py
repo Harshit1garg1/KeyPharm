@@ -89,6 +89,17 @@ with sync_playwright() as playwright:
     assert [run["result"]["status"] for run in runs] == ["Incomplete", "Hold", "Match"]
     assert len(runs[0]["result"]["missing"]) == 1 and len(runs[1]["result"]["extra"]) == 1
 
+    downloads = []
+    device.on("download", lambda download: downloads.append(download))
+    device.get_by_role("button", name="Sessions").click()
+    device.get_by_role("button", name="Export CSV and summary").click()
+    device.wait_for_timeout(1000)
+    files = {d.suggested_filename: Path(d.path()).read_text(encoding="utf-8-sig") for d in downloads}
+    assert sorted(files) == ["keypharm-evidence.csv", "keypharm-records.csv", "keypharm-summary.txt"], sorted(files)
+    evidence = files["keypharm-evidence.csv"].splitlines()
+    assert evidence[0].startswith('"SessionID","Mode","TransactionRef","PalletRef","TestID","RunID"'), evidence[0]
+    assert len(evidence) == 1 + 4 + 5 + 4, len(evidence)  # header + 4 cartons per run + the extra EPC on run 2
+
     dashboard = browser.new_page(viewport={"width":1280, "height":800})
     dashboard.on("pageerror", lambda error: errors.append(str(error)))
     service = {"online":True, "records":copy.deepcopy(snapshot)}

@@ -99,7 +99,8 @@ export function dashboardSnapshot(store, includeOtherRecords = false) {
 
 const csvCell = value => {
   let str = String(value ?? '');
-  if (/^[\s\u0000-\u001f]*[=+@-]/.test(str) || /^[\t\r\n]/.test(str)) str = "'" + str;
+  // Plain numbers such as RSSI -55 are not formulas; keep them numeric for Excel.
+  if (!/^-?\d+(\.\d+)?$/.test(str) && (/^[\s\u0000-\u001f]*[=+@-]/.test(str) || /^[\t\r\n]/.test(str))) str = "'" + str;
   return '"' + str.replaceAll('"', '""') + '"';
 };
 export function evidenceCsv(store) {
@@ -117,6 +118,45 @@ export function evidenceCsv(store) {
       for (const epc of r.missing ?? []) rows.push(['Missing EPC',...identity,run.id,run.endedAt,run.operator,'Missing','','','','','',epc,'']);
     }
     for (const log of s.logs) rows.push(['Log',...identity,log.run ?? '',log.at,log.actor,'','','','','','','',log.action + ': ' + (log.detail ?? '')]);
+  }
+  return '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
+}
+
+// Functional design section 8 "Recommended export columns", then per-EPC read diagnostics.
+export const EXPORT_COLUMNS = ['SessionID','Mode','TransactionRef','PalletRef','TestID','RunID','RunType','RunStart','RunEnd',
+  'DurationSeconds','Location','StorageLevel','SKU','CartonRef','ExpectedEPC','ObservedEPC','Classification','ReaderModel','DeviceID',
+  'RegionProfile','PowerSetting','ScanMethod','LabelType','LabelPosition','ShieldingStatus','CompletenessPct','ResultStatus',
+  'ExceptionCode','Operator','Reviewer','Disposition','Notes','ReadCount','FirstSeen','LastSeen','RSSI'];
+export function specEvidenceCsv(store) {
+  const rows = [EXPORT_COLUMNS];
+  for (const s of store.sessions) {
+    const cartons = new Map((s.manifest?.cartons ?? []).map(c => [c.epc, c]));
+    s.runs.filter(run => run.result).forEach((run, index) => {
+      const r = run.result, p = run.profile ?? {};
+      // Latest investigation per EPC; the handheld logs "Unexpected EPC <outcome>" with "<epc> / <note>".
+      const disposition = new Map();
+      for (const log of s.logs) if (log.run === run.id && log.action?.startsWith('Unexpected EPC ')) {
+        const [epc, ...note] = String(log.detail ?? '').split(' / ');
+        const outcome = log.action.slice('Unexpected EPC '.length);
+        disposition.set(epc, {outcome:outcome.charAt(0).toUpperCase() + outcome.slice(1), note:note.join(' / ')});
+      }
+      const row = (epc, classification, expected, observed, code) => {
+        const c = cartons.get(epc), read = run.observations[epc], d = disposition.get(epc);
+        return [s.id, s.mode ?? 'POC', '', s.manifest?.pallet, s.testId, run.id, index ? 'Rescan' : 'First pass',
+          run.startedAt, run.endedAt, run.elapsedSeconds, s.location, s.level, c?.sku, c?.carton,
+          expected ? epc : '', observed ? epc : '', classification, p.model ?? p.name, p.deviceId, p.region, p.powerDbm,
+          run.method ?? s.method, s.label, s.placement, s.shielding, r.percent,
+          run.state === 'Finished' ? r.status : run.state, code, run.operator, s.closure?.actor, d?.outcome,
+          [run.reason && 'Rescan reason: ' + run.reason, d?.note].filter(Boolean).join(' | '),
+          read?.count, read?.first, read?.last, read?.rssi];
+      };
+      for (const c of s.manifest?.cartons ?? []) {
+        const seen = r.matched.includes(c.epc);
+        rows.push(row(c.epc, seen ? 'Matched' : 'Missing', true, seen, seen ? '' : 'MISSING_CARTON'));
+      }
+      for (const epc of r.extra) rows.push(row(epc, 'Unexpected', false, true, 'UNEXPECTED_EPC'));
+      if (run.observations[s.manifest?.palletEpc]) rows.push(row(s.manifest.palletEpc, 'Pallet tag', false, true, ''));
+    });
   }
   return '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
 }

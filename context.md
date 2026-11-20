@@ -24,19 +24,19 @@ The Android app packages local HTML, CSS and JavaScript in a WebView. Java conne
 | Provisional CSV schema, validation, role permissions, trial label accounting, comparison and export | [model.mjs](app/src/main/assets/model.mjs) |
 | Local sessions, role selection, scans, recovery, verification, sign-off and dashboard sharing controls | [handheld.mjs](app/src/main/assets/handheld.mjs) |
 | Android bridge, physical trigger mapping and file handling | [MainActivity.java](app/src/main/java/be/keypharm/rfid/MainActivity.java) |
-| Chainway initialization, ETSI readback check and inventory | [C72Reader.java](app/src/main/java/be/keypharm/rfid/C72Reader.java) |
+| Chainway initialization, ETSI and power readback at connect and at the start of every run, and inventory | [C72Reader.java](app/src/main/java/be/keypharm/rfid/C72Reader.java) |
 | Read-only HTTP routes and browser records view | [DashboardServer.java](app/src/main/java/be/keypharm/rfid/DashboardServer.java), [dashboard.mjs](app/src/main/assets/dashboard.mjs) |
 | Screen styling and shared color tokens | [style.css](app/src/main/assets/style.css) |
 
 The CSV template uses `pallet_ref,pallet_epc,carton_ref,carton_epc,sku` with one row per carton for one pallet. The template is available in the app. The included sample and its EPCs are synthetic. Demo allocation counts cartons, one pallet tag, candidates and reserves across sessions. A pre-scan revision replaces the session's current allocation. Actual treatment of already-used tags and replacements is still open.
 
-The app retains completed attempts and audit events locally. During a hardware run, observations are periodically checkpointed. A restarted app marks an unfinished run as Interrupted and retains the last checkpoint. Export produces a CSV and readable summary through Android's share sheet.
+The app retains completed attempts and audit events locally. During a hardware run, observations are periodically checkpointed. A restarted app marks an unfinished run as Interrupted and retains the last checkpoint. Each run stores the region, power and device ID read back when that run started. A new unique EPC gives a short beep and vibration; an interrupted run gives an error tone. Export produces the section 8 evidence CSV, the full records CSV and a readable summary through Android's share sheet.
 
 Dashboard sharing uses a private link on port 8787 on the same trusted Wi-Fi. It defaults to committed sample simulation records. The Test lead can explicitly include other committed records once access and retention are agreed. The dashboard has no record editing or scan controls. Stop sharing when finished.
 
 ## Build and run
 
-Follow the [README](README.md) for the demo walkthrough, SDK dependency and build commands. Use JDK 17, Android SDK 34 and the Chainway `DeviceAPI_ver20251103_release.aar`. Put the AAR in `app/libs`. The repository does not carry a copy of the vendor AAR, the generated APK, or the signing key. The Windows SDK build script produces a signed debug APK at `build/keypharm-poc-debug.apk`. Keep the same local signing key when updating the installed package `be.keypharm.rfid.poc` so Android can preserve its data.
+Follow the [README](README.md) for the demo walkthrough, SDK dependency and build commands. Use JDK 17, Android SDK 34 and the Chainway `DeviceAPI_ver20251103_release.aar`. Put the AAR in `app/libs`. The repository does not carry a copy of the vendor AAR, the generated APK, or the signing key. The Windows SDK build script produces a signed debug APK at `build/keypharm-poc-<versionName>-debug.apk`. Keep the same local signing key when updating the installed package `be.keypharm.rfid.poc` so Android can preserve its data.
 
 On the C72, open **Keypharm RFID POC → Sessions → Evidence → Share web dashboard**. Copy the link and open it in a browser on the same Wi-Fi. Keep the handheld app running. Simulation mode supplies a matching pallet and selectable missing, extra, clean and interrupted carton scenarios.
 
