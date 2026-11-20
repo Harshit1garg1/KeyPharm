@@ -1,0 +1,22 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'be.keypharm.rfid'
+    compileSdk 34
+    defaultConfig {
+        applicationId 'be.keypharm.rfid.poc'
+        minSdk 30
+        targetSdk 34
+        versionCode 1
+        versionName '0.1.0'
+        ndk { abiFilters 'armeabi-v7a', 'arm64-v8a' }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation files('libs/DeviceAPI_ver20251103_release.aar')
+}

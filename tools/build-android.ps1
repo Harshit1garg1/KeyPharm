@@ -1,0 +1,70 @@
+param(
+    [string]$Sdk = "$env:LOCALAPPDATA\Android\Sdk",
+    [string]$Jdk = $env:JAVA_HOME
+)
+$ErrorActionPreference = 'Stop'
+if (!$Jdk) { $Jdk = 'C:\Program Files\Java\jdk-17' }
+$project = Split-Path -Parent $PSScriptRoot
+$src = Join-Path $project 'app\src\main'
+$vendor = Join-Path $project 'app\libs\DeviceAPI_ver20251103_release.aar'
+if (!(Test-Path -LiteralPath $vendor)) { throw 'Place the Chainway DeviceAPI AAR in app/libs.' }
+$tool = Join-Path $Sdk 'build-tools\34.0.0'
+$platform = Join-Path $Sdk 'platforms\android-34\android.jar'
+$work = Join-Path $project ("build\sdk-" + [guid]::NewGuid())
+$null = New-Item -ItemType Directory -Path $work
+$android = Join-Path $work 'android.jar'
+Copy-Item -LiteralPath $platform -Destination $android
+$classes = Join-Path $work 'classes'
+$generated = Join-Path $work 'generated'
+$dex = Join-Path $work 'dex'
+$null = New-Item -ItemType Directory -Path $classes,$generated,$dex
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$vendorDir = Join-Path $work 'chainway'
+[IO.Compression.ZipFile]::ExtractToDirectory($vendor, $vendorDir)
+$aarClasses = Join-Path $vendorDir 'classes.jar'
+function Run([string]$program, [string[]]$arguments) {
+    & $program @arguments
+    if ($LASTEXITCODE) { throw "$program failed with exit code $LASTEXITCODE" }
+}
+$manifestPath = Join-Path $work 'AndroidManifest.xml'
+[xml]$manifest = Get-Content -LiteralPath (Join-Path $src 'AndroidManifest.xml') -Raw
+$manifest.manifest.SetAttribute('package','be.keypharm.rfid.poc')
+$ns = 'http://schemas.android.com/apk/res/android'
+$null = $manifest.manifest.SetAttribute('versionCode',$ns,'1')
+$null = $manifest.manifest.SetAttribute('versionName',$ns,'0.1.0')
+$null = $manifest.manifest.application.SetAttribute('debuggable',$ns,'true')
+$null = $manifest.manifest.application.activity.SetAttribute('name',$ns,'be.keypharm.rfid.MainActivity')
+$null = $manifest.manifest.application.provider.SetAttribute('name',$ns,'be.keypharm.rfid.EvidenceProvider')
+$null = $manifest.manifest.application.provider.SetAttribute('authorities',$ns,'be.keypharm.rfid.poc.evidence')
+$manifest.Save($manifestPath)
+$resources = Join-Path $work 'resources.zip'
+$unsigned = Join-Path $work 'unsigned.apk'
+Run "$tool\aapt2.exe" @('compile','--dir',"$vendorDir\res",'-o',$resources)
+Run "$tool\aapt2.exe" @('link','-I',$android,'--manifest',$manifestPath,'--min-sdk-version','30','--target-sdk-version','34','-A',"$src\assets",'--java',$generated,'--extra-packages','com.rscja.deviceapi','-o',$unsigned,$resources)
+$sources = @(Get-ChildItem -LiteralPath "$src\java",$generated -Recurse -Filter *.java | ForEach-Object FullName)
+Run "$Jdk\bin\javac.exe" (@('--release','17','-encoding','UTF-8','-classpath',"$android;$aarClasses",'-d',$classes) + $sources)
+$appJar = Join-Path $work 'app.jar'
+Run "$Jdk\bin\jar.exe" @('cf',$appJar,'-C',$classes,'.')
+$env:JAVA_HOME = $Jdk
+Run "$tool\d8.bat" @('--lib',$android,'--min-api','30','--output',$dex,$appJar,$aarClasses)
+$apk = [IO.Compression.ZipFile]::Open($unsigned,[IO.Compression.ZipArchiveMode]::Update)
+try {
+    foreach ($file in Get-ChildItem -LiteralPath $dex -Filter '*.dex') {
+        $null = [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($apk,$file.FullName,$file.Name)
+    }
+    foreach ($abi in 'arm64-v8a','armeabi-v7a') {
+        foreach ($file in Get-ChildItem -LiteralPath "$vendorDir\jni\$abi" -Filter '*.so') {
+            $null = [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($apk,$file.FullName,"lib/$abi/$($file.Name)")
+        }
+    }
+} finally { $apk.Dispose() }
+$aligned = Join-Path $work 'aligned.apk'
+Run "$tool\zipalign.exe" @('-f','-p','4',$unsigned,$aligned)
+$keystore = Join-Path $project 'build\debug.keystore'
+if (!(Test-Path -LiteralPath $keystore)) {
+    Run "$Jdk\bin\keytool.exe" @('-genkeypair','-keystore',$keystore,'-storepass','android','-alias','androiddebugkey','-keypass','android','-dname','CN=Android Debug','-keyalg','RSA','-keysize','2048','-validity','10000')
+}
+$output = Join-Path $project 'build\keypharm-poc-debug.apk'
+Run "$tool\apksigner.bat" @('sign','--ks',$keystore,'--ks-pass','pass:android','--key-pass','pass:android','--out',$output,$aligned)
+Run "$tool\apksigner.bat" @('verify',$output)
+Write-Output $output

@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Review records and activity from the Keypharm RFID handheld.">
+<title>Keypharm records</title><link rel="stylesheet" href="style.css"><script type="module" src="dashboard.mjs"></script></head>
+<body><header class="mast"><div class="mast-inner"><span class="brand">Keypharm</span><span class="mode">Records dashboard</span></div></header>
+<main class="shell"><div class="row spread"><h1>Handheld records</h1><button id="refresh" class="secondary">Refresh records</button></div>
+<p id="connection" class="status" role="status">Connecting to handheld…</p>
+<div class="warehouse"><section class="panel"><h2>Sessions</h2><label>Search records<input id="search" type="search" placeholder="Test, pallet, SKU, location or operator"></label><div id="sessions"></div></section>
+<section id="detail" class="panel" aria-label="Session evidence"><p>Select a session to see scan evidence and logs.</p></section></div>
+<noscript><p>Enable JavaScript to view records.</p></noscript></main></body></html>
