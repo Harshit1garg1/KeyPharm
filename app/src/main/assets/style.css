@@ -1,19 +1,20 @@
-/* Hallmark | Operate | Keypharm scan bench | local roles, pallet check, records */
-/* Critique: scan counts and the next physical action lead; setup and evidence sit below. */
+/* Hallmark | Operate | Keypharm scan bench | brand: KeyPharm (spec 2026-11-23) */
+/* Critique: the official mark anchors the header while scan state remains the strongest signal. */
 :root {
-  --paper:#fbfdff; --workspace:#eef2f5; --ink:#182b3a; --subtle:#4e6171; --line:#c4d0d9;
-  --action:#155a78; --action-deep:#10465e; --focus:#0874aa; --match:#236743; --hold:#a33a28;
-  --sky:#e4f1f6; --leaf:#e4f1e9; --clay:#f9e9e5; --night:#112b3a;
+  --paper:#fcfdfc; --workspace:#f1f5f2; --ink:#141215; --subtle:#44564b; --line:#c6d3ca;
+  --action:#064d19; --action-deep:#013b10; --focus:#00654b; --match:#236743; --hold:#a33a28;
+  --sky:#e3f2ec; --leaf:#e4f1e9; --clay:#f9e9e5;
   --text:system-ui,"Segoe UI",sans-serif; --code:ui-monospace,Consolas,monospace;
 }
 * {box-sizing:border-box}
 html,body {overflow-x:clip}
 body {margin:0;background:var(--workspace);color:var(--ink);font:16px/1.5 var(--text)}
 ::selection {background:var(--sky);color:var(--ink)}
-.mast {background:var(--night);color:var(--paper)}
+.mast {background:var(--paper);color:var(--ink);border-bottom:1px solid var(--line)}
 .mast-inner {max-width:1200px;margin:auto;min-height:60px;padding:12px 24px;display:flex;align-items:center;justify-content:space-between;gap:12px}
-.brand {font-size:21px;font-weight:760;letter-spacing:-.03em}
-.mode {color:var(--sky);font-size:14px}
+.brand {display:block;width:156px;height:40px;overflow:hidden;flex:none}
+.brand img {display:block;width:208px;height:auto;max-width:none;margin-left:-16px}
+.mode {color:var(--focus);font-size:14px}
 .shell {max-width:1200px;margin:auto;padding:24px}
 .handheld .shell,.handheld .mast-inner {max-width:720px}
 h1,h2,h3 {line-height:1.15;letter-spacing:-.025em;overflow-wrap:break-word;min-width:0}

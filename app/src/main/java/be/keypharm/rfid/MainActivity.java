@@ -24,7 +24,7 @@ public final class MainActivity extends Activity {
     private static final Set<Integer> SCAN_KEYS = Set.of(139, 280, 291, 293, 294, 311, 312, 313, 315, 591, 593, 594, 596);
     private static final int PICK_MANIFEST = 10;
     private static final int SAVE_TEMPLATE = 11;
-    private static final Set<String> ASSETS = Set.of("/handheld.html", "/handheld.mjs", "/model.mjs", "/style.css");
+    private static final Set<String> ASSETS = Set.of("/handheld.html", "/handheld.mjs", "/model.mjs", "/style.css", "/keypharm-logo.png");
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService hardware = Executors.newSingleThreadExecutor();
     private WebView web;
@@ -44,7 +44,7 @@ public final class MainActivity extends Activity {
         try { tones = new ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80); }
         catch (RuntimeException unavailable) { tones = null; }
         web = new WebView(this);
-        web.setBackgroundColor(0xffeef2f5);
+        web.setBackgroundColor(0xfff1f5f2);
         web.getSettings().setJavaScriptEnabled(true);
         web.getSettings().setDomStorageEnabled(true);
         web.getSettings().setAllowFileAccess(false);
@@ -67,8 +67,9 @@ public final class MainActivity extends Activity {
                 if (!"https".equals(uri.getScheme()) || !"handheld.keypharm.invalid".equals(uri.getHost())
                         || path == null || !ASSETS.contains(path)) return blocked();
                 try {
-                    String mime = path.endsWith(".mjs") ? "text/javascript" : path.endsWith(".css") ? "text/css" : "text/html";
-                    WebResourceResponse result = new WebResourceResponse(mime, "UTF-8", getAssets().open(path.substring(1)));
+                    boolean image = path.endsWith(".png");
+                    String mime = image ? "image/png" : path.endsWith(".mjs") ? "text/javascript" : path.endsWith(".css") ? "text/css" : "text/html";
+                    WebResourceResponse result = new WebResourceResponse(mime, image ? null : "UTF-8", getAssets().open(path.substring(1)));
                     result.setResponseHeaders(java.util.Map.of("Content-Security-Policy",
                             "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'"));
                     return result;

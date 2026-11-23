@@ -5,7 +5,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright, expect
 
 assets = Path(__file__).resolve().parents[1] / "app/src/main/assets"
-types = {".html":"text/html", ".mjs":"text/javascript", ".css":"text/css"}
+types = {".html":"text/html", ".mjs":"text/javascript", ".css":"text/css", ".png":"image/png"}
 
 
 def serve_assets(route):
@@ -32,6 +32,7 @@ with sync_playwright() as playwright:
     device.on("pageerror", lambda error: errors.append(str(error)))
     device.route("https://handheld.test/**", serve_assets)
     device.goto("https://handheld.test/handheld.html")
+    assert device.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth === 339")
     device.get_by_role("button", name="New test session").click()
     device.get_by_role("button", name="Create session").click()
     expect(device.get_by_role("button", name="Use sample manifest")).to_have_count(0)
@@ -113,6 +114,7 @@ with sync_playwright() as playwright:
 
     dashboard.route("https://dashboard.test/records", records)
     dashboard.goto("https://dashboard.test/dashboard.html")
+    assert dashboard.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth === 339")
     expect(dashboard.get_by_role("status")).to_contain_text("Handheld online")
     expect(dashboard.get_by_role("heading", name="KP-TEST-01")).to_be_visible()
     expect(dashboard.get_by_text("Unexpected EPC investigated",exact=True)).to_be_visible()

@@ -10,7 +10,7 @@ Use the existing native Chainway reader for live capture. The main path uses C72
 
 ## Layout proposal
 
-Keep the navy, blue and light surfaces already used by Keypharm. Use a compact session header, one active operator step and a scan panel with a visible progress measure and distinct states. Prioritize expected, matched, missing and extra counts. Put setup, review and history in stable sections with larger touch targets. Show role and hardware readiness before the operator reaches the trigger step. Keep all current record content accessible. The web dashboard remains a read-only records view.
+Use KeyPharm's official logo, brand green and teal accents on light surfaces. Use a compact session header, one active operator step and a scan panel with a visible progress measure and distinct states. Prioritize expected, matched, missing and extra counts. Put setup, review and history in stable sections with larger touch targets. Show role and hardware readiness before the operator reaches the trigger step. Keep all current record content accessible. The web dashboard remains a read-only records view.
 
 ```text
 Sessions                        Role
