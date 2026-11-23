@@ -15,6 +15,14 @@ For a physical test, start a session with **C72 hardware**, import the matching 
 
 ## Build and update
 
+For physical tag testing, convert a Chainway UHF XLS export on a PC with Python and `xlrd` installed:
+
+```powershell
+python tools/uhf-xls-to-manifests.py input.xls build/live-manifests
+```
+
+The converter uses workbook order, with up to 14 tags per test pallet. Each group's first tag is the pallet tag. The remaining tags are cartons with test references. The XLS file provides tag observations, so these assignments are for the POC. Copy each generated CSV to the C72 and import it in a separate hardware session. Present only the designated pallet tag for identification, then place the matching carton tags in the scan area. Keep fallback tags outside the read zone unless testing an unexpected read.
+
 - Use JDK 17 and Android SDK platform/build tools 34. Place the Chainway `DeviceAPI_ver20251103_release.aar` in `app/libs`. The local sample at `../Demo-uhf_as/uhf-uart-demo/app/libs` supplied this POC build. [Chainway C72 SDK support](https://www.chainway.net/Support/Info/10).
 - Run `./gradlew.bat :app:assembleDebug` with access to the Gradle dependencies. The verified Windows offline alternative is `./tools/build-android.ps1`, which writes `build/keypharm-poc-<versionName>-debug.apk` (version read from `app/build.gradle`) using the installed SDK tools.
 - Install or update with `adb -d install -r build/keypharm-poc-<versionName>-debug.apk`. Keep the same signing key for updates so Android preserves local app data. The offline build creates its demo key at `build/debug.keystore`.
