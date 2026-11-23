@@ -1,11 +1,29 @@
 """Run with an installed Python Playwright and Chromium."""
 import copy
 import json
+import re
 from pathlib import Path
 from playwright.sync_api import sync_playwright, expect
 
 assets = Path(__file__).resolve().parents[1] / "app/src/main/assets"
 types = {".html":"text/html", ".mjs":"text/javascript", ".css":"text/css", ".png":"image/png"}
+
+
+# The APK serves only the files listed in MainActivity.ASSETS; a file the handheld loads but the list misses
+# works here (served from disk) yet breaks on the device, as the 0.8.0 header logo did.
+java = (assets.parent / "java/be/keypharm/rfid/MainActivity.java").read_text(encoding="utf-8")
+start = java.index("ASSETS = Set.of(")
+served = set(re.findall(r'"(/[\w.-]+)"', java[start:java.index(");", start)]))
+loaded, queue = set(), ["handheld.html"]
+while queue:
+    name = queue.pop()
+    loaded.add("/" + name)
+    if not name.endswith((".html", ".mjs", ".css")):
+        continue
+    text = (assets / name).read_text(encoding="utf-8")
+    refs = re.findall(r'(?:src|href)="([\w.-]+)"', text) + re.findall(r"from '\./([\w.-]+)'", text) + re.findall(r"url\(([\w.-]+)\)", text)
+    queue += [ref for ref in refs if "/" + ref not in loaded and ref not in queue]
+assert loaded <= served, "Add to MainActivity.ASSETS: " + ", ".join(sorted(loaded - served))
 
 
 def serve_assets(route):

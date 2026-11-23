@@ -220,5 +220,7 @@ test('manifest built from a scan: chosen pallet tag, the rest become numbered ca
   assert.throws(() => manifestCsv('PAL', '', ['CC01']), /pallet tag/);
   assert.throws(() => manifestCsv('PAL', 'AA01', ['AA01']), /carton/);
   assert.throws(() => manifestCsv('PAL;1', 'AA01', ['CC01']), /commas/);
+  assert.throws(() => manifestCsv('=HYPERLINK(1)', 'AA01', ['CC01']), /start with/);
+  assert.throws(() => manifestCsv('PAL', 'AA01', ['CC01'], '@SUM(1)'), /start with/);
 });
 

@@ -2,7 +2,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <application android:label="Keypharm RFID POC" android:icon="@drawable/ic_launcher"
-        android:roundIcon="@drawable/ic_launcher" android:allowBackup="false" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:roundIcon="@drawable/ic_launcher" android:allowBackup="false" android:theme="@style/Theme.Keypharm">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

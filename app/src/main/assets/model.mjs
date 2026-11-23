@@ -23,6 +23,8 @@ function cells(line, row, sep) {
 export function manifestCsv(palletRef, palletEpc, epcs, sku = '') {
   const ref = String(palletRef ?? '').trim(), item = String(sku ?? '').trim(), pallet = normalizeEpc(palletEpc);
   if (/[,;"]/.test(ref + item)) throw new Error('Pallet reference and SKU cannot contain commas, semicolons or quotes.');
+  // Excel would run a cell starting with = + @ - as a formula when the saved CSV is opened.
+  if ([ref, item].some(v => /^[=+@\-\t\r\n]/.test(v))) throw new Error('Pallet reference and SKU cannot start with = + @ or -.');
   if (!ref) throw new Error('Enter a pallet reference.');
   if (!pallet) throw new Error('Choose the pallet tag.');
   const cartons = [...new Set(epcs.map(normalizeEpc))].filter(epc => epc && epc !== pallet).sort();

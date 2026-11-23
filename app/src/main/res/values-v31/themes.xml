@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 12+ splash: KeyPharm green with the white mark, instead of the launcher tile on grey. -->
+    <style name="Theme.Keypharm" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/keypharm_ground</item>
+        <item name="android:statusBarColor">@color/keypharm_paper</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowSplashScreenBackground">@color/keypharm_green</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_splash</item>
+    </style>
+</resources>
