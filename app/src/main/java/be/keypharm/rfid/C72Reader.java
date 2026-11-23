@@ -21,6 +21,8 @@ final class C72Reader {
     private long generation;
     private boolean collecting;
     private boolean overflow;
+    private boolean palletFilter;
+    private Integer normalPower;
 
     C72Reader(Context context) { this.context = context; }
 
@@ -32,6 +34,9 @@ final class C72Reader {
             if (sdk == null || !sdk.init(context)) {
                 disconnect();
                 return state;
+            }
+            if (!restorePalletSettings()) {
+                return json("ready", false, "message", "Could not restore the reader's normal scan settings");
             }
             int region = sdk.getFrequencyMode();
             int power = sdk.getPower();
@@ -52,6 +57,9 @@ final class C72Reader {
 
     JSONObject setPower(int requested) {
         if (sdk == null) return json("ok", false, "ready", false, "message", "Check the reader connection first");
+        if (!restorePalletSettings()) {
+            return json("ok", false, "message", "Could not restore the reader's normal scan settings");
+        }
         if (requested < MIN_POWER_DBM || requested > MAX_POWER_DBM) {
             return json("ok", false, "message", "Choose a power from 5 to 30 dBm");
         }
@@ -77,9 +85,13 @@ final class C72Reader {
     String failure = "";
 
     /** Re-reads region and power, then starts inventory. Returns the settings used for this run (FR-08), or null. */
-    JSONObject start() {
+    JSONObject start(String palletEpc) {
         failure = "UHF inventory did not start";
-        if (sdk == null) return null;
+        if (sdk == null || !restorePalletSettings()) return null;
+        if (palletEpc != null && !palletEpc.matches("(?:[0-9A-F]{2}){2,31}")) {
+            failure = "Invalid pallet EPC";
+            return null;
+        }
         final long attempt;
         synchronized (pending) {
             pending.clear();
@@ -87,10 +99,10 @@ final class C72Reader {
             collecting = true;
             attempt = ++generation;
         }
+        boolean started = false;
         try {
             int region = sdk.getFrequencyMode();
             int power = sdk.getPower();
-            JSONObject used = settings(region, power);
             if (region != ETSI || power <= 0) {
                 failure = "Reader is not on ETSI with a readable power setting";
                 haltReads();
@@ -100,27 +112,50 @@ final class C72Reader {
                     & sdk.setFilter(IUHF.Bank_TID, 0, 0, "")
                     & sdk.setFilter(IUHF.Bank_USER, 0, 0, "");
             if (!unfiltered || !sdk.setEPCMode()) {
-                haltReads();
                 return null;
             }
+            if (palletEpc != null) {
+                palletFilter = true;
+                // The EPC bank starts with CRC and PC (32 bits), followed by the EPC.
+                if (!sdk.setFilter(IUHF.Bank_EPC, 32, palletEpc.length() * 4, palletEpc)) {
+                    failure = "Reader did not accept the pallet EPC filter";
+                    return null;
+                }
+                if (power != MIN_POWER_DBM) {
+                    normalPower = power;
+                    if (!sdk.setPower(MIN_POWER_DBM) || sdk.getPower() != MIN_POWER_DBM) {
+                        failure = "Reader did not confirm short-range pallet power";
+                        return null;
+                    }
+                    power = MIN_POWER_DBM;
+                }
+            }
+            JSONObject used = settings(region, power);
             sdk.setInventoryCallback(tag -> {
                 synchronized (pending) {
                     if (!collecting || generation != attempt) return;
+                    String epc = tag.getEPC();
+                    if (palletEpc != null && !palletEpc.equalsIgnoreCase(epc)) return;
                     if (pending.size() >= 20000) {
                         overflow = true;
                         return;
                     }
-                    pending.add(json("epc", tag.getEPC(), "rssi", tag.getRssi(), "ms", System.currentTimeMillis()));
+                    pending.add(json("epc", epc, "rssi", tag.getRssi(), "ms", System.currentTimeMillis()));
                 }
             });
-            if (sdk.startInventoryTag()) {
+            started = sdk.startInventoryTag();
+            if (started) {
                 profile = used;
                 return used;
             }
         } catch (Exception | LinkageError ignored) {
-            disconnect();
+            failure = "Reader could not start inventory";
+        } finally {
+            if (!started) {
+                haltReads();
+                if (!restorePalletSettings()) failure += ". Check reader settings before retrying";
+            }
         }
-        haltReads();
         return null;
     }
 
@@ -141,7 +176,29 @@ final class C72Reader {
         } finally {
             haltReads();
         }
-        return stopped && !overflow;
+        boolean restored = restorePalletSettings();
+        return stopped && restored && !overflow;
+    }
+
+    JSONObject currentProfile() { return profile; }
+
+    private boolean restorePalletSettings() {
+        if (!palletFilter && normalPower == null) return true;
+        if (sdk == null) return false;
+        try {
+            if (normalPower != null) {
+                int power = normalPower;
+                if (sdk.getPower() != power && !sdk.setPower(power)) return false;
+                if (sdk.getPower() != power) return false;
+                normalPower = null;
+                profile = settings(sdk.getFrequencyMode(), power);
+            }
+            if (palletFilter && !sdk.setFilter(IUHF.Bank_EPC, 0, 0, "")) return false;
+            palletFilter = false;
+            return true;
+        } catch (Exception | LinkageError ignored) {
+            return false;
+        }
     }
 
     boolean healthy() {
@@ -162,6 +219,7 @@ final class C72Reader {
     void disconnect() {
         haltReads();
         RFIDWithUHFUART current = sdk;
+        restorePalletSettings();
         sdk = null;
         if (current != null) {
             try { current.free(); }

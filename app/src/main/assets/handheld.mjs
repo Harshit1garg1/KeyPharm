@@ -210,7 +210,7 @@ function scanPanel(s) {
     escape(isHardware ? (ready ? 'Reader ready' : 'Reader unavailable') : 'Simulation') + '</span></div>' +
     '<div class="scan-target"><div class="scan-signal" data-reading="false" aria-hidden="true"></div><div>' +
     '<p class="provenance">' + escape(s.manifest.pallet) + '</p>' +
-    (s.identified ? '<p class="muted">Pallet verified by UHF EPC.</p>' : '<p>Present only the pallet tag. Keep other tags out of range.</p>') +
+    (s.identified ? '<p class="muted">Pallet verified by UHF EPC.</p>' : '<p>Hold the reader close to the pallet tag.</p>') +
     '<p class="muted">' + (isHardware ? 'Hold the C72 trigger. Release to finish.' : 'Hold the demo trigger. Release to finish.') + '</p></div></div>' +
     (isHardware && !ready ? '<p class="status hold">' + escape(reader.message) + '</p>' +
       button('reconnect','Check reader','class="secondary"') : '') +
@@ -318,7 +318,8 @@ function begin() {
   });
   active = capture;
   feedback('');
-  if (hardware) bridge.startReader(active.id);
+  if (hardware && kind === 'pallet') bridge.startPalletReader(active.id,s.manifest.palletEpc);
+  if (hardware && kind === 'cartons') bridge.startReader(active.id);
   updateScan();
 }
 function simReads(s, capture) {
@@ -374,13 +375,10 @@ function finalize(interrupted, message) {
   commit(() => {
     if (capture.kind === 'pallet') {
       const seen = Object.keys(capture.observations);
-      // Expected cartons can be within range during identification; unrelated EPCs make it ambiguous.
-      const known = new Set(s.manifest.cartons.map(c => c.epc));
-      const unknown = seen.filter(epc => epc !== s.manifest.palletEpc && !known.has(epc));
-      s.identified = !interrupted && seen.includes(s.manifest.palletEpc) && !unknown.length;
+      s.identified = !interrupted && seen.length === 1 && seen[0] === s.manifest.palletEpc;
       (s.palletAttempts ??= []).push({
         id:capture.id, startedAt:capture.startedAt, endedAt, observations:capture.observations,
-        profile:capture.hardware ? reader.profile : {name:'Simulator'}, actor:actor(), result:s.identified ? 'Identified' : 'Unconfirmed'
+        profile:s.palletPending?.profile, actor:actor(), result:s.identified ? 'Identified' : 'Unconfirmed'
       });
       delete s.palletPending;
       log(s,s.identified ? 'Pallet identified' : 'Pallet not confirmed',seen.join(', ') || 'No valid EPC read',capture.id);
@@ -471,6 +469,7 @@ window.keypharmEvent = (name,data) => action(() => {
   }
   if (name === 'ended' && active?.id === data.id) {
     collect(data.reads);
+    if (data.profile) reader = {...reader, profile:data.profile};
     finalize(data.interrupted,data.message);
     if (data.interrupted) bridge?.connectReader();
   }

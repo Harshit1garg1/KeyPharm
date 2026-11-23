@@ -151,6 +151,7 @@ with sync_playwright() as playwright:
     hardware.add_init_script(r"""
       window.KeypharmAndroid = {
         publishSnapshot() {},
+        feedback() {},
         liveSampleManifest() {
           return 'pallet_ref,pallet_epc,carton_ref,carton_epc,sku\n' +
             'KP-LIVE-SORTED-01,A00000000000000000000001,Carton 01,C00000000000000000000001,Test SKU\n';
@@ -161,6 +162,19 @@ with sync_playwright() as playwright:
         setReaderPower(requestId, power) {
           window.keypharmEvent('reader-power', {id:requestId, ok:true, ready:true, previousPower:30,
             message:'Reader power set to ' + power + ' dBm', profile:{region:'ETSI',powerDbm:power}});
+        },
+        startPalletReader(id, epc) {
+          window.scanEpc = epc;
+          window.scanReads = [{epc}];
+          window.keypharmEvent('started', {id, profile:{region:'ETSI',powerDbm:5}});
+        },
+        startReader(id) {
+          window.scanEpc = null;
+          window.scanReads = [{epc:'C00000000000000000000001'}, {epc:'E00000000000000000000009'}];
+          window.keypharmEvent('started', {id, profile:{region:'ETSI',powerDbm:30}});
+        },
+        stopReader(id) {
+          window.keypharmEvent('ended', {id, reads:window.scanReads, interrupted:false});
         }
       };
     """)
@@ -182,5 +196,19 @@ with sync_playwright() as playwright:
     hardware.get_by_label("Local identity").select_option("operator")
     expect(hardware.get_by_role("button", name="Set power")).to_have_count(0)
     expect(hardware.get_by_text("ETSI / 5 dBm")).to_be_visible()
+    hardware.get_by_label("Local identity").select_option("supervisor")
+    hardware.get_by_label("Contents and label assignment verified").check()
+    hardware.get_by_role("button", name="Record verification").click()
+    hardware.get_by_label("Local identity").select_option("operator")
+    hardware.get_by_role("button", name="Open pallet scanner").click()
+    hardware.evaluate("window.keypharmEvent('press',{})")
+    assert hardware.evaluate("window.scanEpc") == "A00000000000000000000001"
+    hardware.evaluate("window.keypharmEvent('release',{})")
+    expect(hardware.get_by_role("heading", name="Scan cartons")).to_be_visible()
+    hardware.evaluate("window.keypharmEvent('press',{})")
+    assert hardware.evaluate("window.scanEpc") is None
+    hardware.evaluate("window.keypharmEvent('release',{})")
+    expect(hardware.locator(".tag-row[data-tag-status=unexpected]")).to_have_count(1)
+    expect(hardware.get_by_role("button", name="Continue",exact=True)).to_be_disabled()
     assert not errors, errors
     print("Handheld and dashboard browser flow passed.")
