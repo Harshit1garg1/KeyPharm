@@ -24,8 +24,8 @@ const id = () => crypto.randomUUID();
 const button = (action, label, options = '') => '<button type="button" data-action="' + action + '" ' + options + '>' + label + '</button>';
 const field = (name,label,value = '',attributes = '') => '<label>' + escape(label) + '<input name="' + name +
   '" value="' + escape(value) + '" ' + attributes + '></label>';
-const counts = r => '<div class="counts">' + [
-  ['Expected',r.expected],['Matched',r.matched.length],['Missing',r.missing.length],['Extra',r.extra.length]
+const counts = (r,finished) => '<div class="counts">' + [
+  ['Expected',r.expected],['Matched',r.matched.length],[finished ? 'Missing' : 'Waiting',r.missing.length],['Extra',r.extra.length]
 ].map(([name,n]) => '<div><strong>' + n + '</strong><span>' + name + '</span></div>').join('') + '</div>';
 
 let store = {sessions:[]}, storageError = false;
@@ -109,8 +109,10 @@ function render() {
     return;
   }
   const s = session();
-  if (!s && view === 'session') view = 'sessions';
-  root.innerHTML = roleBar() + (view === 'new' ? creation() : view === 'session' ? showSession(s) : history());
+  if (!s && (view === 'session' || view === 'scan')) view = 'sessions';
+  document.querySelector('main > h1').hidden = view === 'scan';
+  root.innerHTML = view === 'scan' ? scanPanel(s) :
+    roleBar() + (view === 'new' ? creation() : view === 'session' ? showSession(s) : history());
   if (active) updateScan();
 }
 function history() {
@@ -143,7 +145,11 @@ function showSession(s) {
     escape(s.source) + (s.closedAt ? ' / Closed' : '') + '</span></div><p>' + escape(s.location) + ' / ' + escape(s.level) +
     '</p><details><summary>Test setup</summary><ul class="log">' + Object.entries(metadata).slice(2).map(([k,v]) =>
       '<li><strong>' + escape(v) + '</strong> ' + escape(s[k] || '—') + '</li>').join('') + '</ul></details></section>' +
-    (manifest && s.verifiedBy ? scanPanel(s) : '') + (s.runs.length ? comparisons(s) : '') + closure(s) +
+    (s.confirmedAt ? '<section class="panel"><p class="status match">Clean carton match confirmed.</p></section>' : '') +
+    (manifest && s.verifiedBy && permits(role,'scan') && !s.closedAt && !s.confirmedAt ?
+      '<section class="panel"><h2>RFID check</h2>' +
+      button('open-scan',s.identified ? 'Open carton scanner' : 'Open pallet scanner') + '</section>' : '') +
+    (s.runs.length ? comparisons(s) : '') + closure(s) +
     showManifest(s,manifest) + (manifest ? verification(s) : '') +
     '<section class="panel"><details><summary>Session log (' + s.logs.length + ')</summary><ul class="log">' +
     s.logs.slice().reverse().map(e => '<li><strong>' + escape(e.action) + '</strong><br>' + escape(e.detail) +
@@ -178,30 +184,52 @@ function verification(s) {
 function scanPanel(s) {
   const run = latest(s);
   const isHardware = s.source === 'C72 hardware';
-  const canScan = permits(role,'scan') && !s.closedAt && !s.confirmedAt;
-  const r = active?.kind === 'cartons' ? compare(s.manifest,Object.keys(run?.observations ?? {})) : run?.result;
   const ready = !isHardware || reader.ready;
-  const status = active ? (active.ending ? 'Finishing' : 'Reading') :
-    run ? (run.state === 'Finished' ? run.result.status : run.state) : (s.identified ? 'Ready for carton scan' : 'Identify the pallet');
-  return '<section class="panel scan-panel"><h2>' + (s.identified ? 'Carton scan' : 'Pallet identification') +
-    '</h2><p>' + escape(isHardware ? reader.message : 'Simulated reader') + '</p>' +
-    (isHardware && reader.profile ? '<p class="muted">' + escape(reader.profile.region) + ' / ' +
-      escape(reader.profile.powerDbm ?? 'Power unavailable') + ' dBm</p>' : '') +
-    (isHardware && !ready && canScan ? button('reconnect','Check reader','class="secondary"') : '') +
-    '<p class="provenance">' + escape(s.manifest.pallet) + '</p><div id="scan-results"><p class="status ' +
-    escape(status.toLowerCase()) + '">' + escape(status) + '</p>' + (r ? counts(r) : '') + '</div>' +
-    (s.identified ? '<p class="muted">Pallet verified by UHF EPC.</p>' : '<p>Present the pallet tag before scanning cartons.</p>') +
-    (canScan ? '<p>' + (isHardware ? 'Hold the trigger to scan. Release to finish.' : 'Hold the demo trigger. Release to finish.') + '</p>' : '') +
-    (canScan && !isHardware && s.identified && !active ? '<label>Demo reads<select id="scenario">' +
+  return '<section class="scan-workspace"><div class="row spread scan-nav">' +
+    button('scan-details','Session details','class="secondary"') +
+    '<span class="mode">Step ' + (s.identified ? '2' : '1') + ' of 2</span></div>' +
+    '<section class="panel scan-panel"><div class="row spread scan-title"><h1 tabindex="-1">' +
+    (s.identified ? 'Scan cartons' : 'Scan pallet') + '</h1><span class="reader-state" data-ready="' + ready + '">' +
+    escape(isHardware ? (ready ? 'Reader ready' : 'Reader unavailable') : 'Simulation') + '</span></div>' +
+    '<div class="scan-target"><div class="scan-signal" data-reading="false" aria-hidden="true"></div><div>' +
+    '<p class="provenance">' + escape(s.manifest.pallet) + '</p>' +
+    (s.identified ? '<p class="muted">Pallet verified by UHF EPC.</p>' : '<p>Present the pallet tag.</p>') +
+    '<p class="muted">' + (isHardware ? 'Hold the C72 trigger. Release to finish.' : 'Hold the demo trigger. Release to finish.') + '</p></div></div>' +
+    (isHardware && !ready ? '<p class="status hold">' + escape(reader.message) + '</p>' +
+      button('reconnect','Check reader','class="secondary"') : '') +
+    '<p id="scan-clock" class="scan-clock" hidden></p><div id="scan-results" class="scan-results">' + scanSummary(s) + '</div>' +
+    (!isHardware && s.identified ? '<label>Demo reads<select id="scenario">' +
       ['Missing one','Unexpected extra','Clean match','Interrupted'].map(item => '<option ' + (scenario === item ? 'selected' : '') +
         '>' + item + '</option>').join('') + '</select></label>' : '') +
-    (canScan && s.identified && run && !active ? '<label>Rescan reason<input id="rescan" maxlength="160" value="' + escape(rescanReason) +
+    (s.identified && run ? '<label>Rescan reason<input id="rescan" maxlength="160" value="' + escape(rescanReason) +
       '" placeholder="What changed before retrying?"></label>' : '') +
-    (canScan && !isHardware ? '<button type="button" id="demo-trigger" class="secondary scan-cta" ' + (!ready ? 'disabled' : '') +
-      '>Hold demo trigger</button>' : '') +
-    (canScan && s.identified ? button('continue','Continue','class="scan-cta" ' +
+    (!isHardware ? '<button type="button" id="demo-trigger" class="secondary scan-cta">Hold demo trigger</button>' : '') +
+    (s.identified ? button('continue','Continue','class="scan-cta" ' +
       (!active && permits(role,'confirm') && canContinue(s,run) ? '' : 'disabled')) : '') +
-    (s.confirmedAt ? '<p class="status match">Clean carton match confirmed.</p>' : '') + '</section>';
+    '</section>' + (s.identified ? '<section class="panel"><h2>Carton status</h2><ul id="tag-list" class="tag-list">' +
+      tagRows(s) + '</ul></section>' : '') + '</section>';
+}
+function scanResult(s) {
+  if (!s.identified) return null;
+  const run = latest(s);
+  return active ? compare(s.manifest,Object.keys(run?.observations ?? {})) :
+    (run?.result ?? compare(s.manifest,[]));
+}
+function scanSummary(s,r = scanResult(s)) {
+  const run = latest(s);
+  const status = active ? (active.ending ? 'Finishing' : 'Reading') :
+    run ? (run.state === 'Finished' ? run.result.status : run.state) : 'Ready to scan';
+  return '<p role="status" class="status ' + status.toLowerCase().replaceAll(' ','-') + '">' + status + '</p>' +
+    (r ? counts(r,Boolean(!active && run?.result)) : '');
+}
+function tagRows(s,r = scanResult(s)) {
+  const matched = new Set(r.matched);
+  const pending = active || !latest(s)?.result;
+  const row = (epc,title,state,label) => '<li class="tag-row" data-tag-status="' + state + '"><div><strong>' +
+    escape(title) + '</strong><code>' + escape(epc) + '</code></div><span class="tag-badge">' + label + '</span></li>';
+  return r.extra.map(epc => row(epc,'Outside this pallet','unexpected','Unexpected')).join('') +
+    s.manifest.cartons.map(c => matched.has(c.epc) ? row(c.epc,c.carton,'matched','Expected') :
+      pending ? row(c.epc,c.carton,'waiting','Waiting') : row(c.epc,c.carton,'missing','Missing')).join('');
 }
 function resultBox(s, title, run) {
   if (!run) return '<div><h3>' + title + '</h3><p class="muted">No earlier run.</p></div>';
@@ -253,7 +281,7 @@ function closure(s) {
 
 function begin() {
   const s = session();
-  if (active || view !== 'session' || !s || !permits(role,'scan') || !s.verifiedBy || !s.manifest || s.closedAt || s.confirmedAt) return;
+  if (active || view !== 'scan' || !s || !permits(role,'scan') || !s.verifiedBy || !s.manifest || s.closedAt || s.confirmedAt) return;
   const hardware = s.source === 'C72 hardware';
   if (hardware && !reader.ready) { feedback(reader.message,true); return; }
   const kind = s.identified ? 'cartons' : 'pallet';
@@ -355,13 +383,27 @@ function finalize(interrupted, message) {
   rescanReason = '';
   feedback(capture.kind === 'pallet' && !s.identified ? 'Pallet EPC not confirmed. Isolate the pallet tag and retry.' : '',capture.kind === 'pallet' && !s.identified);
   render();
+  if (capture.kind === 'pallet' && s.identified) focusScan();
+}
+function focusScan() {
+  window.scrollTo(0,0);
+  document.querySelector('.scan-title h1')?.focus({preventScroll:true});
 }
 function updateScan() {
   const s = session(), element = document.querySelector('#scan-results');
   if (!active || !element || !s) return;
   const elapsed = Math.max(0,Math.floor((Date.now() - Date.parse(active.startedAt)) / 1000));
-  element.innerHTML = '<p class="status">' + (active.ending ? 'Finishing' : 'Reading') + ' / ' + elapsed + ' s</p>' +
-    (active.kind === 'cartons' ? counts(compare(s.manifest,Object.keys(latest(s).observations))) : '');
+  const clock = document.querySelector('#scan-clock');
+  clock.hidden = false;
+  clock.textContent = elapsed + ' s elapsed';
+  document.querySelector('.scan-signal').dataset.reading = String(!active.ending);
+  const r = scanResult(s);
+  const stamp = JSON.stringify([active.ending,r?.matched.length,r?.extra.length]);
+  if (element.dataset.scanState !== stamp) {
+    element.dataset.scanState = stamp;
+    element.innerHTML = scanSummary(s,r);
+    if (r) document.querySelector('#tag-list').innerHTML = tagRows(s,r);
+  }
   for (const control of root.querySelectorAll('button[data-action], #role, #scenario, #rescan')) control.disabled = true;
 }
 function chooseManifest(text,name,demo = false) {
@@ -377,7 +419,7 @@ function action(fn) {
 window.keypharmEvent = (name,data) => action(() => {
   if (name === 'reader') {
     reader = data;
-    if (view === 'session' && !active) render();
+    if (view === 'scan' && !active) render();
   }
   if (name === 'manifest-file') chooseManifest(data.text,data.name);
   if (name === 'dashboard') {
@@ -431,6 +473,14 @@ root.addEventListener('click', event => action(() => {
   }
   if (command === 'new' && permits(role,'create')) view = 'new';
   if (command === 'back') { view = 'sessions'; pendingImport = undefined; }
+  if (command === 'open-scan' && s?.manifest && s.verifiedBy && permits(role,'scan') && !s.closedAt && !s.confirmedAt) {
+    view = 'scan';
+    feedback('');
+    render();
+    focusScan();
+    return;
+  }
+  if (command === 'scan-details') { view = 'session'; window.scrollTo(0,0); }
   if (command === 'sample') { chooseManifest(SAMPLE,'Demo sample CSV',true); return; }
   if (command === 'csv' && permits(role,'manifest')) { if (bridge) bridge.pickManifest(); else document.querySelector('#csv-file')?.click(); return; }
   if (command === 'template' && permits(role,'manifest')) { if (bridge) bridge.saveTemplate(SAMPLE); else download('keypharm-sample.csv',SAMPLE); return; }
@@ -450,8 +500,10 @@ root.addEventListener('click', event => action(() => {
     else { download('keypharm-evidence.csv',evidence); download('keypharm-records.csv',records); download('keypharm-summary.txt',summary); }
     return;
   }
-  if (command === 'continue' && permits(role,'confirm') && !s.confirmedAt && canContinue(s,latest(s))) {
+  if (command === 'continue' && view === 'scan' && permits(role,'confirm') && !s.confirmedAt && canContinue(s,latest(s))) {
     commit(() => { s.confirmedAt = now(); log(s,'Clean match confirmed','Carton set matched',latest(s).id); });
+    view = 'session';
+    window.scrollTo(0,0);
   }
   if (command || control.dataset.open) { feedback(''); render(); }
 }));
