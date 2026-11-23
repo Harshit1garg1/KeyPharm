@@ -24,7 +24,8 @@ public final class MainActivity extends Activity {
     private static final Set<Integer> SCAN_KEYS = Set.of(139, 280, 291, 293, 294, 311, 312, 313, 315, 591, 593, 594, 596);
     private static final int PICK_MANIFEST = 10;
     private static final int SAVE_TEMPLATE = 11;
-    private static final Set<String> ASSETS = Set.of("/handheld.html", "/handheld.mjs", "/model.mjs", "/style.css", "/keypharm-logo.png");
+    private static final Set<String> ASSETS = Set.of(
+            "/handheld.html", "/handheld.mjs", "/model.mjs", "/qrcode-generator.mjs", "/style.css", "/keypharm-logo.png");
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService hardware = Executors.newSingleThreadExecutor();
     private WebView web;
