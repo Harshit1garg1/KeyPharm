@@ -62,13 +62,19 @@ let powerRequest;
 let dashboardUrl = '';
 let dashboardQr = '';
 let includeOtherRecords = false;
+let dashboardResetPending = false;
 let simulatedKeys = false;
 let builder; // manifest generator: {tags:{epc:{count,rssi}}, capture, palletRef, sku}
 // The open screen and half-typed form fields survive re-renders and restarts (records stay in `key`).
 const uiKey = 'keypharm-poc-ui-v1';
 let ui = {drafts:{}};
 try { ui = {drafts:{}, ...JSON.parse(localStorage.getItem(uiKey) ?? '{}')}; } catch {}
-const saveUi = () => { try { localStorage.setItem(uiKey,JSON.stringify({view, selected, drafts:ui.drafts})); } catch {} };
+function saveUi() {
+  try {
+    if (view === 'sessions' && !selected && !Object.keys(ui.drafts).length) localStorage.removeItem(uiKey);
+    else localStorage.setItem(uiKey,JSON.stringify({view, selected, drafts:ui.drafts}));
+  } catch {}
+}
 const draftable = el => el.form?.id && el.name && el.form.id !== 'reader-power' &&
   !['file','checkbox','radio','hidden','submit','button'].includes(el.type);
 const draftPrefix = formId => (['session','scan','build'].includes(view) ? selected : '') + '|' + formId + '|';
@@ -135,7 +141,7 @@ function identityMenu(open) {
     '</summary><div class="who-sheet"><label>Role<select id="role" ' + locked + '>' +
     Object.entries(roles).map(([value,label]) => '<option value="' + value + '" ' + (role === value ? 'selected' : '') +
       '>' + escape(label) + '</option>').join('') + '</select></label>' +
-    // ponytail: names are only added, never edited; clear app data to reset the list if a typo matters.
+    // Saved names are kept until the Test lead resets local data.
     '<label>Your name<input id="person" list="people" maxlength="60" autocomplete="off" placeholder="Pick or type your name" value="' +
       escape(name) + '" ' + locked + '></label><datalist id="people">' +
       store.people.map(person => '<option value="' + escape(person) + '"></option>').join('') + '</datalist></div></details>';
@@ -193,13 +199,16 @@ function history() {
     planPanel() +
     (permits(role,'export') ? '<h2 class="section-title">Evidence</h2><section class="panel"><div class="row">' +
       button('export','Export CSV and summary','class="secondary" ' + (!store.sessions.length ? 'disabled' : '')) +
-      (bridge ? button('dashboard',dashboardUrl ? 'Stop dashboard sharing' : 'Share web dashboard','class="secondary"') : '') +
+      (bridge ? button('dashboard',dashboardUrl ? 'Stop dashboard sharing' : 'Share web dashboard',
+        'class="secondary" ' + (dashboardResetPending ? 'disabled' : '')) : '') +
       '</div>' + (bridge && role === 'admin' && !dashboardUrl ?
         '<label class="check"><input id="share-all" type="checkbox" checked>Include hardware and imported records</label>' : '') +
       (dashboardUrl ? '<div class="line dashboard-share"><div class="dashboard-qr" role="img" aria-label="Dashboard QR code">' +
       dashboardQr + '</div><div><p>Scan the QR code or open the private link on the same Wi-Fi network. ' +
       (includeOtherRecords ? 'All local sessions are shared.' : 'Sample simulation sessions are shared.') + '</p><p><code>' + escape(dashboardUrl) +
-      '</code></p>' + button('copy','Copy dashboard link','class="secondary"') + '</div></div>' : '') + '</section>' : '') +
+      '</code></p>' + button('copy','Copy dashboard link','class="secondary"') + '</div></div>' : '') +
+      (role === 'admin' ? '<div class="line">' + button('reset','Reset all local data',
+        'class="secondary" ' + (powerRequest ? 'disabled' : '')) + '</div>' : '') + '</section>' : '') +
     (permits(role,'create') ? '<div class="actionbar">' + button('new','New test session','class="scan-cta"') + '</div>' : '');
 }
 // Planned tests for the day (FR-28 coverage): the Test lead enters them, closing the day needs a reason for every test not run.
@@ -705,6 +714,14 @@ window.keypharmEvent = (name,data) => action(() => {
   }
   if (name === 'manifest-file') chooseManifest(data.text,data.name);
   if (name === 'dashboard') {
+    if (dashboardResetPending) {
+      // A previous share request can report its URL before the stop request completes.
+      if (!data.url && !data.message) {
+        dashboardResetPending = false;
+        root.querySelector('[data-action="dashboard"]')?.removeAttribute('disabled');
+      }
+      return;
+    }
     dashboardUrl = data.url ?? '';
     dashboardQr = '';
     if (dashboardUrl) {
@@ -756,9 +773,13 @@ document.addEventListener('change', event => action(() => {
   }
   if (target.id === 'scenario') scenario = target.value;
   if (target.id === 'csv-file' && target.files[0]) {
-    const file = target.files[0];
+    const file = target.files[0], uploadSession = selected;
     if (file.size > 512000) throw new Error('Use a CSV smaller than 512 KB.');
-    file.text().then(text => action(() => chooseManifest(text,file.name))).catch(() => feedback('Could not read the CSV.',true));
+    file.text().then(text => {
+      if (selected === uploadSession) action(() => chooseManifest(text,file.name));
+    }).catch(() => {
+      if (selected === uploadSession) feedback('Could not read the CSV.',true);
+    });
   }
 }));
 document.addEventListener('input', event => {
@@ -812,7 +833,36 @@ document.addEventListener('click', event => action(() => {
     return;
   }
   if (command === 'reconnect') { bridge?.connectReader(); return; }
-  if (command === 'dashboard' && permits(role,'export')) {
+  if (command === 'reset' && view === 'sessions' && role === 'admin' && !builder?.capture) {
+    if (!window.confirm('Permanently delete all sessions, loaded manifests, scans, the PoC test plan, saved names, and form drafts on this device? ' +
+      'This also stops dashboard sharing. Export evidence first if you need to keep it.')) return;
+    localStorage.removeItem(uiKey);
+    localStorage.removeItem(key);
+    store = {sessions:[],people:[]};
+    ui = {drafts:{}};
+    role = 'operator';
+    selected = undefined;
+    builder = undefined;
+    pendingImport = undefined;
+    rescanReason = '';
+    scenario = 'Missing one';
+    simulatedKeys = false;
+    dashboardUrl = '';
+    dashboardQr = '';
+    includeOtherRecords = false;
+    document.querySelector('#reader-card')?.removeAttribute('open');
+    publish();
+    if (bridge?.shareDashboard) {
+      dashboardResetPending = true;
+      bridge.shareDashboard(false);
+    }
+    feedback('Local data reset.');
+    render();
+    window.scrollTo(0,0);
+    root.querySelector('[data-action="new"]')?.focus({preventScroll:true});
+    return;
+  }
+  if (command === 'dashboard' && permits(role,'export') && !dashboardResetPending) {
     if (!dashboardUrl) {
       // All records by default (hardware sessions too); the Test lead can untick to share sample sessions only.
       includeOtherRecords = document.querySelector('#share-all')?.checked !== false;

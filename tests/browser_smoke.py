@@ -202,19 +202,64 @@ with sync_playwright() as playwright:
     device.get_by_role("button", name="Close PoC day").click()
     expect(device.get_by_text("PoC day closed by Operator C", exact=False)).to_be_visible()
 
+    reset = device.get_by_role("button", name="Reset all local data")
+    expect(reset).to_have_count(0)
+    pick_role(device, "admin")
+    device.get_by_role("button", name="New test session").click()
+    device.get_by_label("Test ID").fill("KP-DRAFT")
+    device.get_by_role("button", name="Sessions").click()
+    before_reset = device.evaluate("""() => {
+      localStorage.setItem('unrelated-preference', 'keep');
+      return ['keypharm-poc-v1', 'keypharm-poc-ui-v1'].map(key => localStorage.getItem(key));
+    }""")
+    assert "KP-DRAFT" in json.loads(before_reset[1])["drafts"].values()
+    dialog_messages = []
+
+    def cancel_reset(dialog):
+        dialog_messages.append(dialog.message)
+        dialog.dismiss()
+
+    device.once("dialog", cancel_reset)
+    reset.click()
+    assert dialog_messages[0].startswith("Permanently delete all sessions")
+    assert "form drafts" in dialog_messages[0]
+    assert device.evaluate("['keypharm-poc-v1', 'keypharm-poc-ui-v1'].map(key => localStorage.getItem(key))") == before_reset
+    expect(device.get_by_text("PoC day closed by Operator C", exact=False)).to_be_visible()
+
+    device.once("dialog", lambda dialog: dialog.accept())
+    reset.click()
+    expect(device.locator("#notice")).to_have_text("Local data reset.")
+    expect(device.get_by_text("0 of 500 labels used")).to_be_visible()
+    assert device.evaluate("['keypharm-poc-v1', 'keypharm-poc-ui-v1'].map(key => localStorage.getItem(key))") == [None, None]
+    assert device.evaluate("localStorage.getItem('unrelated-preference')") == "keep"
+    device.reload()
+    expect(device.get_by_text("No tests yet.", exact=False)).to_be_visible()
+    expect(device.get_by_text("No planned tests yet.", exact=False)).to_be_visible()
+    assert device.evaluate("localStorage.getItem('keypharm-poc-ui-v1')") is None
+    device.get_by_label("Role and name").click()
+    expect(device.locator("#role")).to_have_value("operator")
+    expect(device.get_by_label("Your name")).to_have_value("")
+    expect(device.locator("#people option")).to_have_count(0)
+    device.get_by_role("button", name="New test session").click()
+    expect(device.get_by_label("Test ID")).to_have_value("KP-TEST-01")
+
     # C72 path with a fake Android bridge: on-screen Start scan / Stop scan drives the same reader calls as the trigger.
     c72 = browser.new_page(viewport={"width":360, "height":700})
     c72.on("pageerror", lambda error: errors.append(str(error)))
     c72.add_init_script("""
       window.bridgeCalls = [];
+      window.dashboardCalls = [];
       const fire = (name, data) => setTimeout(() => window.keypharmEvent(name, data), 10);
       window.KeypharmAndroid = {
         connectReader: () => fire('reader', {ready:true, message:'Reader ready', profile:{region:'ETSI', powerDbm:30}}),
         startReader: id => { bridgeCalls.push('start'); fire('started', {id, profile:{region:'ETSI', powerDbm:30}});
           fire('reads', {id, reads:[{epc:'A00000000000000000000001'}]}); },
         stopReader: id => { bridgeCalls.push('stop'); fire('ended', {id, reads:[], interrupted:false}); },
-        feedback: () => {}, publishSnapshot: () => {},
-        shareDashboard: enabled => fire('dashboard', {url: enabled ? 'http://192.0.2.12:8787/12345678-1234-5678-90ab-1234567890ab/' : ''}),
+        feedback: () => {}, publishSnapshot: data => dashboardCalls.push(JSON.parse(data)),
+        shareDashboard: enabled => {
+          dashboardCalls.push(enabled);
+          if (!window.deferDashboardEvents) fire('dashboard', {url: enabled ? 'http://192.0.2.12:8787/12345678-1234-5678-90ab-1234567890ab/' : ''});
+        },
         copyLink: url => { window.copiedLink = url; },
         liveSampleManifest: () => %s
       };""" % json.dumps(open(assets / "model.mjs", encoding="utf-8").read().split("`")[1]))
@@ -250,6 +295,26 @@ with sync_playwright() as playwright:
     expect(c72.get_by_text("Pallet verified by UHF EPC.")).to_be_visible()
     expect(c72.get_by_role("button", name="Start scan")).to_be_enabled()
     assert c72.evaluate("bridgeCalls") == ["start", "stop"]
+
+    c72.get_by_role("button", name="Session details").click()
+    c72.get_by_role("button", name="Sessions").click()
+    pick_role(c72, "admin")
+    c72.evaluate("window.deferDashboardEvents = true")
+    share = c72.get_by_role("button", name="Share web dashboard")
+    share.click()
+    assert c72.evaluate("dashboardCalls.at(-1)") is True
+    assert len(c72.evaluate("dashboardCalls.at(-2).sessions")) == 1
+    c72.once("dialog", lambda dialog: dialog.accept())
+    c72.get_by_role("button", name="Reset all local data").click()
+    assert c72.evaluate("dashboardCalls.slice(-2)") == [{"sessions": []}, False]
+    expect(share).to_be_disabled()
+    c72.evaluate("url => window.keypharmEvent('dashboard', {url})", url)
+    expect(share).to_be_disabled()
+    expect(code).to_have_count(0)
+    expect(c72.get_by_role("button", name="Copy dashboard link")).to_have_count(0)
+    c72.evaluate("window.keypharmEvent('dashboard', {url:''})")
+    expect(share).to_be_enabled()
+    expect(c72.locator("#notice")).to_have_text("Local data reset.")
 
     dashboard = browser.new_page(viewport={"width":1280, "height":800})
     dashboard.on("pageerror", lambda error: errors.append(str(error)))
