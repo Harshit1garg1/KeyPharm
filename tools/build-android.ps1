@@ -30,8 +30,13 @@ $manifestPath = Join-Path $work 'AndroidManifest.xml'
 [xml]$manifest = Get-Content -LiteralPath (Join-Path $src 'AndroidManifest.xml') -Raw
 $manifest.manifest.SetAttribute('package','be.keypharm.rfid.poc')
 $ns = 'http://schemas.android.com/apk/res/android'
-$null = $manifest.manifest.SetAttribute('versionCode',$ns,'1')
-$null = $manifest.manifest.SetAttribute('versionName',$ns,'0.1.0')
+# Version comes from app/build.gradle so the Gradle and offline builds cannot drift.
+$gradle = Get-Content -LiteralPath (Join-Path $project 'app\build.gradle') -Raw
+$versionCode = [regex]::Match($gradle, 'versionCode (\d+)').Groups[1].Value
+$versionName = [regex]::Match($gradle, "versionName '([^']+)'").Groups[1].Value
+if (!$versionCode -or !$versionName) { throw 'Could not read versionCode/versionName from app/build.gradle.' }
+$null = $manifest.manifest.SetAttribute('versionCode',$ns,$versionCode)
+$null = $manifest.manifest.SetAttribute('versionName',$ns,$versionName)
 $null = $manifest.manifest.application.SetAttribute('debuggable',$ns,'true')
 $null = $manifest.manifest.application.activity.SetAttribute('name',$ns,'be.keypharm.rfid.MainActivity')
 $null = $manifest.manifest.application.provider.SetAttribute('name',$ns,'be.keypharm.rfid.EvidenceProvider')
@@ -64,7 +69,7 @@ $keystore = Join-Path $project 'build\debug.keystore'
 if (!(Test-Path -LiteralPath $keystore)) {
     Run "$Jdk\bin\keytool.exe" @('-genkeypair','-keystore',$keystore,'-storepass','android','-alias','androiddebugkey','-keypass','android','-dname','CN=Android Debug','-keyalg','RSA','-keysize','2048','-validity','10000')
 }
-$output = Join-Path $project 'build\keypharm-poc-debug.apk'
+$output = Join-Path $project "build\keypharm-poc-$versionName-debug.apk"
 Run "$tool\apksigner.bat" @('sign','--ks',$keystore,'--ks-pass','pass:android','--key-pass','pass:android','--out',$output,$aligned)
 Run "$tool\apksigner.bat" @('verify',$output)
 Write-Output $output

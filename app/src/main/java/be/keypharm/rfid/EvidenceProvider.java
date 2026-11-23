@@ -15,7 +15,7 @@ public final class EvidenceProvider extends ContentProvider {
 
     private File file(Uri uri) throws FileNotFoundException {
         String name = uri.getLastPathSegment();
-        if (name == null || !name.matches("keypharm-[0-9]+\\.(csv|txt)")) throw new FileNotFoundException();
+        if (name == null || !name.matches("keypharm-[0-9]+(-records)?\\.(csv|txt)")) throw new FileNotFoundException();
         return new File(getContext().getCacheDir(), name);
     }
 

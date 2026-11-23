@@ -33,9 +33,7 @@ final class C72Reader {
             }
             int region = sdk.getFrequencyMode();
             int power = sdk.getPower();
-            profile = json("name", "C72 ETSI", "model", Build.MODEL, "build", Build.DISPLAY,
-                    "firmware", sdk.getVersion(), "region", region == ETSI ? "ETSI" : "Unverified (" + region + ")",
-                    "powerDbm", power > 0 ? power : JSONObject.NULL, "antenna", "Not reported");
+            profile = settings(region, power);
             if (region != ETSI || power <= 0) {
                 state = json("ready", false, "profile", profile,
                         "message", "Check ETSI region and power in the approved reader setup");
@@ -50,8 +48,13 @@ final class C72Reader {
         }
     }
 
-    boolean start() {
-        if (sdk == null) return false;
+    /** Why the last start() returned null, for the run's interruption message. */
+    String failure = "";
+
+    /** Re-reads region and power, then starts inventory. Returns the settings used for this run (FR-08), or null. */
+    JSONObject start() {
+        failure = "UHF inventory did not start";
+        if (sdk == null) return null;
         final long attempt;
         synchronized (pending) {
             pending.clear();
@@ -60,12 +63,20 @@ final class C72Reader {
             attempt = ++generation;
         }
         try {
+            int region = sdk.getFrequencyMode();
+            int power = sdk.getPower();
+            JSONObject used = settings(region, power);
+            if (region != ETSI || power <= 0) {
+                failure = "Reader is not on ETSI with a readable power setting";
+                haltReads();
+                return null;
+            }
             boolean unfiltered = sdk.setFilter(IUHF.Bank_EPC, 0, 0, "")
                     & sdk.setFilter(IUHF.Bank_TID, 0, 0, "")
                     & sdk.setFilter(IUHF.Bank_USER, 0, 0, "");
             if (!unfiltered || !sdk.setEPCMode()) {
                 haltReads();
-                return false;
+                return null;
             }
             sdk.setInventoryCallback(tag -> {
                 synchronized (pending) {
@@ -77,12 +88,23 @@ final class C72Reader {
                     pending.add(json("epc", tag.getEPC(), "rssi", tag.getRssi(), "ms", System.currentTimeMillis()));
                 }
             });
-            if (sdk.startInventoryTag()) return true;
+            if (sdk.startInventoryTag()) {
+                profile = used;
+                return used;
+            }
         } catch (Exception | LinkageError ignored) {
             disconnect();
         }
         haltReads();
-        return false;
+        return null;
+    }
+
+    private JSONObject settings(int region, int power) {
+        String device = android.provider.Settings.Secure.getString(context.getContentResolver(),
+                android.provider.Settings.Secure.ANDROID_ID);
+        return json("name", "C72 ETSI", "model", Build.MODEL, "build", Build.DISPLAY, "deviceId", device,
+                "firmware", sdk.getVersion(), "region", region == ETSI ? "ETSI" : "Unverified (" + region + ")",
+                "powerDbm", power > 0 ? power : JSONObject.NULL, "antenna", "Not reported");
     }
 
     boolean stop() {

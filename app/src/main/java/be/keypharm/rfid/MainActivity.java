@@ -3,6 +3,8 @@ package be.keypharm.rfid;
 import android.app.Activity;
 import android.content.ClipData;
 import android.content.Intent;
+import android.media.AudioManager;
+import android.media.ToneGenerator;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -34,10 +36,13 @@ public final class MainActivity extends Activity {
     private boolean destroyed;
     private volatile boolean foreground;
     private String template;
+    private ToneGenerator tones;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         reader = new C72Reader(getApplicationContext());
+        try { tones = new ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80); }
+        catch (RuntimeException unavailable) { tones = null; }
         web = new WebView(this);
         web.setBackgroundColor(0xffeef2f5);
         web.getSettings().setJavaScriptEnabled(true);
@@ -150,6 +155,7 @@ public final class MainActivity extends Activity {
     @Override protected void onDestroy() {
         destroyed = true;
         if (dashboard != null) dashboard.close();
+        if (tones != null) tones.release();
         main.removeCallbacksAndMessages(null);
         hardware.execute(reader::disconnect);
         hardware.shutdown();
@@ -166,11 +172,15 @@ public final class MainActivity extends Activity {
 
         @JavascriptInterface public void startReader(String id) {
             hardware.execute(() -> {
-                if (!foreground || hardwareRun != null || !reader.start()) {
-                    event("ended", C72Reader.json("id", id, "interrupted", true, "message", "UHF inventory did not start"));
+                boolean allowed = foreground && hardwareRun == null;
+                JSONObject settings = allowed ? reader.start() : null;
+                if (settings == null) {
+                    event("ended", C72Reader.json("id", id, "interrupted", true,
+                            "message", allowed ? reader.failure : "UHF inventory did not start"));
                     return;
                 }
                 hardwareRun = id;
+                event("started", C72Reader.json("id", id, "profile", settings));
                 main.removeCallbacks(tick);
                 main.postDelayed(tick, 200);
             });
@@ -181,6 +191,19 @@ public final class MainActivity extends Activity {
         }
 
         @JavascriptInterface public void publishSnapshot(String json) { snapshot = json; }
+
+        /** Short beep and buzz for a new unique EPC; longer error tone for reader loss or a failed scan. */
+        @JavascriptInterface public void feedback(String kind) {
+            boolean error = "error".equals(kind);
+            main.post(() -> {
+                if (destroyed) return;
+                if (tones != null) tones.startTone(error ? ToneGenerator.TONE_PROP_NACK : ToneGenerator.TONE_PROP_BEEP, error ? 400 : 60);
+                android.os.Vibrator vibrator = getSystemService(android.os.Vibrator.class);
+                if (vibrator != null && vibrator.hasVibrator()) {
+                    vibrator.vibrate(android.os.VibrationEffect.createOneShot(error ? 300 : 40, android.os.VibrationEffect.DEFAULT_AMPLITUDE));
+                }
+            });
+        }
 
         @JavascriptInterface public void shareDashboard(boolean enable) {
             main.post(() -> {
@@ -223,17 +246,18 @@ public final class MainActivity extends Activity {
             });
         }
 
-        @JavascriptInterface public void exportEvidence(String csv, String summary) {
+        @JavascriptInterface public void exportEvidence(String evidence, String records, String summary) {
             main.post(() -> {
                 try {
                     long time = System.currentTimeMillis();
                     ArrayList<Uri> streams = new ArrayList<>();
-                    streams.add(writeFile("keypharm-" + time + ".csv", csv));
+                    streams.add(writeFile("keypharm-" + time + ".csv", evidence));
+                    streams.add(writeFile("keypharm-" + time + "-records.csv", records));
                     streams.add(writeFile("keypharm-" + time + ".txt", summary));
                     Intent send = new Intent(Intent.ACTION_SEND_MULTIPLE).setType("text/*");
                     send.putParcelableArrayListExtra(Intent.EXTRA_STREAM, streams);
                     ClipData clip = ClipData.newUri(getContentResolver(), "Evidence", streams.get(0));
-                    clip.addItem(new ClipData.Item(streams.get(1)));
+                    for (Uri stream : streams.subList(1, streams.size())) clip.addItem(new ClipData.Item(stream));
                     send.setClipData(clip);
                     send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                     startActivity(Intent.createChooser(send, "Save or share POC evidence"));

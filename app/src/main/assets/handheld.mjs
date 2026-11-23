@@ -1,5 +1,5 @@
 import {SAMPLE, EXTRA_EPC, normalizeEpc, parseManifest, compare, scanDelta, canContinue, canClose,
-  roles, permits, allocationTotal, dashboardSnapshot, evidenceCsv, evidenceSummary} from './model.mjs';
+  roles, permits, allocationTotal, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary} from './model.mjs';
 
 const root = document.querySelector('#app');
 const notice = document.querySelector('#notice');
@@ -286,6 +286,7 @@ function simReads(s, capture) {
 function collect(reads) {
   const s = session();
   const observations = active.kind === 'cartons' ? latest(s).observations : active.observations;
+  let fresh = 0;
   for (const read of reads ?? []) {
     const epc = normalizeEpc(read.epc);
     if (!/^[0-9A-F]{2,128}$/.test(epc) || epc.length % 2) {
@@ -293,11 +294,14 @@ function collect(reads) {
       continue;
     }
     const at = read.ms ? new Date(read.ms).toISOString() : now();
-    const entry = observations[epc] ??= {count:0,first:at};
+    if (!observations[epc]) { observations[epc] = {count:0,first:at}; fresh++; }
+    const entry = observations[epc];
     entry.last = at;
     entry.count++;
     if (read.rssi != null) entry.rssi = read.rssi;
   }
+  // One short beep/vibration per batch with a new unique EPC; repeat reads stay silent.
+  if (fresh) bridge?.feedback('read');
   if (active.hardware && reads?.length && Date.now() >= (active.checkpoint ?? 0)) {
     active.checkpoint = Date.now() + 1000;
     try {
@@ -346,6 +350,7 @@ function finalize(interrupted, message) {
       log(s,interrupted ? 'Scan interrupted' : 'Scan finished',interrupted ? run.error : run.result.status,capture.id);
     }
   });
+  if (interrupted) bridge?.feedback('error');
   active = undefined;
   rescanReason = '';
   feedback(capture.kind === 'pallet' && !s.identified ? 'Pallet EPC not confirmed. Isolate the pallet tag and retry.' : '',capture.kind === 'pallet' && !s.identified);
@@ -385,6 +390,12 @@ window.keypharmEvent = (name,data) => action(() => {
   if (name === 'press' && session()?.source === 'C72 hardware') begin();
   if (name === 'release' && active?.hardware) end();
   if (name === 'cancel' && active) end(true);
+  // Settings read back from the reader as this run started (FR-08), replacing the snapshot from the last connect.
+  if (name === 'started' && active?.id === data.id && data.profile) {
+    reader = {...reader, profile:data.profile};
+    const s = session(), capture = active.kind === 'cartons' ? latest(s) : s.palletPending;
+    if (capture) commit(() => { capture.profile = data.profile; });
+  }
   if (name === 'reads' && active?.id === data.id) {
     collect(data.reads);
     updateScan();
@@ -434,9 +445,9 @@ root.addEventListener('click', event => action(() => {
   }
   if (command === 'copy' && permits(role,'export')) { bridge?.copyLink(dashboardUrl); feedback('Dashboard link copied.'); return; }
   if (command === 'export' && permits(role,'export')) {
-    const csv = evidenceCsv(store), summary = evidenceSummary(store);
-    if (bridge) bridge.exportEvidence(csv,summary);
-    else { download('keypharm-evidence.csv',csv); download('keypharm-summary.txt',summary); }
+    const evidence = specEvidenceCsv(store), records = evidenceCsv(store), summary = evidenceSummary(store);
+    if (bridge) bridge.exportEvidence(evidence,records,summary);
+    else { download('keypharm-evidence.csv',evidence); download('keypharm-records.csv',records); download('keypharm-summary.txt',summary); }
     return;
   }
   if (command === 'continue' && permits(role,'confirm') && !s.confirmedAt && canContinue(s,latest(s))) {
