@@ -18,6 +18,7 @@ For a physical test, start a session with **C72 hardware**, import the matching 
 - Use JDK 17 and Android SDK platform/build tools 34. Place the Chainway `DeviceAPI_ver20251103_release.aar` in `app/libs`. The local sample at `../Demo-uhf_as/uhf-uart-demo/app/libs` supplied this POC build. [Chainway C72 SDK support](https://www.chainway.net/Support/Info/10).
 - Run `./gradlew.bat :app:assembleDebug` with access to the Gradle dependencies. The verified Windows offline alternative is `./tools/build-android.ps1`, which writes `build/keypharm-poc-<versionName>-debug.apk` (version read from `app/build.gradle`) using the installed SDK tools.
 - Install or update with `adb -d install -r build/keypharm-poc-<versionName>-debug.apk`. Keep the same signing key for updates so Android preserves local app data. The offline build creates its demo key at `build/debug.keystore`.
+- To install next to an existing copy instead of replacing it, build with a different package: `./tools/build-android.ps1 -Package be.keypharm.rfid.poc.dev -Label "Keypharm RFID POC Dev"` (writes `build/keypharm-poc-<versionName>-dev-debug.apk`). Each copy keeps its own local data. Only one app can use the UHF reader at a time, so close the other copy before scanning.
 - Run `node --test tests/model.test.mjs`. Optional browser smoke test with Python Playwright and Chromium is `python tests/browser_smoke.py`.
 
 | To change | Edit |

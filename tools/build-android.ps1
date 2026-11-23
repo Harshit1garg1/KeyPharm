@@ -1,6 +1,9 @@
 param(
     [string]$Sdk = "$env:LOCALAPPDATA\Android\Sdk",
-    [string]$Jdk = $env:JAVA_HOME
+    [string]$Jdk = $env:JAVA_HOME,
+    # A different package installs next to the existing app instead of replacing it, e.g. -Package be.keypharm.rfid.poc.dev -Label 'Keypharm RFID POC Dev'.
+    [string]$Package = 'be.keypharm.rfid.poc',
+    [string]$Label = ''
 )
 $ErrorActionPreference = 'Stop'
 if (!$Jdk) { $Jdk = 'C:\Program Files\Java\jdk-17' }
@@ -28,7 +31,7 @@ function Run([string]$program, [string[]]$arguments) {
 }
 $manifestPath = Join-Path $work 'AndroidManifest.xml'
 [xml]$manifest = Get-Content -LiteralPath (Join-Path $src 'AndroidManifest.xml') -Raw
-$manifest.manifest.SetAttribute('package','be.keypharm.rfid.poc')
+$manifest.manifest.SetAttribute('package',$Package)
 $ns = 'http://schemas.android.com/apk/res/android'
 # Version comes from app/build.gradle so the Gradle and offline builds cannot drift.
 $gradle = Get-Content -LiteralPath (Join-Path $project 'app\build.gradle') -Raw
@@ -40,7 +43,9 @@ $null = $manifest.manifest.SetAttribute('versionName',$ns,$versionName)
 $null = $manifest.manifest.application.SetAttribute('debuggable',$ns,'true')
 $null = $manifest.manifest.application.activity.SetAttribute('name',$ns,'be.keypharm.rfid.MainActivity')
 $null = $manifest.manifest.application.provider.SetAttribute('name',$ns,'be.keypharm.rfid.EvidenceProvider')
-$null = $manifest.manifest.application.provider.SetAttribute('authorities',$ns,'be.keypharm.rfid.poc.evidence')
+$null = $manifest.manifest.application.provider.SetAttribute('authorities',$ns,"$Package.evidence")
+if ($Label) { $null = $manifest.manifest.application.SetAttribute('label',$ns,$Label) }
+$suffix = if ($Package -ne 'be.keypharm.rfid.poc') { '-' + $Package.Split('.')[-1] } else { '' }
 $manifest.Save($manifestPath)
 $resources = Join-Path $work 'resources.zip'
 $unsigned = Join-Path $work 'unsigned.apk'
@@ -69,7 +74,7 @@ $keystore = Join-Path $project 'build\debug.keystore'
 if (!(Test-Path -LiteralPath $keystore)) {
     Run "$Jdk\bin\keytool.exe" @('-genkeypair','-keystore',$keystore,'-storepass','android','-alias','androiddebugkey','-keypass','android','-dname','CN=Android Debug','-keyalg','RSA','-keysize','2048','-validity','10000')
 }
-$output = Join-Path $project "build\keypharm-poc-$versionName-debug.apk"
+$output = Join-Path $project "build\keypharm-poc-$versionName$suffix-debug.apk"
 Run "$tool\apksigner.bat" @('sign','--ks',$keystore,'--ks-pass','pass:android','--key-pass','pass:android','--out',$output,$aligned)
 Run "$tool\apksigner.bat" @('verify',$output)
 Write-Output $output
