@@ -48,6 +48,7 @@ with sync_playwright() as playwright:
     device.route("https://handheld.test/**", serve_assets)
     device.goto("https://handheld.test/handheld.html")
     assert device.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth === 339")
+    assert device.locator(".brand").bounding_box()["x"] < device.locator("#who").bounding_box()["x"]
     pick_role(device, "admin")
     device.get_by_label("One test per line: Test ID, then description").fill("KP-TEST-01 Mixed pallet check\nKP-TEST-02 Ginger pallet")
     device.get_by_role("button", name="Save test plan").click()
@@ -233,9 +234,14 @@ with sync_playwright() as playwright:
     dashboard.goto("https://dashboard.test/dashboard.html")
     assert dashboard.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth === 339")
     expect(dashboard.get_by_role("status")).to_contain_text("Handheld online")
-    expect(dashboard.get_by_role("heading", name="KP-TEST-01")).to_be_visible()
-    expect(dashboard.get_by_text("Unexpected EPC neighbouring tag",exact=True)).to_be_visible()
+    expect(dashboard.get_by_role("heading", name="Overview")).to_be_visible(timeout=3000)
+    expect(dashboard.locator("[data-total=sessions]")).to_have_text("1")
+    expect(dashboard.locator("[data-total=scans]")).to_have_text("3")
+    expect(dashboard.locator("[data-total=exceptions]")).to_have_text("2")
     dashboard.screenshot(path="build/dashboard-smoke.png", full_page=True)
+    dashboard.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Sessions").click()
+    expect(dashboard.get_by_role("heading", name="KP-TEST-01")).to_be_visible()
+    expect(dashboard.locator("#detail").get_by_text("Unexpected EPC neighbouring tag",exact=True)).to_be_visible()
     service["online"] = False
     dashboard.get_by_role("button", name="Refresh records").click()
     expect(dashboard.get_by_role("status")).to_contain_text("Handheld offline")
@@ -244,8 +250,29 @@ with sync_playwright() as playwright:
     service["records"]["sessions"][0]["testId"] = "KP-RECONNECTED"
     dashboard.get_by_role("button", name="Refresh records").click()
     expect(dashboard.get_by_role("heading", name="KP-RECONNECTED")).to_be_visible()
+    for i in range(55):
+        service["records"]["sessions"].append({
+            "id": f"older-{i}", "testId": f"Earlier session {i:02}", "createdAt": f"2025-01-{i // 2 + 1:02}T{i % 2:02}:00:00Z",
+            "runs": [], "logs": [{"action": f"Earlier event {i:02}", "at": f"2025-01-{i // 2 + 1:02}T{i % 2:02}:00:00Z"}]
+        })
+    dashboard.get_by_role("button", name="Refresh records").click()
+    expect(dashboard.locator("[data-total=sessions]")).to_have_text("56")
+    expect(dashboard.get_by_text("Showing 50 of 56 records.")).to_be_visible()
+    expect(dashboard.locator("#records button[data-id]")).to_have_count(50)
+    expect(dashboard.get_by_role("button", name="Earlier session 00",exact=False)).to_have_count(0)
+    dashboard.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Exceptions").click()
+    expect(dashboard.locator("#records button[data-id]")).to_have_count(2)
+    dashboard.get_by_role("button", name="Unexpected EPC", exact=False).click()
+    expect(dashboard.locator("#detail")).to_contain_text("E00000000000000000000009")
+    dashboard.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Activity").click()
+    expect(dashboard.locator("#records button[data-id]")).to_have_count(50)
     dashboard.set_viewport_size({"width":360, "height":700})
     assert dashboard.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    dashboard.get_by_role("button", name="Sections").click()
+    dashboard.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Overview").click()
+    expect(dashboard.get_by_role("heading", name="Overview")).to_be_visible()
+    expect(dashboard.get_by_role("navigation", name="Dashboard sections")).to_be_hidden()
+    dashboard.screenshot(path="build/dashboard-mobile.png")
 
     hardware = browser.new_page(viewport={"width":360, "height":700})
     hardware.on("pageerror", lambda error: errors.append(str(error)))

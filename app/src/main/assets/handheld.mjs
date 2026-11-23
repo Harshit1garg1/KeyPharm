@@ -109,7 +109,7 @@ try {
   }
 } catch { storageError = true; }
 
-// Identity sits in a small menu at the top left. The name signs every record (see actor()); roles stay local.
+// The name in the header signs every record (see actor()); roles stay local.
 function identityMenu(open) {
   const locked = active || powerRequest ? 'disabled' : '';
   const name = store.person;

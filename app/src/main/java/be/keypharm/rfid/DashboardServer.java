@@ -12,6 +12,7 @@ final class DashboardServer implements AutoCloseable {
     private static final int PORT = 8787;
     private static final Map<String,String> FILES = Map.of(
             "", "dashboard.html", "dashboard.mjs", "dashboard.mjs", "style.css", "style.css",
+            "dashboard-model.mjs", "dashboard-model.mjs", "dashboard.css", "dashboard.css",
             "keypharm-logo.png", "keypharm-logo.png");
     private final AssetManager assets;
     private final Supplier<String> snapshot;

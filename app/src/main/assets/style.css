@@ -1,10 +1,11 @@
 /* Hallmark | Operate | Keypharm scan bench | brand: KeyPharm (spec 2026-11-23) */
 /* Critique: the official mark anchors the header while scan state remains the strongest signal.
-   Handheld: identity lives in a top-left menu; each session screen leads with the one step due now. */
+   Handheld: identity sits on the right; each session screen leads with the step due now. */
 :root {
   --paper:#fcfdfc; --workspace:#f1f5f2; --ink:#141215; --subtle:#44564b; --line:#c6d3ca;
   --action:#064d19; --action-deep:#013b10; --focus:#00654b; --match:#236743; --hold:#a33a28;
   --sky:#e3f2ec; --leaf:#e4f1e9; --clay:#f9e9e5; --amber:#704409; --amber-surface:#fff2d9;
+  --menu-shadow:rgb(20 18 21 / .14);
   --text:system-ui,"Segoe UI",sans-serif; --code:ui-monospace,Consolas,monospace;
 }
 * {box-sizing:border-box}
@@ -102,7 +103,7 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 @media(max-width:760px) {.warehouse {grid-template-columns:minmax(0,1fr)}}
 @media(max-width:420px) {.shell,.mast-inner {padding:12px}.panel {padding:12px}.fields {grid-template-columns:minmax(0,1fr)}.pair {gap:8px}.counts strong {font-size:21px}}
 
-/* Identity menu, top left. Floats, so it is the one resting surface with a shadow. */
+/* The identity menu opens inward from the right edge. */
 .handheld .mast-inner {min-height:56px;padding-top:8px;padding-bottom:8px}
 #who {position:relative;min-width:0}
 .who {position:relative}
@@ -116,7 +117,7 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .who-text small {font-size:12px;font-weight:500}
 .who-chevron {flex:none;color:var(--subtle);transition:transform .15s ease-out}
 .who[open] .who-chevron {transform:rotate(180deg)}
-.who-sheet {position:absolute;z-index:10;top:calc(100% + 8px);left:0;width:min(320px,calc(100vw - 24px));display:grid;gap:12px;padding:16px;background:var(--paper);border:1px solid var(--line);border-radius:12px;box-shadow:0 8px 24px rgb(20 18 21 / .14)}
+.who-sheet {position:absolute;z-index:10;top:calc(100% + 8px);right:0;width:min(320px,calc(100dvw - 24px));display:grid;gap:12px;padding:16px;background:var(--paper);border-radius:12px;box-shadow:0 8px 24px var(--menu-shadow)}
 @media(prefers-reduced-motion:reduce) {.who-chevron {transition:none}}
 
 /* Back link above a session, not a full-width button. */
@@ -133,7 +134,7 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .steps li {counter-increment:step;display:flex;align-items:center;justify-content:center;gap:4px;min-height:36px;padding:4px;border-radius:7px;background:var(--paper);border:1px solid var(--line);color:var(--subtle);font-size:13px;font-weight:650;text-align:center}
 .steps li::before {content:counter(step)}
 .steps li[data-state=done] {background:var(--leaf);border-color:var(--leaf);color:var(--match)}
-.steps li[data-state=done]::before {content:"";width:9px;height:5px;margin-bottom:3px;border:solid currentColor;border-width:0 0 2px 2px;transform:rotate(-45deg)}
+.steps li[data-state=done]::before {content:"";width:9px;height:5px;margin-bottom:4px;border:solid currentColor;border-width:0 0 2px 2px;transform:rotate(-45deg)}
 .steps li[data-state=current] {background:var(--action);border-color:var(--action);color:var(--paper)}
 .panel.next {border:2px solid var(--action)}
 .panel.next[data-step=done] {border-color:var(--line)}
