@@ -1,6 +1,7 @@
 import {SAMPLE, EXTRA_EPC, normalizeEpc, parseManifest, compare, scanDelta, canContinue, canClose,
   roles, permits, allocationTotal, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary,
   parsePlan, planCoverage, closePlanErrors, lockPallet, lockTo, otherPallet, inManifest} from './model.mjs';
+import qrcode from './qrcode-generator.mjs';
 
 const root = document.querySelector('#app');
 const who = document.querySelector('#who');
@@ -24,7 +25,7 @@ const now = () => new Date().toISOString();
 const actor = () => {
   if (!store.person) {
     document.querySelector('#who-menu')?.setAttribute('open','');
-    throw new Error('Enter your name in the menu at the top left before recording anything.');
+    throw new Error('Enter your name in the menu at the top right before recording anything.');
   }
   return store.person;
 };
@@ -59,6 +60,7 @@ let active;
 let reader = {ready:false,message:'Checking reader…'};
 let powerRequest;
 let dashboardUrl = '';
+let dashboardQr = '';
 let includeOtherRecords = false;
 let simulatedKeys = false;
 
@@ -173,9 +175,10 @@ function history() {
       (bridge ? button('dashboard',dashboardUrl ? 'Stop dashboard sharing' : 'Share web dashboard','class="secondary"') : '') +
       '</div>' + (bridge && role === 'admin' && !dashboardUrl ?
         '<label class="check"><input id="share-all" type="checkbox">Include hardware and imported records</label>' : '') +
-      (dashboardUrl ? '<p class="line">Open this private link on the same demo network. ' +
+      (dashboardUrl ? '<div class="line dashboard-share"><div class="dashboard-qr" role="img" aria-label="Dashboard QR code">' +
+      dashboardQr + '</div><div><p>Scan the QR code or open the private link on the same Wi-Fi network. ' +
       (includeOtherRecords ? 'All local sessions are shared.' : 'Sample simulation sessions are shared.') + '</p><p><code>' + escape(dashboardUrl) +
-      '</code></p>' + button('copy','Copy dashboard link','class="secondary"') : '') + '</section>' : '');
+      '</code></p>' + button('copy','Copy dashboard link','class="secondary"') + '</div></div>' : '') + '</section>' : '');
 }
 // Planned tests for the day (FR-28 coverage): the Test lead enters them, closing the day needs a reason for every test not run.
 function planPanel() {
@@ -589,7 +592,16 @@ window.keypharmEvent = (name,data) => action(() => {
   if (name === 'manifest-file') chooseManifest(data.text,data.name);
   if (name === 'dashboard') {
     dashboardUrl = data.url ?? '';
-    if (!dashboardUrl) { includeOtherRecords = false; publish(); }
+    dashboardQr = '';
+    if (dashboardUrl) {
+      const qr = qrcode(0, 'M');
+      qr.addData(dashboardUrl);
+      qr.make();
+      dashboardQr = qr.createSvgTag({scalable:true});
+    } else {
+      includeOtherRecords = false;
+      publish();
+    }
     feedback(data.message ?? '', Boolean(data.message));
     render();
   }

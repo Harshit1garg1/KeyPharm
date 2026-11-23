@@ -31,6 +31,11 @@ small,.muted {color:var(--subtle)}
 #notice[data-error],.status.hold,.status.interrupted,.status.incomplete {color:var(--hold);background:var(--clay)}
 .status.match {color:var(--match);background:var(--leaf)}
 .line {border-top:1px solid var(--line);padding-top:12px;margin-top:12px}
+.dashboard-share {display:flex;align-items:center;flex-wrap:wrap;gap:16px}
+.dashboard-share > div:last-child {flex:1 1 220px;min-width:0;overflow-wrap:anywhere}
+.dashboard-share p:first-child {margin-top:0}
+.dashboard-qr {width:164px;max-width:100%;border:1px solid var(--line);border-radius:8px;overflow:clip}
+.dashboard-qr svg {display:block;width:100%;height:auto}
 .panel {background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:16px;margin:12px 0}
 .stack {display:grid;gap:12px}
 .row {display:flex;align-items:center;gap:12px;flex-wrap:wrap}

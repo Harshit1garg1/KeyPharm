@@ -18,7 +18,7 @@ def serve_assets(route):
 
 
 def pick_role(page, role, close=True):
-    # Role and name live in the identity menu at the top left; it floats over the screen while open.
+    # Role and name live in the identity menu at the top right; it floats over the screen while open.
     if page.locator("#who-menu").get_attribute("open") is None:
         page.get_by_label("Role and name").click()
     page.locator("#role").select_option(role)
@@ -195,6 +195,8 @@ with sync_playwright() as playwright:
           fire('reads', {id, reads:[{epc:'A00000000000000000000001'}]}); },
         stopReader: id => { bridgeCalls.push('stop'); fire('ended', {id, reads:[], interrupted:false}); },
         feedback: () => {}, publishSnapshot: () => {},
+        shareDashboard: enabled => fire('dashboard', {url: enabled ? 'http://192.0.2.12:8787/12345678-1234-5678-90ab-1234567890ab/' : ''}),
+        copyLink: url => { window.copiedLink = url; },
         liveSampleManifest: () => %s
       };""" % json.dumps(open(assets / "model.mjs", encoding="utf-8").read().split("`")[1]))
     c72.route("https://handheld.test/**", serve_assets)
@@ -202,6 +204,17 @@ with sync_playwright() as playwright:
     c72.evaluate("localStorage.clear()")
     c72.reload()
     as_person(c72, "admin", "Lead A")
+    c72.get_by_role("button", name="Share web dashboard").click()
+    code = c72.get_by_role("img", name="Dashboard QR code")
+    expect(code.locator("svg path")).to_be_visible()
+    code.screenshot(path="build/dashboard-qr-smoke.png")
+    assert c72.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    c72.get_by_role("button", name="Copy dashboard link").click()
+    url = "http://192.0.2.12:8787/12345678-1234-5678-90ab-1234567890ab/"
+    assert c72.evaluate("copiedLink") == url
+    c72.get_by_role("button", name="Stop dashboard sharing").click()
+    expect(code).to_have_count(0)
+    expect(c72.get_by_text(url, exact=True)).to_have_count(0)
     c72.get_by_role("button", name="New test session").click()
     c72.get_by_label("Reader source").select_option("C72 hardware")
     c72.get_by_role("button", name="Create session").click()
