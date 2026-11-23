@@ -3,3 +3,4 @@
 /build/
 /app/build/
 /app/libs/*.aar
+/app/src/main/assets/private-live-sample.csv

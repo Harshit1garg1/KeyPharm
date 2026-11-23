@@ -48,9 +48,11 @@ if ($Label) { $null = $manifest.manifest.application.SetAttribute('label',$ns,$L
 $suffix = if ($Package -ne 'be.keypharm.rfid.poc') { '-' + $Package.Split('.')[-1] } else { '' }
 $manifest.Save($manifestPath)
 $resources = Join-Path $work 'resources.zip'
+$appResources = Join-Path $work 'app-resources.zip'
 $unsigned = Join-Path $work 'unsigned.apk'
 Run "$tool\aapt2.exe" @('compile','--dir',"$vendorDir\res",'-o',$resources)
-Run "$tool\aapt2.exe" @('link','-I',$android,'--manifest',$manifestPath,'--min-sdk-version','30','--target-sdk-version','34','-A',"$src\assets",'--java',$generated,'--extra-packages','com.rscja.deviceapi','-o',$unsigned,$resources)
+Run "$tool\aapt2.exe" @('compile','--dir',"$src\res",'-o',$appResources)
+Run "$tool\aapt2.exe" @('link','-I',$android,'--manifest',$manifestPath,'--min-sdk-version','30','--target-sdk-version','34','-A',"$src\assets",'--java',$generated,'--extra-packages','com.rscja.deviceapi','-o',$unsigned,$resources,$appResources)
 $sources = @(Get-ChildItem -LiteralPath "$src\java",$generated -Recurse -Filter *.java | ForEach-Object FullName)
 Run "$Jdk\bin\javac.exe" (@('--release','17','-encoding','UTF-8','-classpath',"$android;$aarClasses",'-d',$classes) + $sources)
 $appJar = Join-Path $work 'app.jar'

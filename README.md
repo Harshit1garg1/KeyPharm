@@ -6,14 +6,26 @@ Offline C72 handheld workflow with a read-only web dashboard. Use Simulation to 
 
 1. Open **Keypharm RFID POC** on the C72. Create a test session and choose **Simulation**.
 2. As **Test lead**, enter the day's planned tests under **PoC test plan** (one per line: Test ID, then description). New sessions pre-fill the first test not yet run. Enter **Your name** at the top (it signs every record and is remembered for next time). Select **Test lead**, load the sample manifest, and save it. Select **Supervisor**, pick the verifier's name, and record physical verification. Return to **Operator**.
-3. Hold and release the demo trigger to identify the pallet. Hold and release again for the first carton scan. The default simulated run misses one carton.
-4. Select **Unexpected extra**, enter a rescan reason, and retry. Continue stays disabled. Repeat with **Clean match**. Continue enables after release. Previous attempts remain available.
+3. Tap **Open pallet scanner**, then hold and release the demo trigger to identify the pallet. Once the pallet matches, the app opens **Scan cartons**. Hold and release again. The default simulated run misses one carton.
+4. Select **Unexpected extra**, enter a rescan reason, and retry. Continue stays disabled. Repeat with **Clean match**. Continue enables after release. The Carton status list labels expected, waiting, missing and unexpected EPCs. Open **Session details** for previous attempts and investigations.
 5. Add a note to any run if useful. Confirm the match, then review and close the test. **Export this test** exports just that record. From **Sessions**, export the evidence through Android's share sheet: `keypharm-<time>.csv` (functional design section 8 columns, one row per EPC per run), `keypharm-<time>-records.csv` (full session record and audit log) and a readable summary.
 6. Tap **Share web dashboard**. Open the private link in a browser on the same trusted Wi-Fi network, with the handheld app running. The browser fetches committed records and logs only while the app is reachable. If the connection drops, an already open dashboard shows the last fetched records and their refresh time. Stop sharing from the handheld when finished.
 
-For a physical test, start a session with **C72 hardware**, import the matching pallet and carton EPCs, verify the contents, and tap **Start scan** / **Stop scan** or hold the physical trigger. Check the reader status before scanning. The sample manifest contains synthetic EPCs.
+For a physical test, start a session with **C72 hardware**. The Test lead can select **Use live sample** on a build containing the captured set, or **Choose CSV** to import a different set. Verify the contents, open the scanner, then tap **Start scan** / **Stop scan** or hold the trigger near the pallet tag. Both scan steps use the power selected by the Test lead. Other tags can stay nearby during pallet identification. Only the manifest's pallet EPC can confirm the pallet. When **Scan cartons** opens, hold the trigger again. That step flags unexpected EPCs and excludes the pallet EPC from carton counts.
+
+Simulation uses a separate synthetic sample. To build with the physical sample, place the validated CSV at `app/src/main/assets/private-live-sample.csv`. This file is ignored by Git and bundled in that APK. Keep APKs containing live EPCs within the test team.
+
+To adjust the range, select **Test lead** in an open hardware session and use **Reader settings**. The C72 supports 5–30 dBm for this POC. Set power while idle, verify the displayed read-back, and return to the approved test power after sorting tags. The ETSI region remains read-only. The session log records confirmed changes, and each scan records its actual power.
 
 ## Build and update
+
+For physical tag testing, convert a Chainway UHF XLS export on a PC with Python and `xlrd` installed:
+
+```powershell
+python tools/uhf-xls-to-manifests.py input.xls build/live-manifests
+```
+
+The converter uses workbook order, with up to 14 tags per test pallet. Each group's first tag is the pallet tag. The remaining tags are cartons with test references. The XLS file provides tag observations, so these assignments are for the POC. Copy each generated CSV to the C72 and import it in a separate hardware session. Scan near the designated pallet tag for identification. Keep fallback tags outside the carton scan zone unless testing an unexpected read.
 
 - Use JDK 17 and Android SDK platform/build tools 34. Place the Chainway `DeviceAPI_ver20251103_release.aar` in `app/libs`. The local sample at `../Demo-uhf_as/uhf-uart-demo/app/libs` supplied this POC build. [Chainway C72 SDK support](https://www.chainway.net/Support/Info/10).
 - Run `./gradlew.bat :app:assembleDebug` with access to the Gradle dependencies. The verified Windows offline alternative is `./tools/build-android.ps1`, which writes `build/keypharm-poc-<versionName>-debug.apk` (version read from `app/build.gradle`) using the installed SDK tools.

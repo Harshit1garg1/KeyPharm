@@ -5,7 +5,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright, expect
 
 assets = Path(__file__).resolve().parents[1] / "app/src/main/assets"
-types = {".html":"text/html", ".mjs":"text/javascript", ".css":"text/css"}
+types = {".html":"text/html", ".mjs":"text/javascript", ".css":"text/css", ".png":"image/png"}
 
 
 def serve_assets(route):
@@ -37,6 +37,7 @@ with sync_playwright() as playwright:
     device.on("pageerror", lambda error: errors.append(str(error)))
     device.route("https://handheld.test/**", serve_assets)
     device.goto("https://handheld.test/handheld.html")
+    assert device.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth === 339")
     device.get_by_label("Local identity").select_option("admin")
     device.get_by_label("One test per line: Test ID, then description").fill("KP-TEST-01 Mixed pallet check\nKP-TEST-02 Ginger pallet")
     device.get_by_role("button", name="Save test plan").click()
@@ -58,13 +59,20 @@ with sync_playwright() as playwright:
     device.get_by_label("Your name").fill("Operator C")  # picked again from the remembered list
     device.get_by_label("Your name").press("Tab")
     assert device.locator("#people option").count() == 3
+    device.get_by_role("button", name="Open pallet scanner").click()
+    expect(device.get_by_role("heading", name="Scan pallet")).to_be_visible()
+    expect(device.get_by_role("heading", name="Expected cartons")).to_have_count(0)
     hold(device)
+    expect(device.get_by_role("heading", name="Scan cartons")).to_be_visible()
     expect(device.get_by_text("Pallet verified by UHF EPC.")).to_be_visible()
     proceed = device.get_by_role("button", name="Continue", exact=True)
 
     hold(device)
     expect(proceed).to_be_disabled()
     expect(device.locator("#scan-results")).to_contain_text("Incomplete")
+    expect(device.locator(".tag-row[data-tag-status=matched]")).to_have_count(3)
+    expect(device.locator(".tag-row[data-tag-status=missing]")).to_have_count(1)
+    device.get_by_role("button", name="Session details").click()
     device.get_by_label("Note on the current run").fill("Carton behind stretch wrap")
     device.get_by_role("button", name="Save run note").click()
 
@@ -78,17 +86,21 @@ with sync_playwright() as playwright:
     device.get_by_label("Contents and label assignment verified").check()
     device.get_by_role("button", name="Record verification").click()
     as_person(device, "operator", "Operator C")
+    device.get_by_role("button", name="Open pallet scanner").click()
     hold(device)
-    expect(device.get_by_text("Pallet verified by UHF EPC.")).to_be_visible()
+    expect(device.get_by_role("heading", name="Scan cartons")).to_be_visible()
 
     device.get_by_label("Demo reads").select_option("Unexpected extra")
     device.get_by_label("Rescan reason").fill("Check neighboring tags")
     hold(device)
     expect(proceed).to_be_disabled()
     expect(device.locator("#scan-results")).to_contain_text("Hold")
+    expect(device.locator(".tag-row[data-tag-status=unexpected]")).to_contain_text("Unexpected")
+    device.get_by_role("button", name="Session details").click()
     device.get_by_label("Action").select_option("Neighbouring tag")
     device.get_by_label("Investigation note").fill("Neighbor label removed")
     device.get_by_role("button", name="Save investigation").click()
+    device.get_by_role("button", name="Open carton scanner").click()
     expect(proceed).to_be_disabled()
 
     device.get_by_label("Demo reads").select_option("Clean match")
@@ -102,6 +114,12 @@ with sync_playwright() as playwright:
     device.mouse.down()
     expect(proceed).to_be_disabled()
     expect(device.locator("#scan-results")).to_contain_text("Reading")
+    expect(device.locator(".scan-signal")).to_have_attribute("data-reading", "true")
+    assert device.locator(".scan-signal").evaluate("(el) => getComputedStyle(el, '::after').animationName !== 'none'")
+    device.emulate_media(reduced_motion="reduce")
+    assert device.locator(".scan-signal").evaluate("(el) => getComputedStyle(el, '::after').animationName === 'none'")
+    device.emulate_media(reduced_motion="no-preference")
+    device.screenshot(path="build/handheld-reading.png")
     device.mouse.up()
     expect(proceed).to_be_enabled()
     device.screenshot(path="build/handheld-smoke.png", full_page=True)
@@ -164,8 +182,9 @@ with sync_playwright() as playwright:
         startReader: id => { bridgeCalls.push('start'); fire('started', {id, profile:{region:'ETSI', powerDbm:30}});
           fire('reads', {id, reads:[{epc:'A00000000000000000000001'}]}); },
         stopReader: id => { bridgeCalls.push('stop'); fire('ended', {id, reads:[], interrupted:false}); },
-        feedback: () => {}, publishSnapshot: () => {}
-      };""")
+        feedback: () => {}, publishSnapshot: () => {},
+        liveSampleManifest: () => %s
+      };""" % json.dumps(open(assets / "model.mjs", encoding="utf-8").read().split("`")[1]))
     c72.route("https://handheld.test/**", serve_assets)
     c72.goto("https://handheld.test/handheld.html")
     c72.evaluate("localStorage.clear()")
@@ -174,12 +193,13 @@ with sync_playwright() as playwright:
     c72.get_by_role("button", name="New test session").click()
     c72.get_by_label("Reader source").select_option("C72 hardware")
     c72.get_by_role("button", name="Create session").click()
-    c72.get_by_role("button", name="Use sample manifest").click()
+    c72.get_by_role("button", name="Use live sample").click()
     c72.get_by_role("button", name="Save manifest").click()
     as_person(c72, "supervisor", "Verifier B")
     c72.get_by_label("Contents and label assignment verified").check()
     c72.get_by_role("button", name="Record verification").click()
     as_person(c72, "operator", "Operator C")
+    c72.get_by_role("button", name="Open pallet scanner").click()
     c72.get_by_role("button", name="Start scan").click()
     expect(c72.get_by_role("button", name="Stop scan")).to_be_enabled()
     c72.get_by_role("button", name="Stop scan").click()
@@ -200,6 +220,7 @@ with sync_playwright() as playwright:
 
     dashboard.route("https://dashboard.test/records", records)
     dashboard.goto("https://dashboard.test/dashboard.html")
+    assert dashboard.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth === 339")
     expect(dashboard.get_by_role("status")).to_contain_text("Handheld online")
     expect(dashboard.get_by_role("heading", name="KP-TEST-01")).to_be_visible()
     expect(dashboard.get_by_text("Unexpected EPC neighbouring tag",exact=True)).to_be_visible()
@@ -214,5 +235,70 @@ with sync_playwright() as playwright:
     expect(dashboard.get_by_role("heading", name="KP-RECONNECTED")).to_be_visible()
     dashboard.set_viewport_size({"width":360, "height":700})
     assert dashboard.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+    hardware = browser.new_page(viewport={"width":360, "height":700})
+    hardware.on("pageerror", lambda error: errors.append(str(error)))
+    hardware.route("https://handheld.test/**", serve_assets)
+    hardware.add_init_script(r"""
+      window.KeypharmAndroid = {
+        publishSnapshot() {},
+        feedback() {},
+        liveSampleManifest() {
+          return 'pallet_ref,pallet_epc,carton_ref,carton_epc,sku\n' +
+            'KP-LIVE-SORTED-01,A00000000000000000000001,Carton 01,C00000000000000000000001,Test SKU\n';
+        },
+        connectReader() {
+          window.keypharmEvent('reader', {ready:true, message:'UHF reader ready', profile:{region:'ETSI',powerDbm:30}});
+        },
+        setReaderPower(requestId, power) {
+          window.keypharmEvent('reader-power', {id:requestId, ok:true, ready:true, previousPower:30,
+            message:'Reader power set to ' + power + ' dBm', profile:{region:'ETSI',powerDbm:power}});
+        },
+        startReader(id) {
+          window.keypharmEvent('started', {id, profile:{region:'ETSI',powerDbm:18}});
+        },
+        stopReader(id) {
+          window.keypharmEvent('ended', {id, reads:window.scanReads, interrupted:false});
+        }
+      };
+    """)
+    hardware.goto("https://handheld.test/handheld.html")
+    as_person(hardware, "operator", "Operator C")
+    hardware.get_by_role("button", name="New test session").click()
+    hardware.get_by_role("button", name="Create session").click()
+    expect(hardware.get_by_role("button", name="Set power")).to_have_count(0)
+    hardware.get_by_label("Local identity").select_option("admin")
+    hardware.get_by_role("button", name="Use live sample").click(timeout=3000)
+    hardware.get_by_role("button", name="Save manifest").click()
+    expect(hardware.get_by_text("KP-LIVE-SORTED-01 / 1 cartons", exact=False)).to_be_visible()
+    assert hardware.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].manifest.demo") is False
+    expect(hardware.get_by_role("heading", name="Reader settings")).to_be_visible(timeout=3000)
+    hardware.get_by_label("Output power (dBm)").fill("18")
+    hardware.get_by_role("button", name="Set power").click()
+    expect(hardware.locator("#notice")).to_contain_text("Reader power set to 18 dBm")
+    saved = hardware.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].logs")
+    assert saved[-1]["action"] == "Reader power changed" and "30 to 18 dBm" in saved[-1]["detail"]
+    hardware.get_by_label("Local identity").select_option("operator")
+    expect(hardware.get_by_role("button", name="Set power")).to_have_count(0)
+    expect(hardware.get_by_text("ETSI / 18 dBm")).to_be_visible()
+    hardware.get_by_label("Local identity").select_option("supervisor")
+    hardware.get_by_label("Contents and label assignment verified").check()
+    hardware.get_by_role("button", name="Record verification").click()
+    hardware.get_by_label("Local identity").select_option("operator")
+    hardware.get_by_role("button", name="Open pallet scanner").click()
+    hardware.evaluate("window.scanReads = [{epc:'E00000000000000000000009'}]; window.keypharmEvent('press',{})")
+    hardware.evaluate("window.keypharmEvent('release',{})")
+    expect(hardware.get_by_role("heading", name="Scan pallet")).to_be_visible()
+    expect(hardware.locator("#notice")).to_contain_text("Pallet EPC not confirmed", timeout=3000)
+    hardware.evaluate("window.scanReads.push({epc:'A00000000000000000000001'}); window.keypharmEvent('press',{})")
+    hardware.evaluate("window.keypharmEvent('release',{})")
+    expect(hardware.get_by_role("heading", name="Scan cartons")).to_be_visible()
+    saved = hardware.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].palletAttempts.at(-1)")
+    assert saved["profile"]["powerDbm"] == 18
+    assert len(saved["observations"]) == 2
+    hardware.evaluate("window.scanReads.push({epc:'C00000000000000000000001'}); window.keypharmEvent('press',{})")
+    hardware.evaluate("window.keypharmEvent('release',{})")
+    expect(hardware.locator(".tag-row[data-tag-status=unexpected]")).to_have_count(1)
+    expect(hardware.get_by_role("button", name="Continue",exact=True)).to_be_disabled()
     assert not errors, errors
     print("Handheld and dashboard browser flow passed.")

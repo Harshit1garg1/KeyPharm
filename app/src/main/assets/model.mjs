@@ -84,7 +84,7 @@ export function canContinue(session, run) {
 
 export const roles = {admin:'Test lead', operator:'Operator', supervisor:'Supervisor', reviewer:'Reviewer'};
 const actions = {
-  create: ['admin','operator'], manifest: ['admin'], verify: ['supervisor'],
+  create: ['admin','operator'], manifest: ['admin'], 'reader-power': ['admin'], verify: ['supervisor'],
   scan: ['operator','admin'], confirm: ['operator','admin'], close: ['operator','admin','supervisor'],
   investigate: ['operator','admin','supervisor'], export: ['admin','operator','supervisor']
 };
