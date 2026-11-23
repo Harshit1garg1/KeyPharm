@@ -180,4 +180,21 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .actionbar {position:fixed;left:0;right:0;bottom:0;z-index:5;padding:12px 24px;background:var(--workspace);border-top:1px solid var(--line)}
 .actionbar .scan-cta {display:flex;max-width:672px;margin:0 auto}
 .shell:has(.actionbar) {padding-bottom:104px}
-@media(max-width:420px) {.actionbar {padding:12px}.shell:has(.actionbar) {padding-bottom:92px}.reader-card {padding:0 12px}.brand {width:120px;height:31px}.brand img {width:160px;margin-left:-12px}.handheld .who > summary {max-width:200px}}
+@media(max-width:420px) {.actionbar {padding:12px}.shell:has(.actionbar) {padding-bottom:92px}.reader-card {padding:0 12px}.brand {width:120px;height:31px}.brand img {width:160px;margin-left:-12px}.handheld .who > summary {max-width:156px}}
+
+/* Header logo: the official mark, cut from its white box and upscaled (tools/logo-hd.py), shown about twice the old size. */
+.handheld .brand {width:auto;height:auto;overflow:visible;min-width:0}
+.handheld .brand img {display:block;width:auto;height:44px;max-width:100%;margin:0}
+
+/* Manifest builder: one row per tag read, keep-checkbox on the left, pallet choice on the right. */
+.build-tags {margin:0;padding:0 16px;min-width:0}
+.build-tags legend {padding:12px 0 4px;font-size:14px;font-weight:650;float:left;width:100%}
+.build-tag {clear:both;display:flex;align-items:center;justify-content:space-between;gap:8px;border-top:1px solid var(--line)}
+.build-tag .check {flex:1;min-width:0;font-weight:400}
+.build-tag .check span {display:grid;min-width:0}
+.build-tag code {overflow-wrap:anywhere}
+.build-tag small {font-size:13px}
+.pallet-pick {display:flex;align-items:center;gap:6px;min-height:48px;font-size:14px;flex:none}
+.pallet-pick input {width:22px;min-height:22px;accent-color:var(--action)}
+#build-form .secondary {width:100%}
+@media(max-width:420px) {.handheld .brand img {height:34px}}

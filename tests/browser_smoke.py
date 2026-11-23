@@ -47,7 +47,7 @@ with sync_playwright() as playwright:
     device.on("pageerror", lambda error: errors.append(str(error)))
     device.route("https://handheld.test/**", serve_assets)
     device.goto("https://handheld.test/handheld.html")
-    assert device.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth === 339")
+    assert device.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth === 681")
     assert device.locator(".brand").bounding_box()["x"] < device.locator("#who").bounding_box()["x"]
     pick_role(device, "admin")
     device.get_by_label("One test per line: Test ID, then description").fill("KP-TEST-01 Mixed pallet check\nKP-TEST-02 Ginger pallet")
@@ -86,6 +86,8 @@ with sync_playwright() as playwright:
     expect(device.locator(".tag-row[data-tag-status=missing]")).to_have_count(1)
     device.get_by_role("button", name="Session details").click()
     device.get_by_label("Note on the current run").fill("Carton behind stretch wrap")
+    device.reload()  # the open session and the half-typed note both come back from localStorage
+    expect(device.get_by_label("Note on the current run")).to_have_value("Carton behind stretch wrap")
     device.get_by_role("button", name="Save run note").click()
 
     # Manifest revision after a scan: needs a reason, then verification and pallet identification again.
@@ -143,8 +145,7 @@ with sync_playwright() as playwright:
     device.get_by_role("button", name="Close test session").click()
     expect(device.get_by_role("heading", name="Session closed")).to_be_visible()
 
-    device.reload()
-    device.get_by_role("button", name="KP-TEST-01", exact=False).click()
+    device.reload()  # reopens on the same session
     expect(device.get_by_role("heading", name="Session closed")).to_be_visible()
     snapshot = device.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1'))")
     runs = snapshot["sessions"][0]["runs"]
@@ -404,6 +405,44 @@ with sync_playwright() as playwright:
     expect(multi.locator(".tag-row[data-tag-status=unexpected]")).to_contain_text("Belongs to pallet PAL-A")
     expect(multi.locator(".tag-row[data-tag-status=matched]")).to_have_count(2)
     expect(multi.get_by_role("button", name="Continue", exact=True)).to_be_disabled()
+
+    # Manifest generator: scan one pallet's tags on the C72, drop a stray tag, save the CSV, then load it.
+    gen = browser.new_page(viewport={"width":360, "height":700})
+    gen.on("pageerror", lambda error: errors.append(str(error)))
+    gen.route("https://handheld.test/**", serve_assets)
+    gen.add_init_script(r"""
+      window.saved = [];
+      window.KeypharmAndroid = {
+        publishSnapshot() {}, feedback() {},
+        connectReader() { window.keypharmEvent('reader', {ready:true, message:'UHF reader ready', profile:{region:'ETSI',powerDbm:30}}); },
+        startReader(id) { window.keypharmEvent('started', {id}); },
+        stopReader(id) { window.keypharmEvent('ended', {id, interrupted:false, reads:[{epc:'cc02', rssi:'-60'},
+          {epc:'AA01', rssi:'-35'}, {epc:'CC01', rssi:'-58'}, {epc:'FFEE', rssi:'-70'}, {epc:'CC01', rssi:'-52'}]}); },
+        saveTemplate(csv, name) { window.saved.push([name, csv]); }
+      };
+    """)
+    gen.goto("https://handheld.test/handheld.html")
+    as_person(gen, "admin", "Lead A")
+    expect(gen.locator("#share-all")).to_be_checked()  # the dashboard shares hardware records by default
+    gen.get_by_role("button", name="New test session").click()
+    gen.get_by_role("button", name="Create session").click()
+    gen.get_by_role("button", name="Build from scan").click()
+    gen.get_by_role("button", name="Start scan").click()
+    gen.get_by_role("button", name="Stop scan").click()
+    expect(gen.locator("#build-count")).to_have_text("4 tags read")
+    expect(gen.locator("input[name=palletEpc][value=AA01]")).to_be_checked()  # strongest tag
+    gen.locator("input[name=keep][value=FFEE]").uncheck()
+    gen.get_by_label("SKU for all cartons (optional)").fill("Ginger")
+    gen.get_by_role("button", name="Save CSV file").click()
+    name, csv = gen.evaluate("window.saved")[0]
+    assert name == "manifest-KP-TEST-01.csv", name
+    assert csv.splitlines() == ["pallet_ref,pallet_epc,carton_ref,carton_epc,sku",
+        "PAL-KP-TEST-01,AA01,Carton 01,CC01,Ginger", "PAL-KP-TEST-01,AA01,Carton 02,CC02,Ginger"], csv
+    gen.get_by_role("button", name="Use as manifest").click()
+    expect(gen.get_by_text("1 pallet(s) / 2 cartons", exact=False)).to_be_visible()
+    gen.get_by_role("button", name="Save manifest").click()
+    built = gen.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].manifest")
+    assert (built["palletEpc"], [c["epc"] for c in built["cartons"]]) == ("AA01", ["CC01", "CC02"]), built
 
     assert not errors, errors
     print("Handheld and dashboard browser flow passed.")

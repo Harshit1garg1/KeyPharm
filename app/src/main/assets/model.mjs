@@ -19,6 +19,17 @@ function cells(line, row, sep) {
   return parts.map(p => (p[1]?.replaceAll('""', '"') ?? p[2]).trim());
 }
 
+// Manifest built on the handheld from one scan: the chosen pallet tag, every other kept EPC as a numbered carton.
+export function manifestCsv(palletRef, palletEpc, epcs, sku = '') {
+  const ref = String(palletRef ?? '').trim(), item = String(sku ?? '').trim(), pallet = normalizeEpc(palletEpc);
+  if (/[,;"]/.test(ref + item)) throw new Error('Pallet reference and SKU cannot contain commas, semicolons or quotes.');
+  if (!ref) throw new Error('Enter a pallet reference.');
+  if (!pallet) throw new Error('Choose the pallet tag.');
+  const cartons = [...new Set(epcs.map(normalizeEpc))].filter(epc => epc && epc !== pallet).sort();
+  if (!cartons.length) throw new Error('Keep at least one carton tag besides the pallet tag.');
+  return ['pallet_ref,pallet_epc,carton_ref,carton_epc,sku', ...cartons.map((epc,i) =>
+    [ref, pallet, 'Carton ' + String(i + 1).padStart(2,'0'), epc, item].join(','))].join('\n') + '\n';
+}
 export function parseManifest(text) {
   const lines = text.replace(/^\uFEFF/, '').trim().split(/\r?\n/);
   const header = lines.shift().toLowerCase();
