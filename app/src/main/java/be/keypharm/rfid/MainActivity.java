@@ -248,12 +248,26 @@ public final class MainActivity extends Activity {
             });
         }
 
-        @JavascriptInterface public void saveTemplate(String csv) {
+        @JavascriptInterface public String liveSampleManifest() {
+            try (InputStream stream = getAssets().open("private-live-sample.csv");
+                 ByteArrayOutputStream csv = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[4096];
+                for (int n; (n = stream.read(buffer)) != -1;) {
+                    if (csv.size() + n > 512000) return "";
+                    csv.write(buffer, 0, n);
+                }
+                return new String(csv.toByteArray(), StandardCharsets.UTF_8);
+            } catch (IOException unavailable) {
+                return "";
+            }
+        }
+
+        @JavascriptInterface public void saveTemplate(String csv, String filename) {
             main.post(() -> {
                 template = csv;
                 Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
                 intent.setType("text/csv").addCategory(Intent.CATEGORY_OPENABLE)
-                        .putExtra(Intent.EXTRA_TITLE, "keypharm-sample.csv");
+                        .putExtra(Intent.EXTRA_TITLE, filename);
                 startActivityForResult(intent, SAVE_TEMPLATE);
             });
         }

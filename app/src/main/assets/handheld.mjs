@@ -4,6 +4,8 @@ import {SAMPLE, EXTRA_EPC, normalizeEpc, parseManifest, compare, scanDelta, canC
 const root = document.querySelector('#app');
 const notice = document.querySelector('#notice');
 const bridge = window.KeypharmAndroid;
+const liveSample = bridge?.liveSampleManifest?.() ?? '';
+const liveSampleName = 'KP-LIVE-SORTED-01.csv';
 const key = 'keypharm-poc-v1';
 const names = {admin:'Demo test lead', operator:'Demo operator', supervisor:'Demo supervisor', reviewer:'Demo reviewer'};
 const metadata = {
@@ -163,9 +165,11 @@ function showManifest(s,m) {
     '</p><details><summary>Carton EPCs and SKUs</summary><p>' + escape(m.source) + '</p><ul class="log">' +
     m.cartons.map(c => '<li>' + escape(c.carton) + ' / ' + escape(c.sku) + '<br><code>' + escape(c.epc) + '</code></li>').join('') + '</ul></details>';
   if (!s.closedAt && !s.runs.length && !active && permits(role,'manifest')) {
+    const hardware = s.source === 'C72 hardware';
     result += '<p class="muted">Use the provisional CSV format. One row per carton.</p><div class="row">' +
-      button('sample','Use sample manifest','class="secondary"') + button('csv','Choose CSV','class="secondary"') +
-      button('template','Save CSV template','class="secondary"') + '</div>';
+      (hardware ? (liveSample ? button('sample','Use live sample','class="secondary"') : '') :
+        button('sample','Use sample manifest','class="secondary"')) + button('csv','Choose CSV','class="secondary"') +
+      button('template',hardware && liveSample ? 'Save live sample CSV' : 'Save CSV template','class="secondary"') + '</div>';
     if (!bridge) result += '<label class="line">CSV file<input id="csv-file" type="file" accept=".csv,text/csv"></label>';
     if (pendingImport) result += '<form class="line stack" id="manifest"><p>' + escape(pendingImport.name) + ' / ' +
       pendingImport.data.cartons.length + ' cartons</p><div class="fields">' +
@@ -206,7 +210,7 @@ function scanPanel(s) {
     escape(isHardware ? (ready ? 'Reader ready' : 'Reader unavailable') : 'Simulation') + '</span></div>' +
     '<div class="scan-target"><div class="scan-signal" data-reading="false" aria-hidden="true"></div><div>' +
     '<p class="provenance">' + escape(s.manifest.pallet) + '</p>' +
-    (s.identified ? '<p class="muted">Pallet verified by UHF EPC.</p>' : '<p>Present the pallet tag.</p>') +
+    (s.identified ? '<p class="muted">Pallet verified by UHF EPC.</p>' : '<p>Present only the pallet tag. Keep other tags out of range.</p>') +
     '<p class="muted">' + (isHardware ? 'Hold the C72 trigger. Release to finish.' : 'Hold the demo trigger. Release to finish.') + '</p></div></div>' +
     (isHardware && !ready ? '<p class="status hold">' + escape(reader.message) + '</p>' +
       button('reconnect','Check reader','class="secondary"') : '') +
@@ -504,9 +508,20 @@ root.addEventListener('click', event => action(() => {
     return;
   }
   if (command === 'scan-details') { view = 'session'; window.scrollTo(0,0); }
-  if (command === 'sample') { chooseManifest(SAMPLE,'Demo sample CSV',true); return; }
+  if (command === 'sample') {
+    if (s?.source === 'C72 hardware') {
+      if (liveSample) chooseManifest(liveSample,liveSampleName);
+    } else chooseManifest(SAMPLE,'Demo sample CSV',true);
+    return;
+  }
   if (command === 'csv' && permits(role,'manifest')) { if (bridge) bridge.pickManifest(); else document.querySelector('#csv-file')?.click(); return; }
-  if (command === 'template' && permits(role,'manifest')) { if (bridge) bridge.saveTemplate(SAMPLE); else download('keypharm-sample.csv',SAMPLE); return; }
+  if (command === 'template' && permits(role,'manifest')) {
+    const hardwareSample = s?.source === 'C72 hardware' && liveSample;
+    const csv = hardwareSample || SAMPLE;
+    const filename = hardwareSample ? liveSampleName : 'keypharm-sample.csv';
+    if (bridge) bridge.saveTemplate(csv,filename); else download(filename,csv);
+    return;
+  }
   if (command === 'reconnect') { bridge?.connectReader(); return; }
   if (command === 'dashboard' && permits(role,'export')) {
     if (!dashboardUrl) {

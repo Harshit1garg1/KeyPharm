@@ -148,9 +148,13 @@ with sync_playwright() as playwright:
     hardware = browser.new_page(viewport={"width":360, "height":700})
     hardware.on("pageerror", lambda error: errors.append(str(error)))
     hardware.route("https://handheld.test/**", serve_assets)
-    hardware.add_init_script("""
+    hardware.add_init_script(r"""
       window.KeypharmAndroid = {
         publishSnapshot() {},
+        liveSampleManifest() {
+          return 'pallet_ref,pallet_epc,carton_ref,carton_epc,sku\n' +
+            'KP-LIVE-SORTED-01,A00000000000000000000001,Carton 01,C00000000000000000000001,Test SKU\n';
+        },
         connectReader() {
           window.keypharmEvent('reader', {ready:true, message:'UHF reader ready', profile:{region:'ETSI',powerDbm:30}});
         },
@@ -165,6 +169,10 @@ with sync_playwright() as playwright:
     hardware.get_by_role("button", name="Create session").click()
     expect(hardware.get_by_role("button", name="Set power")).to_have_count(0)
     hardware.get_by_label("Local identity").select_option("admin")
+    hardware.get_by_role("button", name="Use live sample").click(timeout=3000)
+    hardware.get_by_role("button", name="Save manifest").click()
+    expect(hardware.get_by_text("KP-LIVE-SORTED-01 / 1 cartons", exact=False)).to_be_visible()
+    assert hardware.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].manifest.demo") is False
     expect(hardware.get_by_role("heading", name="Reader settings")).to_be_visible(timeout=3000)
     hardware.get_by_label("Output power (dBm)").fill("5")
     hardware.get_by_role("button", name="Set power").click()
