@@ -1,10 +1,43 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Review records and activity from the Keypharm RFID handheld.">
-<title>Keypharm records</title><link rel="stylesheet" href="style.css"><script type="module" src="dashboard.mjs"></script></head>
-<body><header class="mast"><div class="mast-inner"><span class="brand">Keypharm</span><span class="mode">Records dashboard</span></div></header>
-<main class="shell"><div class="row spread"><h1>Handheld records</h1><button id="refresh" class="secondary">Refresh records</button></div>
-<p id="connection" class="status" role="status">Connecting to handheld…</p>
-<div class="warehouse"><section class="panel"><h2>Sessions</h2><label>Search records<input id="search" type="search" placeholder="Test, pallet, SKU, location or operator"></label><div id="sessions"></div></section>
-<section id="detail" class="panel" aria-label="Session evidence"><p>Select a session to see scan evidence and logs.</p></section></div>
-<noscript><p>Enable JavaScript to view records.</p></noscript></main></body></html>
+<meta name="description" content="Review records and activity from the KeyPharm RFID handheld.">
+<title>KeyPharm records</title><link rel="stylesheet" href="style.css"><link rel="stylesheet" href="dashboard.css"><script type="module" src="dashboard.mjs"></script></head>
+<body class="records-dashboard">
+<a class="dashboard-skip" href="#content">Skip to dashboard</a>
+<header class="mast"><div class="mast-inner"><span class="brand"><img src="keypharm-logo.png" alt="KeyPharm Laboratories" width="339" height="133"></span><span class="mode">Records dashboard</span></div></header>
+<div class="shell dashboard-shell">
+<aside class="dashboard-rail">
+  <button type="button" class="secondary dashboard-toggle" id="menu-toggle" aria-expanded="false" aria-controls="dashboard-nav">Sections</button>
+  <nav id="dashboard-nav" aria-label="Dashboard sections">
+    <a href="#overview" aria-current="page">Overview</a>
+    <a href="#sessions">Sessions</a>
+    <a href="#pallets">Pallet checks</a>
+    <a href="#scans">Carton scans</a>
+    <a href="#exceptions">Exceptions</a>
+    <a href="#activity">Activity</a>
+  </nav>
+</aside>
+<main id="content" class="dashboard-content" tabindex="-1">
+  <div class="row spread dashboard-toolbar">
+    <h1 id="page-title" tabindex="-1">Overview</h1>
+    <button type="button" id="refresh" class="secondary">Refresh records</button>
+  </div>
+  <p id="connection" class="status" role="status">Connecting to handheld…</p>
+  <p id="section-description" class="muted">Totals cover all records shared by the handheld.</p>
+  <div id="overview">
+    <div id="totals" class="dashboard-totals"></div>
+    <div class="dashboard-overview-grid">
+      <section class="panel dashboard-outcomes"><h2>Carton scan outcomes</h2><div id="outcomes"></div></section>
+      <section class="panel dashboard-recent"><div class="row spread"><h2>Recent activity</h2><a href="#activity">View activity</a></div><ul id="recent" class="log"></ul></section>
+    </div>
+  </div>
+  <div id="catalog" class="dashboard-catalog" hidden>
+    <section class="panel dashboard-history" aria-label="Recent records">
+      <label>Search recent records<input id="search" type="search" placeholder="Search this section"></label>
+      <p id="record-count" class="muted"></p>
+      <ul id="records" class="dashboard-records"></ul>
+    </section>
+    <section id="detail" class="panel dashboard-detail" aria-label="Record details" tabindex="-1"><p>Select a record to see its details.</p></section>
+  </div>
+  <noscript><p>Enable JavaScript to view records.</p></noscript>
+</main></div></body></html>

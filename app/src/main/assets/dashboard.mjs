@@ -1,61 +1,158 @@
-const sessions = document.querySelector('#sessions');
-const detail = document.querySelector('#detail');
-const status = document.querySelector('#connection');
-const search = document.querySelector('#search');
-const refresh = document.querySelector('#refresh');
-let records = [];
+import {indexRecords, RECENT_LIMIT, sections} from './dashboard-model.mjs';
+
+const find = selector => document.querySelector(selector);
+const nav = find('#dashboard-nav');
+const menu = find('#menu-toggle');
+const catalog = find('#catalog');
+const records = find('#records');
+const detail = find('#detail');
+const search = find('#search');
+const refresh = find('#refresh');
+const connection = find('#connection');
+let data = indexRecords([]);
+let section = 'overview';
 let selected;
 let refreshed;
-let inFlight = false;
 let previousBody;
+let inFlight = false;
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]);
-const time = value => value ? new Date(value).toLocaleString() : '—';
-const entry = (name,value) => '<div><strong>' + name + '</strong><p>' + escape(value ?? '—') + '</p></div>';
-const epcs = values => values?.length ? values.map(epc => '<li><code>' + escape(epc) + '</code></li>').join('') : '<li>None</li>';
+const count = new Intl.NumberFormat();
+const formattedTime = new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short'});
+const time = value => Number.isFinite(Date.parse(value)) ? formattedTime.format(new Date(value)) : '';
+const code = value => '<code>' + escape(value) + '</code>';
+const facts = (...pairs) => '<dl class="dashboard-facts">' + pairs.map(([name,value]) =>
+  '<div><dt>' + escape(name) + '</dt><dd>' + escape(value ?? '—') + '</dd></div>').join('') + '</dl>';
+const list = (items, renderer) => items?.length ? '<ul class="log">' + items.map(item =>
+  '<li>' + renderer(item) + '</li>').join('') + '</ul>' : '<p class="muted">None recorded.</p>';
+const badge = value => value ? '<span class="dashboard-badge" data-state="' + escape(value.toLowerCase()) + '">' + escape(value) + '</span>' : '';
+const fold = (label,body) => '<details class="dashboard-fold"><summary>' + escape(label) + '</summary>' + body + '</details>';
+const joined = (...items) => items.filter(Boolean).join(' / ');
+const readerPower = p => joined(p?.region,p?.powerDbm == null ? '' : p.powerDbm + ' dBm');
+const logBody = log => '<strong>' + escape(log.action) + '</strong><br>' + escape(log.detail) +
+  '<br><small>' + escape(joined(log.actor,time(log.at))) + '</small>';
 
-function render() {
-  const query = search.value.toLowerCase().trim();
-  const matches = records.filter(s => [s.testId,s.manifest?.pallet,s.location,s.creator,s.product,
-    ...(s.manifest?.cartons ?? []).map(carton => carton.sku)]
-    .some(field => String(field ?? '').toLowerCase().includes(query)));
-  if (!matches.some(s => s.id === selected)) selected = matches[0]?.id;
-  sessions.innerHTML = matches.map(s => '<button class="record" aria-current="' + (s.id === selected) + '" data-id="' + escape(s.id) +
-    '"><span>' + escape(s.testId) + '<br><small>' + escape(s.manifest?.pallet ?? 'Manifest pending') + '</small></span><span>' +
-    (s.closedAt ? 'Closed' : 'Open') + '</span></button>').join('') || '<p class="line muted">' + (query ? 'No sessions match your search.' : 'No sessions received.') + '</p>';
-  const s = matches.find(session => session.id === selected);
-  if (!s) {
-    detail.innerHTML = '<p>Select a session to see scan evidence and logs.</p>';
-    return;
+function updateOverview() {
+  const displayCount = n => previousBody === undefined ? '—' : count.format(n);
+  find('#totals').innerHTML = Object.entries(sections).map(([key,s]) =>
+    '<a class="dashboard-total" href="#' + key + '"><span>' + s.title + '</span><strong data-total="' +
+    key + '">' + displayCount(data.rows[key].length) + '</strong>' +
+    (key === 'sessions' && previousBody !== undefined ?
+      '<small>' + count.format(data.rows.sessions.length - data.closed) + ' open / ' + count.format(data.closed) + ' closed</small>' : '') +
+    '</a>').join('');
+  const scans = data.rows.scans.length;
+  find('#outcomes').innerHTML = Object.entries(data.results).map(([state,total]) =>
+    '<div class="outcome-row" data-state="' + state.toLowerCase() + '"><div class="row spread"><strong>' + state +
+    '</strong><span>' + displayCount(total) + '</span></div>' +
+    '<progress aria-label="' + state + ' scans" value="' + total + '" max="' + (scans || 1) + '"></progress></div>').join('');
+  find('#recent').innerHTML = data.rows.activity.slice(0,5).map(row => '<li><strong>' + escape(row.title) +
+    '</strong><small>' + escape(row.description) + '</small><small>' + escape(time(row.at)) + '</small></li>').join('') ||
+    '<li class="muted">No activity received.</li>';
+}
+
+function observationDetails(observations) {
+  const entries = Object.entries(observations ?? {});
+  return fold('Observed EPCs (' + entries.length + ')', list(entries, ([epc,o]) => code(epc) +
+    '<br><small>' + escape(joined(o?.count == null ? '' : o.count + ' reads',o?.rssi == null ? '' : 'RSSI ' + o.rssi,
+      time(o?.first))) + '</small>'));
+}
+function runEvidence(run) {
+  const r = run.result;
+  return facts(['Operator',run.operator],['Source',run.source],['Started',time(run.startedAt)],['Finished',time(run.endedAt)],
+    ['Duration',run.elapsedSeconds == null ? null : run.elapsedSeconds + ' s'],['Manifest revision',run.manifestRevision],
+    ['Expected',r?.expected],['Matched',r?.matched?.length],['Completeness',r?.percent == null ? null : r.percent + '%'],
+    ['Reader profile',run.profile?.name],['Region / power',readerPower(run.profile)],['Reader build',run.profile?.build],
+    ['Rescan reason',run.reason],['Notes',run.note ?? run.notes],['Error',run.error]) +
+    fold('Missing EPCs (' + (r?.missing?.length ?? 0) + ')',list(r?.missing,code)) +
+    fold('Unexpected EPCs (' + (r?.extra?.length ?? 0) + ')',list(r?.extra,code)) +
+    observationDetails(run.observations);
+}
+function sessionEvidence(s) {
+  const m = s.manifest;
+  const pallets = m?.pallets?.length ? m.pallets : (m ? [m] : []);
+  const scans = data.rows.scans.filter(row => row.session === s).slice(0,RECENT_LIMIT);
+  const logs = data.rows.activity.filter(row => row.session === s).slice(0,RECENT_LIMIT).map(row => row.log);
+  return facts(['Pallet',m?.pallet],['Pallet EPC',m?.palletEpc],['Session ID',s.id],
+    ['Location / level',joined(s.location,s.level)],['Product mix',s.product],['Pallet type',s.palletType],
+    ['Label setup',joined(s.label,s.placement)],['Wrapping / shielding',joined(s.wrapping,s.shielding)],
+    ['Scan method',s.method],['Created',time(s.createdAt)],['Created by',s.creator],['Verified by',s.verifiedBy],
+    ['Sign-off',s.closure?.actor],['Coverage',s.closure?.coverage],['Setup notes',s.notes]) +
+    fold('Manifest and planned evidence',facts(['Source',m?.source],['Revision',m?.revision],['Planned test',s.planned]) +
+      pallets.map(p => '<h3>' + escape(p.pallet) + '</h3>' +
+        list(p.cartons,c => escape(joined(c.carton,c.sku)) + '<br>' + code(c.epc))).join('')) +
+    '<h3 class="line">Recent carton scans</h3>' + (scans.map(row =>
+      fold(row.title + ' / ' + row.status,runEvidence(row.run))).join('') || '<p class="muted">No recorded attempts.</p>') +
+    '<h3 class="line">Recent activity</h3>' + list(logs,logBody);
+}
+
+function renderDetail(row) {
+  if (!row) { detail.innerHTML = '<p class="muted">Select a record to see its details.</p>'; return; }
+  let evidence;
+  if (section === 'sessions') evidence = sessionEvidence(row.session);
+  if (section === 'pallets') {
+    const a = row.attempt;
+    evidence = facts(['Test',row.session.testId],['Pallet locked',a.lockedPallet],['Operator',a.actor],
+      ['Started',time(a.startedAt)],['Finished',time(a.endedAt)],['Region / power',readerPower(a.profile)]) +
+      observationDetails(a.observations);
   }
-  const runs = s.runs.map((run,i) => {
-    const result = run.result;
-    const state = run.state === 'Finished' ? result?.status : run.state;
-    return '<details class="line"><summary>' + (i === 0 ? 'First pass' : 'Rescan ' + i) + ' / ' + escape(state) + ' / ' +
-      escape(run.source) + '</summary><div class="pair">' + entry('Operator',run.operator) +
-      entry('Started',time(run.startedAt)) + entry('Ended',time(run.endedAt)) + entry('Duration',run.endedAt ? run.elapsedSeconds + ' s' : '—') +
-      entry('Expected / matched', result ? result.expected + ' / ' + result.matched.length : '—') +
-      entry('Completeness', result?.percent == null ? '—' : result.percent + '%') + entry('Rescan reason',run.reason) +
-      entry('Profile',run.profile?.name) + entry('Region / power',run.profile ? run.profile.region + ' / ' + (run.profile.powerDbm ?? '—') + ' dBm' : '—') +
-      entry('Reader build',run.profile?.build) + '</div><div class="pair"><div><strong>Missing EPCs</strong><ul class="log">' + epcs(result?.missing) +
-      '</ul></div><div><strong>Unexpected EPCs</strong><ul class="log">' + epcs(result?.extra) +
-      '</ul></div></div><details><summary>Observed EPCs</summary><ul class="log">' + Object.entries(run.observations).map(([epc,o]) =>
-        '<li><code>' + escape(epc) + '</code> / ' + escape(o.count) + ' reads / ' + escape(time(o.first)) +
-        (o.rssi ? ' / RSSI ' + escape(o.rssi) : '') + '</li>').join('') + '</ul></details></details>';
-  }).join('');
-  detail.innerHTML = '<h2>' + escape(s.testId) + '</h2><div class="pair">' +
-    entry('Pallet',s.manifest?.pallet) + entry('Pallet EPC',s.manifest?.palletEpc) +
-    entry('Session',s.id) + entry('Location / level',s.location + ' / ' + s.level) +
-    entry('Product mix',s.product) + entry('Pallet type',s.palletType) +
-    entry('Label setup',s.label + ' / ' + s.placement) + entry('Wrapping / shielding',s.wrapping + ' / ' + s.shielding) +
-    entry('Scan method',s.method) + entry('Created',time(s.createdAt)) + entry('Verified by',s.verifiedBy) +
-    entry('Sign-off',s.closure?.actor) + entry('Coverage',s.closure?.coverage) + entry('Setup notes',s.notes) +
-    '</div><details class="line"><summary>Manifest and planned evidence</summary>' +
-    entry('Source',s.manifest?.source) + entry('Revision',s.manifest?.revision) + entry('Planned test',s.planned) +
-    '<ul class="log">' + (s.manifest?.cartons ?? []).map(c => '<li>' + escape(c.carton) + ' / ' + escape(c.sku) + '<br><code>' + escape(c.epc) + '</code></li>').join('') +
-    '</ul></details><h3 class="line">Scan attempts</h3>' + (runs || '<p>No recorded attempts.</p>') +
-    '<h3 class="line">Activity log</h3><ul class="log">' + s.logs.slice().reverse().map(log => '<li><strong>' + escape(log.action) +
-      '</strong><br>' + escape(log.detail) + '<br><small>' + escape(log.actor) + ' / ' + escape(time(log.at)) + '</small></li>').join('') + '</ul>';
+  if (section === 'scans') {
+    const manifest = [...(row.session.manifestRevisions ?? []),row.session.manifest]
+      .find(item => item && item.revision === row.run.manifestRevision) ?? row.session.manifest;
+    evidence = facts(['Test',row.session.testId],['Pallet',manifest?.pallet]) + runEvidence(row.run);
+  }
+  if (section === 'exceptions') {
+    const disposition = row.status === 'Unexpected' ? (row.session.logs ?? []).findLast(log =>
+      log.run === row.run.id && log.action?.startsWith('Unexpected EPC ') &&
+      String(log.detail).split(' / ')[0] === row.epc) : null;
+    evidence = facts(['Test',row.session.testId],['Scan',row.scan],['EPC',row.epc],
+      ['Result',row.run.result?.status],['Operator',row.run.operator],['Recorded',time(row.at)],['Error',row.run.error]) +
+      (disposition ? fold('Investigation',logBody(disposition)) : '') + fold('Scan evidence',runEvidence(row.run));
+  }
+  if (section === 'activity') evidence = facts(['Test',row.session.testId],['Actor',row.log.actor],
+    ['Time',time(row.at)],['Run ID',row.log.run],['Details',row.log.detail]);
+  detail.innerHTML = '<div class="row spread dashboard-detail-heading"><h2>' + escape(row.title) + '</h2>' + badge(row.status) + '</div>' + evidence;
+}
+
+function matches(row, query) {
+  const manifest = row.session.manifest;
+  const sku = (manifest?.pallets?.length ? manifest.pallets : [manifest])
+    .flatMap(pallet => (pallet?.cartons ?? []).map(carton => carton.sku));
+  return [row.title,row.description,row.status,row.epc,row.log?.detail,row.session.product,manifest?.palletEpc,...sku]
+    .some(value => String(value ?? '').toLowerCase().includes(query));
+}
+function renderRecords() {
+  const all = data.rows[section];
+  const recent = all.slice(0,RECENT_LIMIT);
+  const query = search.value.trim().toLowerCase();
+  const found = query ? recent.filter(row => matches(row,query)) : recent;
+  find('#record-count').textContent = query ? count.format(found.length) + ' matches in the latest ' + count.format(recent.length) + ' records.' :
+    'Showing ' + count.format(recent.length) + ' of ' + count.format(all.length) + ' records.';
+  if (!found.some(row => row.id === selected)) selected = found[0]?.id;
+  records.innerHTML = found.map(row => '<li><button type="button" data-id="' + escape(row.id) +
+    '" class="dashboard-record" aria-pressed="' + (row.id === selected) + '"><span><strong>' + escape(row.title) +
+    '</strong><small>' + escape(row.description) + '</small><small>' + escape(time(row.at)) + '</small></span>' +
+    badge(row.status) + '</button></li>').join('') ||
+    '<li class="muted">' + (query ? 'No recent records match your search.' : 'No records received in this section.') + '</li>';
+  renderDetail(found.find(row => row.id === selected));
+}
+
+function navigate(focusTitle = false) {
+  const requested = window.location.hash.slice(1);
+  if (requested === 'content') return;
+  const next = Object.hasOwn(sections,requested) ? requested : 'overview';
+  if (section !== next) { selected = undefined; search.value = ''; }
+  section = next;
+  for (const link of nav.querySelectorAll('a')) {
+    if (link.hash === '#' + section) link.setAttribute('aria-current','page');
+    else link.removeAttribute('aria-current');
+  }
+  find('#page-title').textContent = sections[section]?.title ?? 'Overview';
+  find('#section-description').textContent = sections[section]?.description ?? 'Totals cover all records shared by the handheld.';
+  find('#overview').hidden = section !== 'overview';
+  catalog.hidden = section === 'overview';
+  menu.setAttribute('aria-expanded','false');
+  if (!catalog.hidden) renderRecords();
+  if (focusTitle) find('#page-title').focus();
 }
 
 async function fetchRecords() {
@@ -69,30 +166,40 @@ async function fetchRecords() {
     if (body !== previousBody) {
       const store = JSON.parse(body);
       if (!Array.isArray(store.sessions)) throw new Error('Invalid records');
-      records = store.sessions;
+      data = indexRecords(store.sessions);
       previousBody = body;
-      render();
+      updateOverview();
+      if (!catalog.hidden) renderRecords();
     }
     refreshed = new Date();
-    status.className = 'status match';
-    status.textContent = 'Handheld online. Refreshed ' + refreshed.toLocaleTimeString() + '.';
+    connection.className = 'status match';
+    connection.textContent = 'Handheld online. Refreshed ' + refreshed.toLocaleTimeString() + '.';
   } catch {
-    status.className = 'status hold';
-    status.textContent = refreshed ? 'Handheld offline. Showing records fetched at ' + refreshed.toLocaleTimeString() + '.' :
+    connection.className = 'status hold';
+    connection.textContent = refreshed ? 'Handheld offline. Showing records fetched at ' + refreshed.toLocaleTimeString() + '.' :
       'Handheld unreachable. Check sharing and the network, then refresh.';
   } finally {
     inFlight = false;
     refresh.disabled = false;
   }
 }
-search.addEventListener('input',render);
-sessions.addEventListener('click',event => {
+
+search.addEventListener('input',renderRecords);
+records.addEventListener('click',event => {
   const button = event.target.closest('button[data-id]');
   if (!button) return;
   selected = button.dataset.id;
-  render();
-  [...sessions.querySelectorAll('button')].find(item => item.dataset.id === selected)?.focus();
+  renderRecords();
+  if (matchMedia('(max-width: 920px)').matches) detail.focus();
+  else [...records.querySelectorAll('button')].find(item => item.dataset.id === selected)?.focus();
 });
+menu.addEventListener('click',() => menu.setAttribute('aria-expanded',String(menu.getAttribute('aria-expanded') !== 'true')));
+nav.addEventListener('click',event => {
+  if (event.target.closest('a')?.hash === window.location.hash) navigate(true);
+});
+window.addEventListener('hashchange',() => navigate(true));
 refresh.addEventListener('click',fetchRecords);
+updateOverview();
+navigate();
 fetchRecords();
-setInterval(fetchRecords, 5000);
+setInterval(fetchRecords,5000);

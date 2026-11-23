@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {parseManifest, compare, scanDelta, canContinue, permits, allocationTotal, canClose, dashboardSnapshot, evidenceCsv, specEvidenceCsv, EXPORT_COLUMNS, SAMPLE} from '../app/src/main/assets/model.mjs';
+import {parseManifest, compare, scanDelta, canContinue, permits, allocationTotal, canClose, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary, EXPORT_COLUMNS, SAMPLE,
+  parsePlan, planCoverage, closePlanErrors, manifestFor, lockPallet, lockTo, otherPallet, inManifest} from '../app/src/main/assets/model.mjs';
 
 test('sample validates and pallet EPC is not a carton', () => {
   const manifest = parseManifest(SAMPLE);
@@ -15,6 +16,20 @@ test('reject duplicate, malformed and ambiguous manifest rows', () => {
   assert.throws(() => parseManifest(SAMPLE.replace('C00000000000000000000001', 'oops')), /row 2.*EPC/i);
   assert.throws(() => parseManifest(lines[0]), /carton/i);
   assert.throws(() => parseManifest(SAMPLE.replace('Carton 04', 'Carton 01')), /row 5.*carton/i);
+});
+
+test('manifest import lists every bad row at once', () => {
+  const bad = SAMPLE.replace('C00000000000000000000001', 'oops').replace('Carton 04', 'Carton 03');
+  assert.throws(() => parseManifest(bad), error => /Row 2.*EPC/.test(error.message) && /Row 5.*carton/.test(error.message));
+});
+
+test('manifest import accepts Excel semicolons, header case and blank SKU', () => {
+  const excel = SAMPLE.replaceAll(',', ';').replace('pallet_ref', 'Pallet_Ref').replace(';Pomegranate juice', ';') + ';;;;\n';
+  const manifest = parseManifest(excel);
+  assert.equal(manifest.cartons.length, 4);
+  assert.equal(manifest.cartons[3].sku, '');
+  assert.deepEqual(parseManifest(SAMPLE).cartons.map(c => c.epc), manifest.cartons.map(c => c.epc));
+  assert.throws(() => parseManifest(SAMPLE.replace(',Carton 01,', ',,')), /Row 2.*carton/);
 });
 
 test('attempts remain independent and extras block even at full completeness', () => {
@@ -119,4 +134,79 @@ test('formula guard still neutralizes formulas but keeps negative numbers', () =
   const csv = evidenceCsv({sessions:[{id:'-1+2',testId:'-55',manifest:{},runs:[],logs:[]}]});
   assert.match(csv, /"'-1\+2"/);
   assert.match(csv, /"-55"/);
+});
+
+test('test plan parses one test per line and reports coverage, skips and unplanned tests', () => {
+  const tests = parsePlan('KP-01 Ginger pallet\n\n  KP-02 Mixed pallet  \nKP-03');
+  assert.deepEqual(tests, [{id:'KP-01',title:'Ginger pallet'},{id:'KP-02',title:'Mixed pallet'},{id:'KP-03',title:''}]);
+  assert.throws(() => parsePlan('KP-01 a\nkp-01 b'), /duplicate/i);
+  assert.throws(() => parsePlan('  \n'), /at least one/i);
+  const sessions = [{testId:'kp-01',runs:[{}],closedAt:'t'}, {testId:'KP-02',runs:[{}]}, {testId:'KP-02',runs:[]}, {testId:'EXTRA',runs:[]}];
+  const plan = {tests};
+  const coverage = planCoverage(plan, sessions);
+  assert.deepEqual(coverage.tests.map(t => t.status), ['Done','In progress','Not run']);
+  assert.deepEqual(coverage.unplanned, ['EXTRA']);
+  assert.deepEqual(closePlanErrors(plan, sessions, {}), ['KP-02: close the test first.', 'KP-03: give a reason it was not run.']);
+  assert.deepEqual(closePlanErrors(plan, sessions.slice(0,1), {'KP-02':'No labels', 'KP-03':'Out of time'}), []);
+});
+
+test('manifest revisions after a scan keep earlier runs on their own manifest in the export', () => {
+  const first = {...parseManifest(SAMPLE), revision:1};
+  const [a,b,c,d] = first.cartons.map(row => row.epc);
+  const second = {...first, revision:2, cartons:first.cartons.slice(0,3)};
+  const observations = epcs => Object.fromEntries(epcs.map(epc => [epc,{count:1,first:'t',last:'t'}]));
+  const run1 = {id:'r1',state:'Finished',manifestRevision:1,observations:observations([a,b,c]),result:compare(first,[a,b,c])};
+  const run2 = {id:'r2',state:'Finished',manifestRevision:2,observations:observations([a,b,c]),result:compare(second,[a,b,c])};
+  const session = {id:'s',testId:'KP-1',manifest:second,manifestRevisions:[first],runs:[run1,run2],
+    logs:[{run:'r2',action:'Run note',detail:'Carton 04 was never loaded'}]};
+  assert.equal(manifestFor(session, run1), first);
+  assert.equal(manifestFor(session, run2), second);
+  const rows = specEvidenceCsv({sessions:[session]}).trim().split('\r\n').slice(1);
+  assert.equal(rows.filter(row => row.includes('"r1"')).length, 4);
+  assert.equal(rows.filter(row => row.includes('"r2"')).length, 3);
+  assert.ok(rows.some(row => row.includes('"r1"') && row.includes(d) && row.includes('MISSING_CARTON')));
+  assert.ok(rows.filter(row => row.includes('"r2"')).every(row => row.includes('Carton 04 was never loaded')));
+  assert.match(evidenceSummary({sessions:[], plan:{tests:[{id:'KP-1',title:'x'}]}}), /KP-1.*Not run/);
+});
+
+const MULTI = 'pallet_ref;pallet_epc;carton_ref;carton_epc;sku\r\n' +
+  'PAL-A;A1A1;A-01;C0A1;x\r\nPAL-A;A1A1;A-02;C0A2;x\r\nPAL-B;B1B1;B-01;C0B1;y\r\n';
+
+test('one CSV can hold several pallets and EPCs stay unique across the file', () => {
+  const m = parseManifest(MULTI);
+  assert.deepEqual(m.pallets.map(p => [p.pallet, p.palletEpc, p.cartons.length]), [['PAL-A','A1A1',2],['PAL-B','B1B1',1]]);
+  assert.deepEqual([m.palletEpc, m.cartons.length], ['', 0]);
+  const single = parseManifest(SAMPLE);
+  assert.deepEqual([single.pallets.length, single.cartons.length, single.palletEpc], [1, 4, 'A00000000000000000000001']);
+  assert.throws(() => parseManifest(MULTI.replace('C0B1', 'C0A1')), /Row 4.*duplicate EPC/);
+  assert.throws(() => parseManifest(MULTI.replace('PAL-A;A1A1;A-02', 'PAL-A;A2A2;A-02')), /Row 3.*PAL-A/);
+  assert.throws(() => parseManifest(MULTI.replace('PAL-B;B1B1', 'PAL-B;A1A1')), /Row 4.*pallet EPC/);
+  assert.throws(() => parseManifest(MULTI.replace('B-01;C0B1', 'B-01;A1A1')), /Row 4.*duplicate EPC/);
+});
+
+test('strongest signal locks the pallet, and a carton read first locks its own pallet', () => {
+  const m = parseManifest(MULTI);
+  const lock = lockPallet(m, {C0A1:{rssi:'-60'}, B1B1:{rssi:'-41.5'}, FFFF:{rssi:'-30'}});
+  assert.deepEqual([lock.pallet.pallet, lock.rssi, lock.seen], ['PAL-B', -41.5, 1]);
+  assert.equal(lockPallet(m, {C0A2:{rssi:'-70'}}).pallet.pallet, 'PAL-A');
+  assert.equal(lockPallet(m, {C0A1:{count:1}, C0A2:{count:1}, B1B1:{count:1}}).pallet.pallet, 'PAL-A');
+  assert.equal(lockPallet(m, {FFFF:{rssi:'-20'}}), null);
+  assert.equal(lockPallet(parseManifest(SAMPLE), {C00000000000000000000002:{}}).pallet.pallet, 'KP-DEMO-01');
+  assert.equal(inManifest(m, 'C0B1'), true);
+  assert.equal(inManifest(m, 'FFFF'), false);
+
+  const locked = lockTo(m, m.pallets[0]);
+  assert.deepEqual([locked.pallet, locked.palletEpc, locked.cartons.length, locked.pallets.length], ['PAL-A','A1A1',2,2]);
+  const r = compare(locked, ['A1A1','C0A1','C0A2','C0B1','B1B1','FFFF']);
+  assert.deepEqual([r.matched.length, r.extra, r.status], [2, ['C0B1','B1B1','FFFF'], 'Hold']);
+  assert.deepEqual(['C0B1','B1B1','FFFF','C0A1'].map(epc => otherPallet(locked, epc)), ['PAL-B','PAL-B',undefined,undefined]);
+
+  const observations = Object.fromEntries(['C0A1','C0A2','C0B1','FFFF'].map(epc => [epc,{count:1}]));
+  const session = {id:'s',testId:'T',manifest:{...locked, revision:1},logs:[],
+    runs:[{id:'r1',state:'Finished',manifestRevision:1,observations,result:compare(locked,Object.keys(observations))}]};
+  const rows = specEvidenceCsv({sessions:[session]}).trim().split('\r\n').slice(1);
+  const other = rows.find(row => row.includes('"C0B1"'));
+  assert.match(other, /OTHER_PALLET_EPC/);
+  assert.match(other, /Belongs to pallet PAL-B/);
+  assert.match(rows.find(row => row.includes('"FFFF"')), /UNEXPECTED_EPC/);
 });

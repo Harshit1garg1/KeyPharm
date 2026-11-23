@@ -10,8 +10,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 final class C72Reader {
-    // Chainway UHF sample maps 0x04 to ETSI. Inspect settings without changing region or power.
+    // Chainway UHF sample maps 0x04 to ETSI. The region stays read-only.
     private static final int ETSI = 0x04;
+    private static final int MIN_POWER_DBM = 5;
+    private static final int MAX_POWER_DBM = 30;
     private final Context context;
     private RFIDWithUHFUART sdk;
     private JSONObject profile;
@@ -45,6 +47,29 @@ final class C72Reader {
             state = json("ready", false, "message", "UHF initialization failed: " + error.getClass().getSimpleName());
             disconnect();
             return state;
+        }
+    }
+
+    JSONObject setPower(int requested) {
+        if (sdk == null) return json("ok", false, "ready", false, "message", "Check the reader connection first");
+        if (requested < MIN_POWER_DBM || requested > MAX_POWER_DBM) {
+            return json("ok", false, "message", "Choose a power from 5 to 30 dBm");
+        }
+        try {
+            int region = sdk.getFrequencyMode();
+            int previous = sdk.getPower();
+            if (region != ETSI || previous <= 0 || sdk.isInventorying()) {
+                return json("ok", false, "message", "Reader must be idle with an ETSI profile and readable power");
+            }
+            boolean applied = previous == requested || sdk.setPower(requested);
+            int actual = sdk.getPower();
+            profile = settings(region, actual);
+            boolean confirmed = applied && actual == requested;
+            return json("ok", confirmed, "ready", actual > 0, "profile", profile, "previousPower", previous,
+                    "message", confirmed ? "Reader power set to " + actual + " dBm" :
+                            "Reader did not confirm " + requested + " dBm. Check the output power.");
+        } catch (Exception | LinkageError error) {
+            return json("ok", false, "message", "Could not set reader power. Check the reader connection.");
         }
     }
 
