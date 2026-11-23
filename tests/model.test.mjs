@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {parseManifest, compare, scanDelta, canContinue, permits, allocationTotal, canClose, dashboardSnapshot, evidenceCsv, specEvidenceCsv, EXPORT_COLUMNS, SAMPLE} from '../app/src/main/assets/model.mjs';
+import {parseManifest, compare, scanDelta, canContinue, permits, allocationTotal, canClose, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary, EXPORT_COLUMNS, SAMPLE,
+  parsePlan, planCoverage, closePlanErrors, manifestFor} from '../app/src/main/assets/model.mjs';
 
 test('sample validates and pallet EPC is not a carton', () => {
   const manifest = parseManifest(SAMPLE);
@@ -133,4 +134,37 @@ test('formula guard still neutralizes formulas but keeps negative numbers', () =
   const csv = evidenceCsv({sessions:[{id:'-1+2',testId:'-55',manifest:{},runs:[],logs:[]}]});
   assert.match(csv, /"'-1\+2"/);
   assert.match(csv, /"-55"/);
+});
+
+test('test plan parses one test per line and reports coverage, skips and unplanned tests', () => {
+  const tests = parsePlan('KP-01 Ginger pallet\n\n  KP-02 Mixed pallet  \nKP-03');
+  assert.deepEqual(tests, [{id:'KP-01',title:'Ginger pallet'},{id:'KP-02',title:'Mixed pallet'},{id:'KP-03',title:''}]);
+  assert.throws(() => parsePlan('KP-01 a\nkp-01 b'), /duplicate/i);
+  assert.throws(() => parsePlan('  \n'), /at least one/i);
+  const sessions = [{testId:'kp-01',runs:[{}],closedAt:'t'}, {testId:'KP-02',runs:[{}]}, {testId:'KP-02',runs:[]}, {testId:'EXTRA',runs:[]}];
+  const plan = {tests};
+  const coverage = planCoverage(plan, sessions);
+  assert.deepEqual(coverage.tests.map(t => t.status), ['Done','In progress','Not run']);
+  assert.deepEqual(coverage.unplanned, ['EXTRA']);
+  assert.deepEqual(closePlanErrors(plan, sessions, {}), ['KP-02: close the test first.', 'KP-03: give a reason it was not run.']);
+  assert.deepEqual(closePlanErrors(plan, sessions.slice(0,1), {'KP-02':'No labels', 'KP-03':'Out of time'}), []);
+});
+
+test('manifest revisions after a scan keep earlier runs on their own manifest in the export', () => {
+  const first = {...parseManifest(SAMPLE), revision:1};
+  const [a,b,c,d] = first.cartons.map(row => row.epc);
+  const second = {...first, revision:2, cartons:first.cartons.slice(0,3)};
+  const observations = epcs => Object.fromEntries(epcs.map(epc => [epc,{count:1,first:'t',last:'t'}]));
+  const run1 = {id:'r1',state:'Finished',manifestRevision:1,observations:observations([a,b,c]),result:compare(first,[a,b,c])};
+  const run2 = {id:'r2',state:'Finished',manifestRevision:2,observations:observations([a,b,c]),result:compare(second,[a,b,c])};
+  const session = {id:'s',testId:'KP-1',manifest:second,manifestRevisions:[first],runs:[run1,run2],
+    logs:[{run:'r2',action:'Run note',detail:'Carton 04 was never loaded'}]};
+  assert.equal(manifestFor(session, run1), first);
+  assert.equal(manifestFor(session, run2), second);
+  const rows = specEvidenceCsv({sessions:[session]}).trim().split('\r\n').slice(1);
+  assert.equal(rows.filter(row => row.includes('"r1"')).length, 4);
+  assert.equal(rows.filter(row => row.includes('"r2"')).length, 3);
+  assert.ok(rows.some(row => row.includes('"r1"') && row.includes(d) && row.includes('MISSING_CARTON')));
+  assert.ok(rows.filter(row => row.includes('"r2"')).every(row => row.includes('Carton 04 was never loaded')));
+  assert.match(evidenceSummary({sessions:[], plan:{tests:[{id:'KP-1',title:'x'}]}}), /KP-1.*Not run/);
 });

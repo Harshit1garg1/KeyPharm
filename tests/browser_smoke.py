@@ -37,7 +37,12 @@ with sync_playwright() as playwright:
     device.on("pageerror", lambda error: errors.append(str(error)))
     device.route("https://handheld.test/**", serve_assets)
     device.goto("https://handheld.test/handheld.html")
+    device.get_by_label("Local identity").select_option("admin")
+    device.get_by_label("One test per line: Test ID, then description").fill("KP-TEST-01 Mixed pallet check\nKP-TEST-02 Ginger pallet")
+    device.get_by_role("button", name="Save test plan").click()
+    expect(device.get_by_text("Not run", exact=True)).to_have_count(2)
     device.get_by_role("button", name="New test session").click()
+    expect(device.get_by_label("Test ID")).to_have_value("KP-TEST-01")
     device.get_by_role("button", name="Create session").click()
     expect(device.locator("#notice")).to_contain_text("Enter your name")
     as_person(device, "operator", "Operator C")
@@ -60,6 +65,21 @@ with sync_playwright() as playwright:
     hold(device)
     expect(proceed).to_be_disabled()
     expect(device.locator("#scan-results")).to_contain_text("Incomplete")
+    device.get_by_label("Note on the current run").fill("Carton behind stretch wrap")
+    device.get_by_role("button", name="Save run note").click()
+
+    # Manifest revision after a scan: needs a reason, then verification and pallet identification again.
+    as_person(device, "admin", "Lead A")
+    device.get_by_role("button", name="Use sample manifest").click()
+    device.get_by_label("Revision reason").fill("Wrong carton list exported")
+    device.get_by_role("button", name="Save manifest").click()
+    expect(device.get_by_text("KP-DEMO-01 / 4 cartons / Revision 2")).to_be_visible()
+    as_person(device, "supervisor", "Verifier B")
+    device.get_by_label("Contents and label assignment verified").check()
+    device.get_by_role("button", name="Record verification").click()
+    as_person(device, "operator", "Operator C")
+    hold(device)
+    expect(device.get_by_text("Pallet verified by UHF EPC.")).to_be_visible()
 
     device.get_by_label("Demo reads").select_option("Unexpected extra")
     device.get_by_label("Rescan reason").fill("Check neighboring tags")
@@ -103,6 +123,7 @@ with sync_playwright() as playwright:
     record = snapshot["sessions"][0]
     assert (record["creator"], record["verifiedBy"], runs[0]["operator"], record["closure"]["actor"]) ==         ("Operator C", "Verifier B", "Operator C", "Operator C"), record
     assert any(log["action"] == "Unexpected EPC neighbouring tag" for log in record["logs"])
+    assert [run["manifestRevision"] for run in runs] == [1, 2, 2], runs
 
     downloads = []
     device.on("download", lambda download: downloads.append(download))
@@ -115,6 +136,22 @@ with sync_playwright() as playwright:
     assert evidence[0].startswith('"SessionID","Mode","TransactionRef","PalletRef","TestID","RunID"'), evidence[0]
     assert len(evidence) == 1 + 4 + 5 + 4, len(evidence)  # header + 4 cartons per run + the extra EPC on run 2
     assert '"Neighbouring tag"' in files["keypharm-evidence.csv"] and '"Operator C"' in files["keypharm-evidence.csv"]
+    assert "Carton behind stretch wrap" in files["keypharm-evidence.csv"]
+    assert "KP-TEST-01 Mixed pallet check: Done" in files["keypharm-summary.txt"], files["keypharm-summary.txt"]
+    assert "KP-TEST-02 Ginger pallet: Not run" in files["keypharm-summary.txt"]
+
+    device.get_by_role("button", name="KP-TEST-01", exact=False).click()
+    device.get_by_role("button", name="Export this test").click()
+    device.wait_for_timeout(1000)
+    assert len(downloads) == 6, len(downloads)
+    device.get_by_role("button", name="Sessions").click()
+    device.locator("summary", has_text="Close PoC day").click()
+    device.get_by_label("Coverage reviewed and signed off").check()
+    device.get_by_role("button", name="Close PoC day").click()
+    expect(device.locator("#notice")).to_contain_text("KP-TEST-02: give a reason")
+    device.get_by_label("Why was KP-TEST-02 not run?").fill("No ginger labels encoded")
+    device.get_by_role("button", name="Close PoC day").click()
+    expect(device.get_by_text("PoC day closed by Operator C", exact=False)).to_be_visible()
 
     # C72 path with a fake Android bridge: on-screen Start scan / Stop scan drives the same reader calls as the trigger.
     c72 = browser.new_page(viewport={"width":360, "height":700})

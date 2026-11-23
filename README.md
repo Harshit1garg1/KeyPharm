@@ -5,10 +5,10 @@ Offline C72 handheld workflow with a read-only web dashboard. Use Simulation to 
 ## Run the demo
 
 1. Open **Keypharm RFID POC** on the C72. Create a test session and choose **Simulation**.
-2. Enter **Your name** at the top (it signs every record and is remembered for next time). Select **Test lead**, load the sample manifest, and save it. Select **Supervisor**, pick the verifier's name, and record physical verification. Return to **Operator**.
+2. As **Test lead**, enter the day's planned tests under **PoC test plan** (one per line: Test ID, then description). New sessions pre-fill the first test not yet run. Enter **Your name** at the top (it signs every record and is remembered for next time). Select **Test lead**, load the sample manifest, and save it. Select **Supervisor**, pick the verifier's name, and record physical verification. Return to **Operator**.
 3. Hold and release the demo trigger to identify the pallet. Hold and release again for the first carton scan. The default simulated run misses one carton.
 4. Select **Unexpected extra**, enter a rescan reason, and retry. Continue stays disabled. Repeat with **Clean match**. Continue enables after release. Previous attempts remain available.
-5. Confirm the match, then review and close the test. From **Sessions**, export the evidence through Android's share sheet: `keypharm-<time>.csv` (functional design section 8 columns, one row per EPC per run), `keypharm-<time>-records.csv` (full session record and audit log) and a readable summary.
+5. Add a note to any run if useful. Confirm the match, then review and close the test. **Export this test** exports just that record. From **Sessions**, export the evidence through Android's share sheet: `keypharm-<time>.csv` (functional design section 8 columns, one row per EPC per run), `keypharm-<time>-records.csv` (full session record and audit log) and a readable summary.
 6. Tap **Share web dashboard**. Open the private link in a browser on the same trusted Wi-Fi network, with the handheld app running. The browser fetches committed records and logs only while the app is reachable. If the connection drops, an already open dashboard shows the last fetched records and their refresh time. Stop sharing from the handheld when finished.
 
 For a physical test, start a session with **C72 hardware**, import the matching pallet and carton EPCs, verify the contents, and tap **Start scan** / **Stop scan** or hold the physical trigger. Check the reader status before scanning. The sample manifest contains synthetic EPCs.

@@ -1,5 +1,6 @@
 import {SAMPLE, EXTRA_EPC, normalizeEpc, parseManifest, compare, scanDelta, canContinue, canClose,
-  roles, permits, allocationTotal, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary} from './model.mjs';
+  roles, permits, allocationTotal, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary,
+  parsePlan, planCoverage, closePlanErrors} from './model.mjs';
 
 const root = document.querySelector('#app');
 const notice = document.querySelector('#notice');
@@ -129,6 +130,7 @@ function history() {
   return '<section class="panel"><div class="row spread"><h2>Sessions</h2><small>' + total + ' / 500 labels allocated</small></div>' +
     (permits(role,'create') ? button('new','New test session') : '') +
     (records || '<p class="line muted">No sessions recorded. Create a session to load a manifest and check a pallet.</p>') + '</section>' +
+    planPanel() +
     (permits(role,'export') ? '<section class="panel"><h2>Evidence</h2><div class="row">' +
       button('export','Export CSV and summary','class="secondary" ' + (!store.sessions.length ? 'disabled' : '')) +
       (bridge ? button('dashboard',dashboardUrl ? 'Stop dashboard sharing' : 'Share web dashboard','class="secondary"') : '') +
@@ -138,12 +140,38 @@ function history() {
       (includeOtherRecords ? 'All local sessions are shared.' : 'Sample simulation sessions are shared.') + '</p><p><code>' + escape(dashboardUrl) +
       '</code></p>' + button('copy','Copy dashboard link','class="secondary"') : '') + '</section>' : '');
 }
+// Planned tests for the day (FR-28 coverage): the Test lead enters them, closing the day needs a reason for every test not run.
+function planPanel() {
+  const plan = store.plan;
+  const {tests, unplanned} = planCoverage(plan, store.sessions);
+  let html = '<section class="panel"><h2>PoC test plan</h2>';
+  html += tests.length ? '<ul class="log">' + tests.map(t => '<li><strong>' + escape(t.id) + '</strong> ' + escape(t.title) +
+      '<br><small>' + escape(t.status) + (plan.closure?.skipped?.[t.id] ? ' / not run: ' + escape(plan.closure.skipped[t.id]) : '') +
+      '</small></li>').join('') + '</ul>' + (unplanned.length ? '<p class="muted">Not in plan: ' + escape(unplanned.join(', ')) + '</p>' : '')
+    : '<p class="muted">No planned tests yet.' + (permits(role,'manifest') ? '' : ' Select Test lead to enter them.') + '</p>';
+  if (plan?.closedAt) return html + '<p class="status match">PoC day closed by ' + escape(plan.closure.actor) + ' on ' +
+    escape(time(plan.closedAt)) + '.</p></section>';
+  if (permits(role,'manifest')) html += '<details' + (tests.length ? '' : ' open') + '><summary>Edit planned tests</summary>' +
+    '<form id="plan" class="stack"><label>One test per line: Test ID, then description<textarea name="tests" rows="5" required>' +
+    escape(tests.map(t => (t.id + ' ' + t.title).trim()).join('\n')) + '</textarea></label>' +
+    '<button class="secondary">Save test plan</button></form></details>';
+  if (tests.length && permits(role,'close')) html += '<details><summary>Close PoC day</summary><form id="close-plan" class="stack">' +
+    tests.filter(t => t.status === 'Not run').map(t => field(escape('skip:' + t.id),'Why was ' + t.id + ' not run?','','maxlength="200"')).join('') +
+    '<label class="check"><input type="checkbox" name="reviewed" required>Coverage reviewed and signed off</label>' +
+    '<button>Close PoC day</button></form></details>';
+  return html + '</section>';
+}
 function creation() {
+  // Pre-fill the first planned test that has not run yet.
+  const next = planCoverage(store.plan, store.sessions).tests.find(t => t.status === 'Not run');
+  const values = {...defaults, ...(next && {testId:next.id, planned:next.title || defaults.planned})};
   return '<form id="create" class="panel stack"><h2>New test session</h2><label>Reader source<select name="source">' +
     (bridge ? '<option>C72 hardware</option>' : '') + '<option>Simulation</option></select></label>' +
     '<div class="fields">' + Object.entries(metadata).map(([name,label]) =>
-      field(name,label,defaults[name], 'maxlength="160" ' + (name === 'notes' ? '' : 'required'))).join('') +
-    '</div><button>Create session</button></form>';
+      field(name,label,values[name], 'maxlength="160" ' + (name === 'notes' ? '' : 'required') +
+        (name === 'testId' ? ' list="planned-tests"' : ''))).join('') +
+    '</div><datalist id="planned-tests">' + (store.plan?.tests ?? []).map(t => '<option value="' + escape(t.id) + '">' +
+      escape(t.title) + '</option>').join('') + '</datalist><button>Create session</button></form>';
 }
 function showSession(s) {
   const manifest = s.manifest;
@@ -153,6 +181,7 @@ function showSession(s) {
       '<li><strong>' + escape(v) + '</strong> ' + escape(s[k] || '—') + '</li>').join('') + '</ul></details></section>' +
     (manifest && s.verifiedBy ? scanPanel(s) : '') + (s.runs.length ? comparisons(s) : '') + closure(s) +
     showManifest(s,manifest) + (manifest ? verification(s) : '') +
+    (permits(role,'export') && !active ? '<section class="panel">' + button('export-one','Export this test','class="secondary"') + '</section>' : '') +
     '<section class="panel"><details><summary>Session log (' + s.logs.length + ')</summary><ul class="log">' +
     s.logs.slice().reverse().map(e => '<li><strong>' + escape(e.action) + '</strong><br>' + escape(e.detail) +
       '<br><small>' + escape(e.actor) + ' / ' + escape(time(e.at)) + '</small></li>').join('') + '</ul></details></section>';
@@ -162,8 +191,11 @@ function showManifest(s,m) {
   if (m) result += '<p>' + escape(m.pallet) + ' / ' + m.cartons.length + ' cartons / Revision ' + m.revision +
     '</p><details><summary>Carton EPCs and SKUs</summary><p>' + escape(m.source) + '</p><ul class="log">' +
     m.cartons.map(c => '<li>' + escape([c.carton, c.sku].filter(Boolean).join(' / ')) + '<br><code>' + escape(c.epc) + '</code></li>').join('') + '</ul></details>';
-  if (!s.closedAt && !s.runs.length && !active && permits(role,'manifest')) {
-    result += '<p class="muted">Use the provisional CSV format. One row per carton.</p><div class="row">' +
+  // Revising after a scan is allowed until a clean match is confirmed; earlier runs keep their own revision (section 8).
+  if (!s.closedAt && !s.confirmedAt && !active && permits(role,'manifest')) {
+    result += (s.runs.length ? '<p class="muted">A revision needs a reason, a new physical verification and pallet identification. ' +
+        'Earlier runs stay on the revision they were scanned against.</p>' : '') +
+      '<p class="muted">Use the provisional CSV format. One row per carton.</p><div class="row">' +
       button('sample','Use sample manifest','class="secondary"') + button('csv','Choose CSV','class="secondary"') +
       button('template','Save CSV template','class="secondary"') + '</div>';
     if (!bridge) result += '<label class="line">CSV file<input id="csv-file" type="file" accept=".csv,text/csv"></label>';
@@ -223,6 +255,7 @@ function resultBox(s, title, run) {
     (r ? '<p>Missing: ' + r.missing.length + ' / Extra: ' + r.extra.length + '</p>' : '') +
     '<details><summary>EPC evidence</summary>' +
     (r ? issueList('Missing',r.missing,s) + issueList('Unexpected',r.extra,s) : '') +
+    s.logs.filter(l => l.run === run.id && l.action === 'Run note').map(l => '<p><strong>Note</strong> ' + escape(l.detail) + '</p>').join('') +
     '<p>Observed</p><ul class="log">' + Object.entries(run.observations).map(([epc,o]) => '<li><code>' +
       escape(epc) + '</code><br><small>' + o.count + ' reads / ' + escape(time(o.first)) +
       (o.rssi ? ' / RSSI ' + escape(o.rssi) : '') + '</small></li>').join('') + '</ul></details></div>';
@@ -230,7 +263,8 @@ function resultBox(s, title, run) {
 function issueList(label, epcs, s) {
   if (!epcs.length) return '<p>' + label + ': none</p>';
   return '<p>' + label + '</p><ul class="log">' + epcs.map(epc => {
-    const c = s.manifest.cartons.find(item => item.epc === epc);
+    // EPC is the carton identity, so any revision can name it.
+    const c = [s.manifest, ...(s.manifestRevisions ?? [])].flatMap(m => m.cartons).find(item => item.epc === epc);
     return '<li><code>' + escape(epc) + '</code>' + (c ? '<br>' + escape([c.carton, c.sku].filter(Boolean).join(' / ')) : '') + '</li>';
   }).join('') + '</ul>';
 }
@@ -250,7 +284,10 @@ function comparisons(s) {
       '<form id="investigate" class="line stack"><label>Unexpected EPC<select name="epc">' +
       run.result.extra.map(epc => '<option>' + escape(epc) + '</option>').join('') + '</select></label>' +
       '<label>Action<select name="outcome"><option>Investigated</option><option>Removed from zone</option><option>Neighbouring tag</option><option>Unresolved</option></select></label>' +
-      field('note','Investigation note','','required maxlength="200"') + '<button class="secondary">Save investigation</button></form>' : '') + '</section>';
+      field('note','Investigation note','','required maxlength="200"') + '<button class="secondary">Save investigation</button></form>' : '') +
+    (run && !active && !s.closedAt && permits(role,'investigate') ? '<form id="run-note" class="line stack">' +
+      field('note','Note on the current run','','required maxlength="300" placeholder="Label position, pallet build, shielding, environment"') +
+      '<button class="secondary">Save run note</button></form>' : '') + '</section>';
 }
 function closure(s) {
   if (s.closedAt) return '<section class="panel"><h2>Session closed</h2><p>' + escape(s.closure.coverage) +
@@ -381,7 +418,7 @@ function updateScan() {
   }
 }
 function chooseManifest(text,name,demo = false) {
-  if (view !== 'session' || !permits(role,'manifest') || session()?.closedAt || session()?.runs.length || active) return;
+  if (view !== 'session' || !permits(role,'manifest') || session()?.closedAt || session()?.confirmedAt || active) return;
   pendingImport = {data:parseManifest(text),name,demo};
   feedback('');
   render();
@@ -470,12 +507,8 @@ root.addEventListener('click', event => action(() => {
     return;
   }
   if (command === 'copy' && permits(role,'export')) { bridge?.copyLink(dashboardUrl); feedback('Dashboard link copied.'); return; }
-  if (command === 'export' && permits(role,'export')) {
-    const evidence = specEvidenceCsv(store), records = evidenceCsv(store), summary = evidenceSummary(store);
-    if (bridge) bridge.exportEvidence(evidence,records,summary);
-    else { download('keypharm-evidence.csv',evidence); download('keypharm-records.csv',records); download('keypharm-summary.txt',summary); }
-    return;
-  }
+  if (command === 'export' && permits(role,'export')) { exportRecords(store); return; }
+  if (command === 'export-one' && s && permits(role,'export')) { exportRecords({sessions:[s]}); return; }
   if (command === 'continue' && permits(role,'confirm') && !s.confirmedAt && canContinue(s,latest(s))) {
     commit(() => { s.confirmedAt = now(); log(s,'Clean match confirmed','Carton set matched',latest(s).id); });
   }
@@ -491,7 +524,7 @@ root.addEventListener('submit', event => action(() => {
     commit(() => { log(record,'Session created',record.planned); store.sessions.push(record); });
     selected = record.id; view = 'session';
   }
-  if (form.id === 'manifest' && s && !s.closedAt && !s.runs.length && permits(role,'manifest') && pendingImport) {
+  if (form.id === 'manifest' && s && !s.closedAt && !s.confirmedAt && permits(role,'manifest') && pendingImport) {
     if (s.manifest && !data.reason.trim()) throw new Error('Enter a reason for the revision.');
     const allocation = {cartons:pendingImport.data.cartons.length,pallets:1,reserves:Number(data.reserves),candidates:Number(data.candidates)};
     const total = allocationTotal(allocation) + store.sessions.filter(other => other.id !== s.id).reduce((sum,other) => sum + allocationTotal(other.allocation),0);
@@ -515,11 +548,31 @@ root.addEventListener('submit', event => action(() => {
     if (!data.note.trim()) throw new Error('Enter the investigation note.');
     commit(() => log(s,'Unexpected EPC ' + data.outcome.toLowerCase(),data.epc + ' / ' + data.note,latest(s).id));
   }
+  if (form.id === 'run-note' && s && !s.closedAt && latest(s) && permits(role,'investigate')) {
+    if (!data.note.trim()) throw new Error('Enter the run note.');
+    commit(() => log(s,'Run note',data.note.trim(),latest(s).id));
+  }
+  if (form.id === 'plan' && permits(role,'manifest') && !store.plan?.closedAt) {
+    const tests = parsePlan(data.tests);
+    commit(() => { store.plan = {tests}; });
+  }
+  if (form.id === 'close-plan' && permits(role,'close') && store.plan && !store.plan.closedAt) {
+    const skipped = Object.fromEntries(Object.entries(data).filter(([k,v]) => k.startsWith('skip:') && v.trim())
+      .map(([k,v]) => [k.slice(5), v.trim()]));
+    const errors = closePlanErrors(store.plan, store.sessions, skipped);
+    if (errors.length) throw new Error(errors.join('\n'));
+    commit(() => { store.plan.closedAt = now(); store.plan.closure = {actor:actor(), skipped}; });
+  }
   if (form.id === 'close' && canClose(s,data,role)) {
     commit(() => { s.closedAt = now(); s.closure = {coverage:data.coverage.trim(),actor:actor()}; log(s,'Session closed',s.closure.coverage); });
   }
   feedback(''); render();
 }));
+function exportRecords(records) {
+  const evidence = specEvidenceCsv(records), full = evidenceCsv(records), summary = evidenceSummary(records);
+  if (bridge) bridge.exportEvidence(evidence,full,summary);
+  else { download('keypharm-evidence.csv',evidence); download('keypharm-records.csv',full); download('keypharm-summary.txt',summary); }
+}
 function download(name,text) {
   const url = URL.createObjectURL(new Blob([text],{type:'text/plain;charset=utf-8'}));
   const link = document.createElement('a');

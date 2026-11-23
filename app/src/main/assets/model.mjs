@@ -146,9 +146,10 @@ export const EXPORT_COLUMNS = ['SessionID','Mode','TransactionRef','PalletRef','
 export function specEvidenceCsv(store) {
   const rows = [EXPORT_COLUMNS];
   for (const s of store.sessions) {
-    const cartons = new Map((s.manifest?.cartons ?? []).map(c => [c.epc, c]));
     s.runs.filter(run => run.result).forEach((run, index) => {
-      const r = run.result, p = run.profile ?? {};
+      const r = run.result, p = run.profile ?? {}, m = manifestFor(s, run);
+      const cartons = new Map((m?.cartons ?? []).map(c => [c.epc, c]));
+      const notes = s.logs.filter(log => log.run === run.id && log.action === 'Run note').map(log => log.detail);
       // Latest investigation per EPC; the handheld logs "Unexpected EPC <outcome>" with "<epc> / <note>".
       const disposition = new Map();
       for (const log of s.logs) if (log.run === run.id && log.action?.startsWith('Unexpected EPC ')) {
@@ -158,26 +159,33 @@ export function specEvidenceCsv(store) {
       }
       const row = (epc, classification, expected, observed, code) => {
         const c = cartons.get(epc), read = run.observations[epc], d = disposition.get(epc);
-        return [s.id, s.mode ?? 'POC', '', s.manifest?.pallet, s.testId, run.id, index ? 'Rescan' : 'First pass',
+        return [s.id, s.mode ?? 'POC', '', m?.pallet, s.testId, run.id, index ? 'Rescan' : 'First pass',
           run.startedAt, run.endedAt, run.elapsedSeconds, s.location, s.level, c?.sku, c?.carton,
           expected ? epc : '', observed ? epc : '', classification, p.model ?? p.name, p.deviceId, p.region, p.powerDbm,
           run.method ?? s.method, s.label, s.placement, s.shielding, r.percent,
           run.state === 'Finished' ? r.status : run.state, code, run.operator, s.closure?.actor, d?.outcome,
-          [run.reason && 'Rescan reason: ' + run.reason, d?.note].filter(Boolean).join(' | '),
+          [run.reason && 'Rescan reason: ' + run.reason, d?.note, ...notes].filter(Boolean).join(' | '),
           read?.count, read?.first, read?.last, read?.rssi];
       };
-      for (const c of s.manifest?.cartons ?? []) {
+      for (const c of m?.cartons ?? []) {
         const seen = r.matched.includes(c.epc);
         rows.push(row(c.epc, seen ? 'Matched' : 'Missing', true, seen, seen ? '' : 'MISSING_CARTON'));
       }
       for (const epc of r.extra) rows.push(row(epc, 'Unexpected', false, true, 'UNEXPECTED_EPC'));
-      if (run.observations[s.manifest?.palletEpc]) rows.push(row(s.manifest.palletEpc, 'Pallet tag', false, true, ''));
+      if (run.observations[m?.palletEpc]) rows.push(row(m.palletEpc, 'Pallet tag', false, true, ''));
     });
   }
   return '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
 }
 export function evidenceSummary(store) {
   const lines = ['Keypharm RFID POC — Evidence summary'];
+  if (store.plan?.tests?.length) {
+    const {tests, unplanned} = planCoverage(store.plan, store.sessions);
+    lines.push('', 'Test plan' + (store.plan.closedAt ? ' (closed by ' + store.plan.closure.actor + ')' : ' (open)'));
+    for (const t of tests) lines.push(t.id + ' ' + t.title + ': ' + t.status +
+      (store.plan.closure?.skipped?.[t.id] ? ' — not run: ' + store.plan.closure.skipped[t.id] : ''));
+    if (unplanned.length) lines.push('Not in plan: ' + unplanned.join(', '));
+  }
   for (const s of store.sessions) {
     lines.push('', s.testId + ' / ' + (s.manifest?.pallet ?? 'Pallet pending'), 'Location: ' + s.location,
       'Status: ' + (s.closedAt ? 'Closed' : 'Open'), 'Coverage: ' + (s.closure?.coverage ?? 'Pending'));
@@ -189,4 +197,36 @@ export function evidenceSummary(store) {
     }
   }
   return lines.join('\n') + '\n';
+}
+
+// A run is compared against the manifest revision that was current when it started (section 8 data rule).
+export const manifestFor = (s, run) =>
+  [...(s.manifestRevisions ?? []), s.manifest].find(m => m && m.revision === run.manifestRevision) ?? s.manifest;
+
+// One PoC test plan for the day: "TEST-ID description" per line. Records link to it by Test ID.
+export function parsePlan(text) {
+  const tests = [], ids = new Set();
+  for (const line of String(text ?? '').split(/\r?\n/).map(l => l.trim()).filter(Boolean)) {
+    const [id, ...title] = line.split(/\s+/);
+    if (ids.has(id.toUpperCase())) throw new Error('Duplicate planned test ' + id + '.');
+    ids.add(id.toUpperCase());
+    tests.push({id, title:title.join(' ')});
+  }
+  if (!tests.length) throw new Error('Enter at least one planned test, one per line.');
+  return tests;
+}
+const sameTest = (a, b) => String(a ?? '').trim().toUpperCase() === String(b ?? '').trim().toUpperCase();
+export function planCoverage(plan, sessions) {
+  const tests = (plan?.tests ?? []).map(t => {
+    const records = sessions.filter(s => sameTest(s.testId, t.id));
+    const status = records.some(s => s.closedAt) ? 'Done' : records.some(s => s.runs.length) ? 'In progress' : 'Not run';
+    return {...t, status};
+  });
+  const unplanned = [...new Set(sessions.map(s => s.testId).filter(id => !tests.some(t => sameTest(t.id, id))))];
+  return {tests, unplanned};
+}
+export function closePlanErrors(plan, sessions, skipped) {
+  return planCoverage(plan, sessions).tests.flatMap(t =>
+    t.status === 'In progress' ? [t.id + ': close the test first.'] :
+    t.status === 'Not run' && !skipped[t.id]?.trim() ? [t.id + ': give a reason it was not run.'] : []);
 }
