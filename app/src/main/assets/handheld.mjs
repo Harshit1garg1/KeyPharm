@@ -3,6 +3,7 @@ import {SAMPLE, EXTRA_EPC, normalizeEpc, parseManifest, compare, scanDelta, canC
   parsePlan, planCoverage, closePlanErrors, lockPallet, lockTo, otherPallet, inManifest} from './model.mjs';
 
 const root = document.querySelector('#app');
+const who = document.querySelector('#who');
 const notice = document.querySelector('#notice');
 const bridge = window.KeypharmAndroid;
 const liveSample = bridge?.liveSampleManifest?.() ?? '';
@@ -21,7 +22,10 @@ const defaults = {
 const now = () => new Date().toISOString();
 // The person holding the device signs every record (operator, verifier, sign-off); roles stay local and unauthenticated.
 const actor = () => {
-  if (!store.person) throw new Error('Enter your name at the top before recording anything.');
+  if (!store.person) {
+    document.querySelector('#who-menu')?.setAttribute('open','');
+    throw new Error('Enter your name in the menu at the top left before recording anything.');
+  }
   return store.person;
 };
 const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]);
@@ -105,36 +109,64 @@ try {
   }
 } catch { storageError = true; }
 
-function roleBar() {
-  return '<div class="panel row spread"><label>Local identity<select id="role" ' + (active || powerRequest ? 'disabled' : '') + '>' +
+// Identity sits in a small menu at the top left. The name signs every record (see actor()); roles stay local.
+function identityMenu(open) {
+  const locked = active || powerRequest ? 'disabled' : '';
+  const name = store.person;
+  return '<details class="who" id="who-menu"' + (open ? ' open' : '') + '><summary aria-label="Role and name">' +
+    '<span class="who-initial" aria-hidden="true">' + escape((name || '?').trim().charAt(0).toUpperCase()) + '</span>' +
+    '<span class="who-text"><strong>' + escape(name || 'Set your name') + '</strong><small>' + escape(roles[role]) + '</small></span>' +
+    '<svg class="who-chevron" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="2"/></svg>' +
+    '</summary><div class="who-sheet"><label>Role<select id="role" ' + locked + '>' +
     Object.entries(roles).map(([value,label]) => '<option value="' + value + '" ' + (role === value ? 'selected' : '') +
       '>' + escape(label) + '</option>').join('') + '</select></label>' +
     // ponytail: names are only added, never edited; clear app data to reset the list if a typo matters.
     '<label>Your name<input id="person" list="people" maxlength="60" autocomplete="off" placeholder="Pick or type your name" value="' +
-      escape(store.person) + '" ' + (active || powerRequest ? 'disabled' : '') + '></label><datalist id="people">' +
-      store.people.map(name => '<option value="' + escape(name) + '"></option>').join('') + '</datalist>' +
-    (view === 'sessions' ? '' : button('back','Sessions','class="secondary" ' + (active || powerRequest ? 'disabled' : ''))) + '</div>';
+      escape(name) + '" ' + locked + '></label><datalist id="people">' +
+      store.people.map(person => '<option value="' + escape(person) + '"></option>').join('') + '</datalist></div></details>';
+}
+function subbar() {
+  return '<nav class="subbar">' + button('back','<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">' +
+    '<path d="M10 3L5 8l5 5" fill="none" stroke="currentColor" stroke-width="2"/></svg>Sessions',
+    'class="back" ' + (active || powerRequest ? 'disabled' : '')) + '</nav>';
+}
+// The session moves through four steps; the screen always leads with the one step that is due now.
+const STEPS = [['manifest','Cartons'],['verify','Verify'],['scan','Scan'],['close','Close']];
+const STEP_ROLE = {manifest:['admin','manifest'], verify:['supervisor','verify'], scan:['operator','scan'], close:['operator','close']};
+const stepOf = s => s.closedAt ? 'done' : !s.manifest ? 'manifest' : !s.verifiedBy ? 'verify' : !s.confirmedAt ? 'scan' : 'close';
+function nextLabel(s) {
+  const step = stepOf(s), run = latest(s);
+  if (step === 'done') return 'Closed';
+  if (step === 'manifest') return 'Load cartons';
+  if (step === 'verify') return 'Check by hand';
+  if (step === 'close') return 'Ready to close';
+  if (!s.identified) return 'Scan pallet';
+  return run?.state === 'Finished' && run.result.status !== 'Match' ? run.result.status + ', rescan' : 'Scan cartons';
 }
 function render() {
+  // Keep the menu open across re-renders, e.g. right after a role change.
+  who.innerHTML = storageError ? '' : identityMenu(document.querySelector('#who-menu')?.open);
   if (storageError) {
     root.innerHTML = '<p class="status hold">Could not open the local records. Reopen the application before scanning.</p>';
     return;
   }
   const s = session();
   if (!s && (view === 'session' || view === 'scan')) view = 'sessions';
-  document.querySelector('main > h1').hidden = view === 'scan';
-  root.innerHTML = view === 'scan' ? scanPanel(s) :
-    roleBar() + (view === 'new' ? creation() : view === 'session' ? showSession(s) : history());
+  root.innerHTML = view === 'scan' ? scanPanel(s) : view === 'new' ? subbar() + creation() :
+    view === 'session' ? subbar() + showSession(s) : history();
   if (active) updateScan();
 }
 function history() {
   const total = store.sessions.reduce((sum,s) => sum + allocationTotal(s.allocation),0);
   const records = store.sessions.slice().reverse().map(s => '<button class="record" data-open="' + escape(s.id) +
-    '"><span>' + escape(s.testId) + '<br><small>' + escape(s.manifest?.pallet ?? 'Manifest pending') + ' / ' + escape(s.source) +
-    '</small></span><span>' + (s.closedAt ? 'Closed' : 'Open') + '</span></button>').join('');
-  return '<section class="panel"><div class="row spread"><h2>Sessions</h2><small>' + total + ' / 500 labels allocated</small></div>' +
-    (permits(role,'create') ? button('new','New test session') : '') +
-    (records || '<p class="line muted">No sessions recorded. Create a session to load a manifest and check a pallet.</p>') + '</section>' +
+    '"><span><strong>' + escape(s.testId) + '</strong><small>' + escape(s.manifest?.pallet ?? 'No cartons loaded') + ' / ' +
+    escape(s.source) + '</small></span><span class="record-next" data-step="' + stepOf(s) + '">' + escape(nextLabel(s)) +
+    '</span></button>').join('');
+  return '<section class="home"><div class="row spread title-row"><h1>Sessions</h1><small>' + total + ' of 500 labels used</small></div>' +
+    (permits(role,'create') ? button('new','New test session','class="scan-cta"') :
+      '<p class="muted">Switch to Operator or Test lead to start a test.</p>') +
+    (records ? '<div class="records">' + records + '</div>' :
+      '<p class="muted">No tests yet. Start one, load its cartons, then scan the pallet.</p>') + '</section>' +
     planPanel() +
     (permits(role,'export') ? '<section class="panel"><h2>Evidence</h2><div class="row">' +
       button('export','Export CSV and summary','class="secondary" ' + (!store.sessions.length ? 'disabled' : '')) +
@@ -153,7 +185,7 @@ function planPanel() {
   html += tests.length ? '<ul class="log">' + tests.map(t => '<li><strong>' + escape(t.id) + '</strong> ' + escape(t.title) +
       '<br><small>' + escape(t.status) + (plan.closure?.skipped?.[t.id] ? ' / not run: ' + escape(plan.closure.skipped[t.id]) : '') +
       '</small></li>').join('') + '</ul>' + (unplanned.length ? '<p class="muted">Not in plan: ' + escape(unplanned.join(', ')) + '</p>' : '')
-    : '<p class="muted">No planned tests yet.' + (permits(role,'manifest') ? '' : ' Select Test lead to enter them.') + '</p>';
+    : '<p class="muted">No planned tests yet.' + (permits(role,'manifest') ? '' : ' Switch to Test lead in the menu at the top left to enter them.') + '</p>';
   if (plan?.closedAt) return html + '<p class="status match">PoC day closed by ' + escape(plan.closure.actor) + ' on ' +
     escape(time(plan.closedAt)) + '.</p></section>';
   if (permits(role,'manifest')) html += '<details' + (tests.length ? '' : ' open') + '><summary>Edit planned tests</summary>' +
@@ -167,82 +199,124 @@ function planPanel() {
   return html + '</section>';
 }
 function creation() {
-  // Pre-fill the first planned test that has not run yet.
+  // Pre-fill the first planned test that has not run yet. Only the fields that change per test stay open.
   const next = planCoverage(store.plan, store.sessions).tests.find(t => t.status === 'Not run');
   const values = {...defaults, ...(next && {testId:next.id, planned:next.title || defaults.planned})};
-  return '<form id="create" class="panel stack"><h2>New test session</h2><label>Reader source<select name="source">' +
+  const essential = ['testId','location','level','method'];
+  const input = name => field(name,metadata[name],values[name],'maxlength="160" ' +
+    (name === 'notes' ? '' : 'required') + (name === 'testId' ? ' list="planned-tests"' : ''));
+  return '<form id="create" class="stack"><h1>New test session</h1><label>Reader source<select name="source">' +
     (bridge ? '<option>C72 hardware</option>' : '') + '<option>Simulation</option></select></label>' +
-    '<div class="fields">' + Object.entries(metadata).map(([name,label]) =>
-      field(name,label,values[name], 'maxlength="160" ' + (name === 'notes' ? '' : 'required') +
-        (name === 'testId' ? ' list="planned-tests"' : ''))).join('') +
-    '</div><datalist id="planned-tests">' + (store.plan?.tests ?? []).map(t => '<option value="' + escape(t.id) + '">' +
-      escape(t.title) + '</option>').join('') + '</datalist><button>Create session</button></form>';
+    '<div class="fields">' + essential.map(input).join('') + '</div>' +
+    '<details><summary>More setup details</summary><div class="fields">' +
+    Object.keys(metadata).filter(name => !essential.includes(name)).map(input).join('') + '</div></details>' +
+    '<datalist id="planned-tests">' + (store.plan?.tests ?? []).map(t => '<option value="' + escape(t.id) + '">' +
+      escape(t.title) + '</option>').join('') + '</datalist><button class="scan-cta">Create session</button></form>';
 }
 function showSession(s) {
-  const manifest = s.manifest;
-  return '<section class="panel"><div class="row spread"><h2>' + escape(s.testId) + '</h2><span class="provenance">' +
-    escape(s.source) + (s.closedAt ? ' / Closed' : '') + '</span></div><p>' + escape(s.location) + ' / ' + escape(s.level) +
-    '</p><details><summary>Test setup</summary><ul class="log">' + Object.entries(metadata).slice(2).map(([k,v]) =>
-      '<li><strong>' + escape(v) + '</strong> ' + escape(s[k] || '—') + '</li>').join('') + '</ul></details></section>' +
+  const step = stepOf(s), current = STEPS.findIndex(([key]) => key === step);
+  const progress = '<ol class="steps" aria-label="Test progress">' + STEPS.map(([key,label],i) => {
+    const state = step === 'done' || i < current ? 'done' : i === current ? 'current' : 'todo';
+    return '<li data-state="' + state + '"' + (state === 'current' ? ' aria-current="step"' : '') + '>' + label + '</li>';
+  }).join('') + '</ol>';
+  return '<div class="title-row"><h1>' + escape(s.testId) + '</h1><p class="muted">' + escape(s.location) + ' / ' +
+    escape(s.level) + ' / ' + escape(s.source) + '</p></div>' + progress + nextCard(s,step) +
+    (s.runs.length ? comparisons(s) : '') + detailsPanel(s,step);
+}
+function nextCard(s, step) {
+  if (step === 'done') return '<section class="panel next" data-step="done"><h2>Session closed</h2><p>' +
+    escape(s.closure.coverage) + '</p><p class="muted">Signed by ' + escape(s.closure.actor) + ' on ' + escape(time(s.closedAt)) + '.</p></section>';
+  const [needRole, needAction] = STEP_ROLE[step];
+  const title = {manifest:'Load the expected cartons', verify:'Check the pallet by hand', close:'Review and close the test',
+    scan:!s.identified ? 'Scan the pallet' : latest(s)?.result ? 'Rescan the cartons' : 'Scan the cartons'}[step];
+  let body = step === 'verify' ? '<p><strong>' + escape(manifestSummary(s.manifest)) + '</strong></p>' : '';
+  if (!permits(role,needAction)) {
+    body += '<p>The ' + escape(roles[needRole]) + ' does this step.</p>' +
+      button('as-role','Switch to ' + escape(roles[needRole]),'class="scan-cta" data-role="' + needRole + '"');
+  } else if (step === 'manifest') {
+    body = manifestControls(s,null);
+  } else if (step === 'verify') {
+    body += '<p>Check the pallet contents, that every label is unique, and where the labels sit.</p>' +
+      '<form id="verify" class="stack"><label class="check"><input name="checked" type="checkbox" required>' +
+      'Contents and label assignment verified</label><button class="scan-cta">Record verification</button></form>';
+  } else if (step === 'scan') {
+    body = lastRun(s) + button('open-scan',s.identified ? 'Open carton scanner' : 'Open pallet scanner','class="scan-cta"') +
+      (s.runs.length && permits(role,'close') ? '<details class="line"><summary>Close without a clean match</summary>' + closeForm(s) + '</details>' : '');
+  } else {
+    body = '<p class="status match">Clean carton match confirmed.</p>' + (permits(role,'close') ? closeForm(s) : '');
+  }
+  return '<section class="panel next" data-step="' + step + '"><h2>' + title + '</h2>' + body + '</section>';
+}
+function lastRun(s) {
+  const run = latest(s), r = run?.result;
+  if (!run) return '';
+  const status = run.state === 'Finished' ? r.status : run.state;
+  return '<p class="status ' + escape(status.toLowerCase()) + '">Run ' + s.runs.length + ': ' + escape(status) +
+    (r ? ' / ' + r.matched.length + ' of ' + r.expected + ' matched' + (r.extra.length ? ' / ' + r.extra.length + ' unexpected' : '') : '') + '</p>';
+}
+function closeForm(s) {
+  return '<form id="close" class="stack"><p>Planned: ' + escape(s.planned) + '</p>' +
+    '<label>Coverage and missing-test reason<textarea name="coverage" required maxlength="500"></textarea></label>' +
+    '<label class="check"><input type="checkbox" name="reviewed" required>Results reviewed and signed off</label>' +
+    '<button>Close test session</button></form>';
+}
+function detailsPanel(s, step) {
+  const m = s.manifest;
+  return '<section class="panel details"><h2>Details</h2>' +
+    '<details><summary>Test setup</summary><ul class="log">' + Object.entries(metadata).slice(2).map(([k,v]) =>
+      '<li><strong>' + escape(v) + '</strong> ' + escape(s[k] || '—') + '</li>').join('') + '</ul></details>' +
+    (m ? '<details' + (pendingImport ? ' open' : '') + '><summary>Expected cartons</summary>' + manifestList(m) +
+      (step !== 'manifest' ? manifestControls(s,m) : '') + '</details>' : '') +
+    (s.verifiedBy ? '<details><summary>Physical verification</summary><p>Verified by ' + escape(s.verifiedBy) +
+      ' on ' + escape(time(s.verifiedAt)) + '.</p></details>' : '') +
     (s.source === 'C72 hardware' ? readerSettings(s) : '') +
-    (s.confirmedAt ? '<section class="panel"><p class="status match">Clean carton match confirmed.</p></section>' : '') +
-    (manifest && s.verifiedBy && permits(role,'scan') && !s.closedAt && !s.confirmedAt ?
-      '<section class="panel"><h2>RFID check</h2>' +
-      button('open-scan',s.identified ? 'Open carton scanner' : 'Open pallet scanner') + '</section>' : '') +
-    (s.runs.length ? comparisons(s) : '') + closure(s) +
-    showManifest(s,manifest) + (manifest ? verification(s) : '') +
-    (permits(role,'export') && !active ? '<section class="panel">' + button('export-one','Export this test','class="secondary"') + '</section>' : '') +
-    '<section class="panel"><details><summary>Session log (' + s.logs.length + ')</summary><ul class="log">' +
+    '<details><summary>Session log (' + s.logs.length + ')</summary><ul class="log">' +
     s.logs.slice().reverse().map(e => '<li><strong>' + escape(e.action) + '</strong><br>' + escape(e.detail) +
-      '<br><small>' + escape(e.actor) + ' / ' + escape(time(e.at)) + '</small></li>').join('') + '</ul></details></section>';
+      '<br><small>' + escape(e.actor) + ' / ' + escape(time(e.at)) + '</small></li>').join('') + '</ul></details>' +
+    (permits(role,'export') && !active ? button('export-one','Export this test','class="secondary"') : '') + '</section>';
 }
-function showManifest(s,m) {
-  let result = '<section class="panel"><h2>Expected cartons</h2>';
-  // A multi-pallet file lists every pallet until the pallet scan locks one.
-  const pallets = m?.pallets?.length > 1 ? m.pallets : null;
-  if (m) result += '<p>' + escape(m.pallet) + ' / ' + (pallets && !m.palletEpc ?
-      pallets.reduce((n,p) => n + p.cartons.length,0) + ' cartons, locks on scan' : m.cartons.length + ' cartons') +
-    ' / Revision ' + m.revision + (pallets && m.palletEpc ? ' / locked from ' + pallets.length + ' pallets' : '') +
-    '</p><details><summary>Carton EPCs and SKUs</summary><p>' + escape(m.source) + '</p><ul class="log">' +
-    (pallets && !m.palletEpc ? pallets.flatMap(p => p.cartons.map(c => ({...c, carton:p.pallet + ' / ' + c.carton}))) : m.cartons)
-      .map(c => '<li>' + escape([c.carton, c.sku].filter(Boolean).join(' / ')) + '<br><code>' + escape(c.epc) + '</code></li>').join('') + '</ul></details>';
-  // Revising after a scan is allowed until a clean match is confirmed; earlier runs keep their own revision (section 8).
-  if (!s.closedAt && !s.confirmedAt && !active && permits(role,'manifest')) {
-    const hardware = s.source === 'C72 hardware';
-    result += (s.runs.length ? '<p class="muted">A revision needs a reason, a new physical verification and pallet identification. ' +
-        'Earlier runs stay on the revision they were scanned against.</p>' : '') +
-      '<p class="muted">Use the provisional CSV format. One row per carton.</p><div class="row">' +
-      (hardware ? (liveSample ? button('sample','Use live sample','class="secondary"') : '') :
-        button('sample','Use sample manifest','class="secondary"')) + button('csv','Choose CSV','class="secondary"') +
-      button('template',hardware && liveSample ? 'Save live sample CSV' : 'Save CSV template','class="secondary"') + '</div>';
-    if (!bridge) result += '<label class="line">CSV file<input id="csv-file" type="file" accept=".csv,text/csv"></label>';
-    if (pendingImport) result += '<form class="line stack" id="manifest"><p>' + escape(pendingImport.name) + ' / ' +
-      pendingImport.data.pallets.length + ' pallet(s) / ' + pendingImport.data.pallets.reduce((n,p) => n + p.cartons.length,0) +
-      ' cartons</p><div class="fields">' +
-      field('reserves','Reserve labels',s.allocation.reserves ?? 0,'type="number" min="0" max="500" required') +
-      field('candidates','Candidate labels',s.allocation.candidates ?? 0,'type="number" min="0" max="500" required') +
-      (m ? field('reason','Revision reason','','maxlength="160" required') : '') +
-      '</div><button>Save manifest</button></form>';
-  } else if (!m) result += '<p class="muted">Select Test lead to load the manifest.</p>';
-  return result + '</section>';
+// A multi-pallet file lists every pallet until the pallet scan locks one.
+function manifestSummary(m) {
+  const pallets = m.pallets?.length > 1 ? m.pallets : null;
+  return m.pallet + ' / ' + (pallets && !m.palletEpc ? pallets.reduce((n,p) => n + p.cartons.length,0) + ' cartons, locks on scan' :
+    m.cartons.length + ' cartons') + ' / Revision ' + m.revision + (pallets && m.palletEpc ? ' / locked from ' + pallets.length + ' pallets' : '');
 }
-function verification(s) {
-  if (s.verifiedBy) return '<section class="panel"><h2>Physical verification</h2><p>Verified by ' + escape(s.verifiedBy) +
-    ' on ' + escape(time(s.verifiedAt)) + '.</p></section>';
-  return '<section class="panel"><h2>Physical verification</h2><p>Check pallet contents, unique labels and label placement against the manifest.</p>' +
-    (permits(role,'verify') && !s.closedAt ? '<form id="verify" class="stack"><label class="check"><input name="checked" type="checkbox" required>Contents and label assignment verified</label><button>Record verification</button></form>' :
-      '<p class="muted">Select Supervisor to verify.</p>') + '</section>';
+function manifestList(m) {
+  const pallets = m.pallets?.length > 1 && !m.palletEpc ? m.pallets : null;
+  return '<p>' + escape(manifestSummary(m)) + '</p><p class="muted">' + escape(m.source) + '</p><ul class="log">' +
+    (pallets ? pallets.flatMap(p => p.cartons.map(c => ({...c, carton:p.pallet + ' / ' + c.carton}))) : m.cartons)
+      .map(c => '<li>' + escape([c.carton, c.sku].filter(Boolean).join(' / ')) + '<br><code>' + escape(c.epc) + '</code></li>').join('') + '</ul>';
+}
+// Revising after a scan is allowed until a clean match is confirmed; earlier runs keep their own revision (section 8).
+function manifestControls(s,m) {
+  if (s.closedAt || s.confirmedAt || active || !permits(role,'manifest')) return '';
+  const hardware = s.source === 'C72 hardware';
+  let result = (s.runs.length ? '<p class="muted">A revision needs a reason, a new check by hand and a new pallet scan. ' +
+      'Earlier runs stay on the revision they were scanned against.</p>' : '') +
+    '<p class="muted">One CSV row per carton. Several pallets in one file are fine.</p><div class="row">' +
+    (hardware ? (liveSample ? button('sample','Use live sample','class="secondary"') : '') :
+      button('sample','Use sample manifest','class="secondary"')) + button('csv','Choose CSV','class="secondary"') +
+    button('template',hardware && liveSample ? 'Save live sample CSV' : 'Save CSV template','class="secondary"') + '</div>';
+  if (!bridge) result += '<label class="line">CSV file<input id="csv-file" type="file" accept=".csv,text/csv"></label>';
+  if (pendingImport) result += '<form class="line stack" id="manifest"><p>' + escape(pendingImport.name) + ' / ' +
+    pendingImport.data.pallets.length + ' pallet(s) / ' + pendingImport.data.pallets.reduce((n,p) => n + p.cartons.length,0) +
+    ' cartons</p><div class="fields">' +
+    field('reserves','Reserve labels',s.allocation.reserves ?? 0,'type="number" min="0" max="500" required') +
+    field('candidates','Candidate labels',s.allocation.candidates ?? 0,'type="number" min="0" max="500" required') +
+    (m ? field('reason','Revision reason','','maxlength="160" required') : '') +
+    '</div><button>Save manifest</button></form>';
+  return result;
 }
 function readerSettings(s) {
   const profile = reader.profile;
   const canSet = !s.closedAt && permits(role,'reader-power') && bridge?.setReaderPower;
-  return '<section class="panel"><h2>Reader settings</h2><p>' + escape(reader.message) + '</p>' +
-    (profile ? '<p><strong>' + escape(profile.region) + ' / ' + escape(profile.powerDbm ?? 'Unknown') + ' dBm</strong></p>' : '') +
+  return '<details><summary>Reader: ' + escape(profile ? profile.region + ' / ' + (profile.powerDbm ?? 'Unknown') + ' dBm' :
+      reader.ready ? 'ready' : 'not ready') + '</summary><p>' + escape(reader.message) + '</p>' +
     (canSet && reader.ready ?
       '<form id="reader-power" class="row">' + field('power','Output power (dBm)',profile?.powerDbm,
         'type="number" min="5" max="30" step="1" required ' + (powerRequest ? 'disabled' : '')) +
       '<button ' + (powerRequest ? 'disabled' : '') + '>' + (powerRequest ? 'Setting power…' : 'Set power') + '</button></form>' :
-      (canSet && !reader.ready ? button('reconnect','Check reader','class="secondary"') : '')) + '</section>';
+      (canSet && !reader.ready ? button('reconnect','Check reader','class="secondary"') : '')) + '</details>';
 }
 function scanPanel(s) {
   const run = latest(s);
@@ -344,15 +418,6 @@ function comparisons(s) {
     (run && !active && !s.closedAt && permits(role,'investigate') ? '<form id="run-note" class="line stack">' +
       field('note','Note on the current run','','required maxlength="300" placeholder="Label position, pallet build, shielding, environment"') +
       '<button class="secondary">Save run note</button></form>' : '') + '</section>';
-}
-function closure(s) {
-  if (s.closedAt) return '<section class="panel"><h2>Session closed</h2><p>' + escape(s.closure.coverage) +
-    '</p><p class="muted">Signed by ' + escape(s.closure.actor) + ' on ' + escape(time(s.closedAt)) + '.</p></section>';
-  if (active || !s.runs.length || !permits(role,'close')) return '';
-  return '<section class="panel"><details><summary>Review and close session</summary><form id="close" class="stack">' +
-    '<p>Review the planned test, recorded runs and missing-test reasons before closing.</p><p>Planned: ' + escape(s.planned) + '</p>' +
-    '<label>Coverage and missing-test reason<textarea name="coverage" required maxlength="500"></textarea></label>' +
-    '<label class="check"><input type="checkbox" name="reviewed" required>Results reviewed and signed off</label><button>Close test session</button></form></details></section>';
 }
 
 function begin() {
@@ -549,7 +614,7 @@ window.keypharmEvent = (name,data) => action(() => {
   }
 });
 
-root.addEventListener('change', event => action(() => {
+document.addEventListener('change', event => action(() => {
   const target = event.target;
   if (target.id === 'role' && !active) { role = target.value; pendingImport = undefined; feedback(''); render(); }
   if (target.id === 'person' && !active) {
@@ -559,6 +624,8 @@ root.addEventListener('change', event => action(() => {
       if (name && !store.people.includes(name)) store.people.push(name);
     });
     // No render here: change fires on blur, and re-rendering would swallow the tap that caused the blur.
+    document.querySelector('.who-text strong').textContent = name || 'Set your name';
+    document.querySelector('.who-initial').textContent = (name || '?').charAt(0).toUpperCase();
     feedback('');
   }
   if (target.id === 'scenario') scenario = target.value;
@@ -568,10 +635,13 @@ root.addEventListener('change', event => action(() => {
     file.text().then(text => action(() => chooseManifest(text,file.name))).catch(() => feedback('Could not read the CSV.',true));
   }
 }));
-root.addEventListener('input', event => {
+document.addEventListener('input', event => {
   if (event.target.id === 'rescan') rescanReason = event.target.value;
 });
-root.addEventListener('click', event => action(() => {
+document.addEventListener('click', event => action(() => {
+  // Tapping anywhere outside the identity menu folds it away.
+  const menu = document.querySelector('#who-menu');
+  if (menu?.open && !event.target.closest('#who-menu')) menu.open = false;
   const control = event.target.closest('button');
   if (control?.id === 'hw-toggle') { if (active) end(); else begin(); return; }
   if (!control || active || powerRequest) return;
@@ -582,6 +652,7 @@ root.addEventListener('click', event => action(() => {
     rescanReason = '';
   }
   if (command === 'new' && permits(role,'create')) view = 'new';
+  if (command === 'as-role' && roles[control.dataset.role]) { role = control.dataset.role; pendingImport = undefined; }
   if (command === 'back') { view = 'sessions'; pendingImport = undefined; }
   if (command === 'open-scan' && s?.manifest && s.verifiedBy && permits(role,'scan') && !s.closedAt && !s.confirmedAt) {
     view = 'scan';

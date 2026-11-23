@@ -17,9 +17,19 @@ def serve_assets(route):
         route.fulfill(status=404)
 
 
+def pick_role(page, role, close=True):
+    # Role and name live in the identity menu at the top left; it floats over the screen while open.
+    if page.locator("#who-menu").get_attribute("open") is None:
+        page.get_by_label("Role and name").click()
+    page.locator("#role").select_option(role)
+    if close:
+        page.get_by_label("Role and name").click()
+
+
 def as_person(page, role, name):
-    page.get_by_label("Local identity").select_option(role)
-    page.get_by_label("Your name").fill(name)  # no Tab: the next tap must both save the name and act
+    pick_role(page, role, close=False)
+    page.get_by_label("Your name").fill(name)  # no Tab: tapping the menu chip closed must also save the name
+    page.get_by_label("Role and name").click()
 
 
 def hold(page):
@@ -38,7 +48,7 @@ with sync_playwright() as playwright:
     device.route("https://handheld.test/**", serve_assets)
     device.goto("https://handheld.test/handheld.html")
     assert device.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth === 339")
-    device.get_by_label("Local identity").select_option("admin")
+    pick_role(device, "admin")
     device.get_by_label("One test per line: Test ID, then description").fill("KP-TEST-01 Mixed pallet check\nKP-TEST-02 Ginger pallet")
     device.get_by_role("button", name="Save test plan").click()
     expect(device.get_by_text("Not run", exact=True)).to_have_count(2)
@@ -55,9 +65,10 @@ with sync_playwright() as playwright:
     as_person(device, "supervisor", "Verifier B")
     device.get_by_label("Contents and label assignment verified").check()
     device.get_by_role("button", name="Record verification").click()
-    device.get_by_label("Local identity").select_option("operator")
+    pick_role(device, "operator", close=False)
     device.get_by_label("Your name").fill("Operator C")  # picked again from the remembered list
     device.get_by_label("Your name").press("Tab")
+    device.get_by_label("Role and name").click()
     assert device.locator("#people option").count() == 3
     device.get_by_role("button", name="Open pallet scanner").click()
     expect(device.get_by_role("heading", name="Scan pallet")).to_be_visible()
@@ -78,10 +89,11 @@ with sync_playwright() as playwright:
 
     # Manifest revision after a scan: needs a reason, then verification and pallet identification again.
     as_person(device, "admin", "Lead A")
+    device.locator("summary", has_text="Expected cartons").click()
     device.get_by_role("button", name="Use sample manifest").click()
     device.get_by_label("Revision reason").fill("Wrong carton list exported")
     device.get_by_role("button", name="Save manifest").click()
-    expect(device.get_by_text("KP-DEMO-01 / 4 cartons / Revision 2")).to_be_visible()
+    expect(device.locator(".next").get_by_text("KP-DEMO-01 / 4 cartons / Revision 2")).to_be_visible()
     as_person(device, "supervisor", "Verifier B")
     device.get_by_label("Contents and label assignment verified").check()
     device.get_by_role("button", name="Record verification").click()
@@ -125,7 +137,6 @@ with sync_playwright() as playwright:
     device.screenshot(path="build/handheld-smoke.png", full_page=True)
     proceed.click()
     expect(device.get_by_text("Clean carton match confirmed.")).to_be_visible()
-    device.get_by_text("Review and close session").click()
     device.get_by_label("Coverage and missing-test reason").fill("Planned mixed pallet check executed")
     device.get_by_label("Results reviewed and signed off").check()
     device.get_by_role("button", name="Close test session").click()
@@ -267,24 +278,24 @@ with sync_playwright() as playwright:
     hardware.get_by_role("button", name="New test session").click()
     hardware.get_by_role("button", name="Create session").click()
     expect(hardware.get_by_role("button", name="Set power")).to_have_count(0)
-    hardware.get_by_label("Local identity").select_option("admin")
+    pick_role(hardware, "admin")
     hardware.get_by_role("button", name="Use live sample").click(timeout=3000)
     hardware.get_by_role("button", name="Save manifest").click()
-    expect(hardware.get_by_text("KP-LIVE-SORTED-01 / 1 cartons", exact=False)).to_be_visible()
+    expect(hardware.locator(".next").get_by_text("KP-LIVE-SORTED-01 / 1 cartons", exact=False)).to_be_visible()
     assert hardware.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].manifest.demo") is False
-    expect(hardware.get_by_role("heading", name="Reader settings")).to_be_visible(timeout=3000)
+    hardware.locator("summary", has_text="Reader: ETSI / 30 dBm").click(timeout=3000)
     hardware.get_by_label("Output power (dBm)").fill("18")
     hardware.get_by_role("button", name="Set power").click()
     expect(hardware.locator("#notice")).to_contain_text("Reader power set to 18 dBm")
     saved = hardware.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].logs")
     assert saved[-1]["action"] == "Reader power changed" and "30 to 18 dBm" in saved[-1]["detail"]
-    hardware.get_by_label("Local identity").select_option("operator")
+    pick_role(hardware, "operator")
     expect(hardware.get_by_role("button", name="Set power")).to_have_count(0)
     expect(hardware.get_by_text("ETSI / 18 dBm")).to_be_visible()
-    hardware.get_by_label("Local identity").select_option("supervisor")
+    pick_role(hardware, "supervisor")
     hardware.get_by_label("Contents and label assignment verified").check()
     hardware.get_by_role("button", name="Record verification").click()
-    hardware.get_by_label("Local identity").select_option("operator")
+    pick_role(hardware, "operator")
     hardware.get_by_role("button", name="Open pallet scanner").click()
     hardware.evaluate("window.scanReads = [{epc:'E00000000000000000000009'}]; window.keypharmEvent('press',{})")
     hardware.evaluate("window.keypharmEvent('release',{})")
@@ -324,7 +335,7 @@ with sync_playwright() as playwright:
     multi.get_by_role("button", name="Use live sample").click()
     expect(multi.get_by_text("2 pallet(s) / 4 cartons", exact=False)).to_be_visible()
     multi.get_by_role("button", name="Save manifest").click()
-    expect(multi.get_by_text("Any of 2 pallets / 4 cartons, locks on scan", exact=False)).to_be_visible()
+    expect(multi.locator(".next").get_by_text("Any of 2 pallets / 4 cartons, locks on scan", exact=False)).to_be_visible()
     as_person(multi, "supervisor", "Verifier B")
     multi.get_by_label("Contents and label assignment verified").check()
     multi.get_by_role("button", name="Record verification").click()
