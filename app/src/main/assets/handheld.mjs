@@ -46,6 +46,7 @@ let rescanReason = '';
 let scenario = 'Missing one';
 let active;
 let reader = {ready:false,message:'Checking reader…'};
+let powerRequest;
 let dashboardUrl = '';
 let includeOtherRecords = false;
 let simulatedKeys = false;
@@ -98,10 +99,10 @@ try {
 } catch { storageError = true; }
 
 function roleBar() {
-  return '<div class="panel row spread"><label>Local identity<select id="role" ' + (active ? 'disabled' : '') + '>' +
+  return '<div class="panel row spread"><label>Local identity<select id="role" ' + (active || powerRequest ? 'disabled' : '') + '>' +
     Object.entries(roles).map(([value,label]) => '<option value="' + value + '" ' + (role === value ? 'selected' : '') +
       '>' + escape(label) + '</option>').join('') + '</select></label>' +
-    (view === 'sessions' ? '' : button('back','Sessions','class="secondary" ' + (active ? 'disabled' : ''))) + '</div>';
+    (view === 'sessions' ? '' : button('back','Sessions','class="secondary" ' + (active || powerRequest ? 'disabled' : ''))) + '</div>';
 }
 function render() {
   if (storageError) {
@@ -145,6 +146,7 @@ function showSession(s) {
     escape(s.source) + (s.closedAt ? ' / Closed' : '') + '</span></div><p>' + escape(s.location) + ' / ' + escape(s.level) +
     '</p><details><summary>Test setup</summary><ul class="log">' + Object.entries(metadata).slice(2).map(([k,v]) =>
       '<li><strong>' + escape(v) + '</strong> ' + escape(s[k] || '—') + '</li>').join('') + '</ul></details></section>' +
+    (s.source === 'C72 hardware' ? readerSettings(s) : '') +
     (s.confirmedAt ? '<section class="panel"><p class="status match">Clean carton match confirmed.</p></section>' : '') +
     (manifest && s.verifiedBy && permits(role,'scan') && !s.closedAt && !s.confirmedAt ?
       '<section class="panel"><h2>RFID check</h2>' +
@@ -180,6 +182,17 @@ function verification(s) {
   return '<section class="panel"><h2>Physical verification</h2><p>Check pallet contents, unique labels and label placement against the manifest.</p>' +
     (permits(role,'verify') && !s.closedAt ? '<form id="verify" class="stack"><label class="check"><input name="checked" type="checkbox" required>Contents and label assignment verified</label><button>Record verification</button></form>' :
       '<p class="muted">Select Supervisor to verify.</p>') + '</section>';
+}
+function readerSettings(s) {
+  const profile = reader.profile;
+  const canSet = !s.closedAt && permits(role,'reader-power') && bridge?.setReaderPower;
+  return '<section class="panel"><h2>Reader settings</h2><p>' + escape(reader.message) + '</p>' +
+    (profile ? '<p><strong>' + escape(profile.region) + ' / ' + escape(profile.powerDbm ?? 'Unknown') + ' dBm</strong></p>' : '') +
+    (canSet && reader.ready ?
+      '<form id="reader-power" class="row">' + field('power','Output power (dBm)',profile?.powerDbm,
+        'type="number" min="5" max="30" step="1" required ' + (powerRequest ? 'disabled' : '')) +
+      '<button ' + (powerRequest ? 'disabled' : '') + '>' + (powerRequest ? 'Setting power…' : 'Set power') + '</button></form>' :
+      (canSet && !reader.ready ? button('reconnect','Check reader','class="secondary"') : '')) + '</section>';
 }
 function scanPanel(s) {
   const run = latest(s);
@@ -419,7 +432,17 @@ function action(fn) {
 window.keypharmEvent = (name,data) => action(() => {
   if (name === 'reader') {
     reader = data;
-    if (view === 'scan' && !active) render();
+    if (!active && !powerRequest && (view === 'scan' || (view === 'session' && session()?.source === 'C72 hardware'))) render();
+  }
+  if (name === 'reader-power' && powerRequest?.id === data.id) {
+    const target = powerRequest.session;
+    powerRequest = undefined;
+    reader = {...reader, ready:data.ready ?? reader.ready, profile:data.profile ?? reader.profile};
+    if (data.ok && data.previousPower !== data.profile?.powerDbm) {
+      commit(() => log(target,'Reader power changed',data.previousPower + ' to ' + data.profile.powerDbm + ' dBm'));
+    }
+    feedback(data.message,!data.ok);
+    render();
   }
   if (name === 'manifest-file') chooseManifest(data.text,data.name);
   if (name === 'dashboard') {
@@ -464,7 +487,7 @@ root.addEventListener('input', event => {
 });
 root.addEventListener('click', event => action(() => {
   const control = event.target.closest('button');
-  if (!control || active) return;
+  if (!control || active || powerRequest) return;
   const s = session(), command = control.dataset.action;
   if (control.dataset.open) {
     selected = control.dataset.open;
@@ -509,8 +532,18 @@ root.addEventListener('click', event => action(() => {
 }));
 root.addEventListener('submit', event => action(() => {
   event.preventDefault();
-  if (active) return;
+  if (active || powerRequest) return;
   const form = event.target, data = Object.fromEntries(new FormData(form)), s = session();
+  if (form.id === 'reader-power' && view === 'session' && s?.source === 'C72 hardware' && !s.closedAt &&
+      reader.ready && permits(role,'reader-power') && bridge?.setReaderPower) {
+    const power = Number(data.power);
+    if (!Number.isInteger(power) || power < 5 || power > 30) throw new Error('Choose a power from 5 to 30 dBm.');
+    powerRequest = {id:id(), session:s};
+    feedback('');
+    render();
+    bridge.setReaderPower(powerRequest.id,power);
+    return;
+  }
   if (form.id === 'create' && permits(role,'create')) {
     if (Object.keys(metadata).some(k => k !== 'notes' && !data[k]?.trim())) throw new Error('Fill in the test setup fields.');
     const record = {...data,id:id(),creator:actor(),createdAt:now(),mode:'POC',runs:[],logs:[],allocation:{}};

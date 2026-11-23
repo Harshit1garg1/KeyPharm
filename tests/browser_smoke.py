@@ -144,5 +144,35 @@ with sync_playwright() as playwright:
     expect(dashboard.get_by_role("heading", name="KP-RECONNECTED")).to_be_visible()
     dashboard.set_viewport_size({"width":360, "height":700})
     assert dashboard.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+    hardware = browser.new_page(viewport={"width":360, "height":700})
+    hardware.on("pageerror", lambda error: errors.append(str(error)))
+    hardware.route("https://handheld.test/**", serve_assets)
+    hardware.add_init_script("""
+      window.KeypharmAndroid = {
+        publishSnapshot() {},
+        connectReader() {
+          window.keypharmEvent('reader', {ready:true, message:'UHF reader ready', profile:{region:'ETSI',powerDbm:30}});
+        },
+        setReaderPower(requestId, power) {
+          window.keypharmEvent('reader-power', {id:requestId, ok:true, ready:true, previousPower:30,
+            message:'Reader power set to ' + power + ' dBm', profile:{region:'ETSI',powerDbm:power}});
+        }
+      };
+    """)
+    hardware.goto("https://handheld.test/handheld.html")
+    hardware.get_by_role("button", name="New test session").click()
+    hardware.get_by_role("button", name="Create session").click()
+    expect(hardware.get_by_role("button", name="Set power")).to_have_count(0)
+    hardware.get_by_label("Local identity").select_option("admin")
+    expect(hardware.get_by_role("heading", name="Reader settings")).to_be_visible(timeout=3000)
+    hardware.get_by_label("Output power (dBm)").fill("5")
+    hardware.get_by_role("button", name="Set power").click()
+    expect(hardware.locator("#notice")).to_contain_text("Reader power set to 5 dBm")
+    saved = hardware.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].logs")
+    assert saved[-1]["action"] == "Reader power changed" and "30 to 5 dBm" in saved[-1]["detail"]
+    hardware.get_by_label("Local identity").select_option("operator")
+    expect(hardware.get_by_role("button", name="Set power")).to_have_count(0)
+    expect(hardware.get_by_text("ETSI / 5 dBm")).to_be_visible()
     assert not errors, errors
     print("Handheld and dashboard browser flow passed.")

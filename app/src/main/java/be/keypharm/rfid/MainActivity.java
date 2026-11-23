@@ -171,6 +171,17 @@ public final class MainActivity extends Activity {
             });
         }
 
+        @JavascriptInterface public void setReaderPower(String id, int power) {
+            hardware.execute(() -> {
+                JSONObject result = foreground && hardwareRun == null ? reader.setPower(power) :
+                        C72Reader.json("ok", false, "message", "Finish the active scan before changing power");
+                result = C72Reader.json("id", id, "ok", result.optBoolean("ok"),
+                        "message", result.optString("message"), "previousPower", result.opt("previousPower"),
+                        "ready", result.opt("ready"), "profile", result.opt("profile"));
+                event("reader-power", result);
+            });
+        }
+
         @JavascriptInterface public void startReader(String id) {
             hardware.execute(() -> {
                 boolean allowed = foreground && hardwareRun == null;

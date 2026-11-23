@@ -13,6 +13,8 @@ Offline C72 handheld workflow with a read-only web dashboard. Use Simulation to 
 
 For a physical test, start a session with **C72 hardware**, import the matching pallet and carton EPCs, verify the contents, and open the pallet scanner. Check the reader status before holding the physical trigger. When **Scan cartons** opens, hold the trigger again to read the carton set. The sample manifest contains synthetic EPCs.
 
+To adjust the range, select **Test lead** in an open hardware session and use **Reader settings**. The C72 supports 5–30 dBm for this POC. Set power while idle, verify the displayed read-back, and return to the approved test power after sorting tags. The ETSI region remains read-only. The session log records confirmed changes, and each scan records its actual power.
+
 ## Build and update
 
 For physical tag testing, convert a Chainway UHF XLS export on a PC with Python and `xlrd` installed:
