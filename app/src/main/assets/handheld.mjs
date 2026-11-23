@@ -162,15 +162,17 @@ function history() {
   const total = store.sessions.reduce((sum,s) => sum + allocationTotal(s.allocation),0);
   const records = store.sessions.slice().reverse().map(s => '<button class="record" data-open="' + escape(s.id) +
     '"><span><strong>' + escape(s.testId) + '</strong><small>' + escape(s.manifest?.pallet ?? 'No cartons loaded') + ' / ' +
-    escape(s.source) + '</small></span><span class="record-next" data-step="' + stepOf(s) + '">' + escape(nextLabel(s)) +
+    escape(s.source) + '</small></span><span class="record-next" data-step="' + stepOf(s) + '" data-alert="' + /^(Hold|Incomplete|Interrupted)/.test(nextLabel(s)) +
+    '">' + escape(nextLabel(s)) +
     '</span></button>').join('');
-  return '<section class="home"><div class="row spread title-row"><h1>Sessions</h1><small>' + total + ' of 500 labels used</small></div>' +
-    (permits(role,'create') ? button('new','New test session','class="scan-cta"') :
-      '<p class="muted">Switch to Operator or Test lead to start a test.</p>') +
-    (records ? '<div class="records">' + records + '</div>' :
-      '<p class="muted">No tests yet. Start one, load its cartons, then scan the pallet.</p>') + '</section>' +
-    (bridge ? readerCard() : '') + planPanel() +
-    (permits(role,'export') ? '<section class="panel"><h2>Evidence</h2><div class="row">' +
+  // Reader status first (checked before any scan), then the sessions as one list; the main action sits in the thumb zone.
+  return (bridge ? readerCard() : '') +
+    '<section class="home"><div class="row spread section-head"><h1>Sessions</h1><small>' + total + ' of 500 labels used</small></div>' +
+    (records ? '<div class="group records">' + records + '</div>' :
+      '<p class="empty">No tests yet. Start one, load its cartons, then scan the pallet.</p>') +
+    (permits(role,'create') ? '' : '<p class="muted">Switch to Operator or Test lead to start a test.</p>') + '</section>' +
+    planPanel() +
+    (permits(role,'export') ? '<h2 class="section-title">Evidence</h2><section class="panel"><div class="row">' +
       button('export','Export CSV and summary','class="secondary" ' + (!store.sessions.length ? 'disabled' : '')) +
       (bridge ? button('dashboard',dashboardUrl ? 'Stop dashboard sharing' : 'Share web dashboard','class="secondary"') : '') +
       '</div>' + (bridge && role === 'admin' && !dashboardUrl ?
@@ -178,13 +180,14 @@ function history() {
       (dashboardUrl ? '<div class="line dashboard-share"><div class="dashboard-qr" role="img" aria-label="Dashboard QR code">' +
       dashboardQr + '</div><div><p>Scan the QR code or open the private link on the same Wi-Fi network. ' +
       (includeOtherRecords ? 'All local sessions are shared.' : 'Sample simulation sessions are shared.') + '</p><p><code>' + escape(dashboardUrl) +
-      '</code></p>' + button('copy','Copy dashboard link','class="secondary"') + '</div></div>' : '') + '</section>' : '');
+      '</code></p>' + button('copy','Copy dashboard link','class="secondary"') + '</div></div>' : '') + '</section>' : '') +
+    (permits(role,'create') ? '<div class="actionbar">' + button('new','New test session','class="scan-cta"') + '</div>' : '');
 }
 // Planned tests for the day (FR-28 coverage): the Test lead enters them, closing the day needs a reason for every test not run.
 function planPanel() {
   const plan = store.plan;
   const {tests, unplanned} = planCoverage(plan, store.sessions);
-  let html = '<section class="panel"><h2>PoC test plan</h2>';
+  let html = '<h2 class="section-title">PoC test plan</h2><section class="panel">';
   html += tests.length ? '<ul class="log">' + tests.map(t => '<li><strong>' + escape(t.id) + '</strong> ' + escape(t.title) +
       '<br><small>' + escape(t.status) + (plan.closure?.skipped?.[t.id] ? ' / not run: ' + escape(plan.closure.skipped[t.id]) : '') +
       '</small></li>').join('') + '</ul>' + (unplanned.length ? '<p class="muted">Not in plan: ' + escape(unplanned.join(', ')) + '</p>' : '')
@@ -265,7 +268,7 @@ function closeForm(s) {
 }
 function detailsPanel(s, step) {
   const m = s.manifest;
-  return '<section class="panel details"><h2>Details</h2>' +
+  return '<h2 class="section-title">Details</h2><section class="panel details">' +
     '<details><summary>Test setup</summary><ul class="log">' + Object.entries(metadata).slice(2).map(([k,v]) =>
       '<li><strong>' + escape(v) + '</strong> ' + escape(s[k] || '—') + '</li>').join('') + '</ul></details>' +
     (m ? '<details' + (pendingImport ? ' open' : '') + '><summary>Expected cartons</summary>' + manifestList(m) +
@@ -325,9 +328,13 @@ function readerControls(closed) {
     '<button ' + (powerRequest ? 'disabled' : '') + '>' + (powerRequest ? 'Setting power…' : 'Set power') + '</button></form>' +
     '<p class="muted">5 to 30 dBm. Each scan records the power it used.</p>';
 }
+// One glanceable row (Android settings pattern: show the current value); tap to change. The old DOM is still in place
+// while this string is built, so its open state carries over the re-render.
 function readerCard() {
-  return '<section class="panel reader-card"><div class="row spread"><h2>C72 reader</h2><span class="reader-state" data-ready="' +
-    reader.ready + '">' + escape(readerStatus()) + '</span></div><p>' + escape(reader.message) + '</p>' + readerControls(false) + '</section>';
+  const open = document.querySelector('#reader-card')?.open || powerRequest;
+  return '<details class="panel reader-card" id="reader-card"' + (open ? ' open' : '') + '><summary><span class="reader-label">' +
+    '<strong>C72 reader</strong><small>' + escape(reader.message) + '</small></span><span class="reader-state" data-ready="' +
+    reader.ready + '">' + escape(readerStatus()) + '</span></summary><div class="reader-body">' + readerControls(false) + '</div></details>';
 }
 function readerSettings(s) {
   return '<details><summary>Reader settings: ' + escape(readerStatus()) + '</summary><p>' + escape(reader.message) + '</p>' +

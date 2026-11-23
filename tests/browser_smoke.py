@@ -317,6 +317,7 @@ with sync_playwright() as playwright:
     # Reader power is on the home screen: the Test lead sets it, other roles see who does.
     as_person(hardware, "admin", "Lead A")
     expect(hardware.locator(".reader-card")).to_contain_text("ETSI / 30 dBm")
+    hardware.locator("#reader-card > summary").click()  # one glanceable row; tap it to change power
     hardware.locator(".reader-card").get_by_label("Output power (dBm)").fill("25")
     hardware.locator(".reader-card").get_by_role("button", name="Set power").click()
     expect(hardware.locator("#notice")).to_contain_text("Reader power set to 25 dBm")

@@ -15,7 +15,7 @@ For a physical test, start a session with **C72 hardware**. The Test lead can se
 
 Simulation uses a separate synthetic sample. To build with the physical sample, place the validated CSV at `app/src/main/assets/private-live-sample.csv`. This file is ignored by Git and bundled in that APK. Keep APKs containing live EPCs within the test team.
 
-To adjust the range, select **Test lead** and use the **C72 reader** card on the home screen, or **Details → Reader settings** inside a hardware session. The C72 supports 5–30 dBm for this POC. Set power while idle, verify the displayed read-back, and return to the approved test power after sorting tags. The ETSI region remains read-only. A change made inside a session is logged there, and each scan records its actual power.
+To adjust the range, select **Test lead** and tap the **C72 reader** row at the top of the home screen, or **Details → Reader settings** inside a hardware session. The C72 supports 5–30 dBm for this POC. Set power while idle, verify the displayed read-back, and return to the approved test power after sorting tags. The ETSI region remains read-only. A change made inside a session is logged there, and each scan records its actual power.
 
 ## Build and update
 
