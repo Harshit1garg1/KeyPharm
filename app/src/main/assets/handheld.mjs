@@ -1,6 +1,6 @@
 import {SAMPLE, EXTRA_EPC, normalizeEpc, parseManifest, compare, scanDelta, canContinue, canClose,
   roles, permits, allocationTotal, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary,
-  parsePlan, planCoverage, closePlanErrors} from './model.mjs';
+  parsePlan, planCoverage, closePlanErrors, lockPallet, lockTo, otherPallet, inManifest} from './model.mjs';
 
 const root = document.querySelector('#app');
 const notice = document.querySelector('#notice');
@@ -198,9 +198,14 @@ function showSession(s) {
 }
 function showManifest(s,m) {
   let result = '<section class="panel"><h2>Expected cartons</h2>';
-  if (m) result += '<p>' + escape(m.pallet) + ' / ' + m.cartons.length + ' cartons / Revision ' + m.revision +
+  // A multi-pallet file lists every pallet until the pallet scan locks one.
+  const pallets = m?.pallets?.length > 1 ? m.pallets : null;
+  if (m) result += '<p>' + escape(m.pallet) + ' / ' + (pallets && !m.palletEpc ?
+      pallets.reduce((n,p) => n + p.cartons.length,0) + ' cartons, locks on scan' : m.cartons.length + ' cartons') +
+    ' / Revision ' + m.revision + (pallets && m.palletEpc ? ' / locked from ' + pallets.length + ' pallets' : '') +
     '</p><details><summary>Carton EPCs and SKUs</summary><p>' + escape(m.source) + '</p><ul class="log">' +
-    m.cartons.map(c => '<li>' + escape([c.carton, c.sku].filter(Boolean).join(' / ')) + '<br><code>' + escape(c.epc) + '</code></li>').join('') + '</ul></details>';
+    (pallets && !m.palletEpc ? pallets.flatMap(p => p.cartons.map(c => ({...c, carton:p.pallet + ' / ' + c.carton}))) : m.cartons)
+      .map(c => '<li>' + escape([c.carton, c.sku].filter(Boolean).join(' / ')) + '<br><code>' + escape(c.epc) + '</code></li>').join('') + '</ul></details>';
   // Revising after a scan is allowed until a clean match is confirmed; earlier runs keep their own revision (section 8).
   if (!s.closedAt && !s.confirmedAt && !active && permits(role,'manifest')) {
     const hardware = s.source === 'C72 hardware';
@@ -212,7 +217,8 @@ function showManifest(s,m) {
       button('template',hardware && liveSample ? 'Save live sample CSV' : 'Save CSV template','class="secondary"') + '</div>';
     if (!bridge) result += '<label class="line">CSV file<input id="csv-file" type="file" accept=".csv,text/csv"></label>';
     if (pendingImport) result += '<form class="line stack" id="manifest"><p>' + escape(pendingImport.name) + ' / ' +
-      pendingImport.data.cartons.length + ' cartons</p><div class="fields">' +
+      pendingImport.data.pallets.length + ' pallet(s) / ' + pendingImport.data.pallets.reduce((n,p) => n + p.cartons.length,0) +
+      ' cartons</p><div class="fields">' +
       field('reserves','Reserve labels',s.allocation.reserves ?? 0,'type="number" min="0" max="500" required') +
       field('candidates','Candidate labels',s.allocation.candidates ?? 0,'type="number" min="0" max="500" required') +
       (m ? field('reason','Revision reason','','maxlength="160" required') : '') +
@@ -250,7 +256,8 @@ function scanPanel(s) {
     escape(isHardware ? (ready ? 'Reader ready' : 'Reader unavailable') : 'Simulation') + '</span></div>' +
     '<div class="scan-target"><div class="scan-signal" data-reading="false" aria-hidden="true"></div><div>' +
     '<p class="provenance">' + escape(s.manifest.pallet) + '</p>' +
-    (s.identified ? '<p class="muted">Pallet verified by UHF EPC.</p>' : '<p>Scan near the pallet tag. Other tags can stay nearby.</p>') +
+    (s.identified ? '<p class="muted">Pallet verified by UHF EPC.</p>' :
+      '<p>Scan near the pallet tag or any of its cartons. The pallet whose tags read strongest is locked; other tags can stay nearby.</p>') +
     (isHardware && reader.profile?.powerDbm != null ? '<p class="muted">Reader power: ' + escape(reader.profile.powerDbm) + ' dBm</p>' : '') +
     '<p class="muted">' + (isHardware ? 'Tap Start scan, or hold the C72 trigger and release to finish.' : 'Hold the demo trigger. Release to finish.') + '</p></div></div>' +
     (isHardware && !ready ? '<p class="status hold">' + escape(reader.message) + '</p>' +
@@ -288,7 +295,10 @@ function tagRows(s,r = scanResult(s)) {
   const pending = active || !latest(s)?.result;
   const row = (epc,title,state,label) => '<li class="tag-row" data-tag-status="' + state + '"><div><strong>' +
     escape(title) + '</strong><code>' + escape(epc) + '</code></div><span class="tag-badge">' + label + '</span></li>';
-  return r.extra.map(epc => row(epc,'Outside this pallet','unexpected','Unexpected')).join('') +
+  return r.extra.map(epc => {
+    const other = otherPallet(s.manifest,epc);
+    return row(epc,other ? 'Belongs to pallet ' + other : 'Outside this pallet','unexpected','Unexpected');
+  }).join('') +
     s.manifest.cartons.map(c => matched.has(c.epc) ? row(c.epc,c.carton,'matched','Expected') :
       pending ? row(c.epc,c.carton,'waiting','Waiting') : row(c.epc,c.carton,'missing','Missing')).join('');
 }
@@ -371,7 +381,7 @@ function begin() {
   updateScan();
 }
 function simReads(s, capture) {
-  if (capture.kind === 'pallet') return [{epc:s.manifest.palletEpc}];
+  if (capture.kind === 'pallet') return [{epc:(s.manifest.pallets?.[0] ?? s.manifest).palletEpc}];
   const expected = s.manifest.cartons.map(c => c.epc);
   const epcs = capture.scenario === 'Missing one' || capture.scenario === 'Interrupted' ? expected.slice(0,-1) : expected;
   if (capture.scenario === 'Unexpected extra') epcs.push(EXTRA_EPC);
@@ -390,7 +400,7 @@ function collect(reads) {
     const at = read.ms ? new Date(read.ms).toISOString() : now();
     if (!observations[epc]) {
       observations[epc] = {count:0,first:at};
-      if (active.kind === 'cartons' || epc === s.manifest.palletEpc) fresh++;
+      if (active.kind === 'cartons' || inManifest(s.manifest,epc)) fresh++;
     }
     const entry = observations[epc];
     entry.last = at;
@@ -426,13 +436,22 @@ function finalize(interrupted, message) {
   commit(() => {
     if (capture.kind === 'pallet') {
       const seen = Object.keys(capture.observations);
-      s.identified = !interrupted && seen.includes(s.manifest.palletEpc);
+      // Any tag of a loaded pallet locks it; with several pallets the strongest signal wins. Cartons then count only for it.
+      const lock = interrupted ? null : lockPallet(s.manifest,capture.observations);
+      s.identified = Boolean(lock);
+      if (lock && lock.pallet.palletEpc !== s.manifest.palletEpc) {
+        s.manifest = lockTo(s.manifest,lock.pallet);
+        s.allocation = {...s.allocation, cartons:lock.pallet.cartons.length, pallets:1};
+      }
       (s.palletAttempts ??= []).push({
         id:capture.id, startedAt:capture.startedAt, endedAt, observations:capture.observations,
-        profile:s.palletPending?.profile, actor:actor(), result:s.identified ? 'Identified' : 'Unconfirmed'
+        profile:s.palletPending?.profile, actor:actor(), result:s.identified ? 'Identified' : 'Unconfirmed',
+        lockedPallet:lock?.pallet.pallet
       });
       delete s.palletPending;
-      log(s,s.identified ? 'Pallet identified' : 'Pallet not confirmed',seen.join(', ') || 'No valid EPC read',capture.id);
+      log(s,lock ? 'Pallet locked' : 'Pallet not confirmed',lock ? lock.pallet.pallet + ' / strongest signal ' +
+        (Number.isFinite(lock.rssi) ? lock.rssi + ' dBm' : 'not reported') + ' / ' + lock.seen + ' of its tags read / ' +
+        seen.length + ' EPCs in range' : seen.join(', ') || 'No valid EPC read',capture.id);
     } else {
       const run = latest(s);
       run.endedAt = endedAt;
@@ -447,7 +466,7 @@ function finalize(interrupted, message) {
   if (interrupted) bridge?.feedback('error');
   active = undefined;
   rescanReason = '';
-  feedback(capture.kind === 'pallet' && !s.identified ? 'Pallet EPC not confirmed. Scan near the pallet tag and retry.' : '',capture.kind === 'pallet' && !s.identified);
+  feedback(capture.kind === 'pallet' && !s.identified ? 'Pallet EPC not confirmed: no tag from this manifest was read. Scan closer to the pallet and retry.' : '',capture.kind === 'pallet' && !s.identified);
   render();
   if (capture.kind === 'pallet' && s.identified) focusScan();
 }
@@ -627,7 +646,9 @@ root.addEventListener('submit', event => action(() => {
   }
   if (form.id === 'manifest' && s && !s.closedAt && !s.confirmedAt && permits(role,'manifest') && pendingImport) {
     if (s.manifest && !data.reason.trim()) throw new Error('Enter a reason for the revision.');
-    const allocation = {cartons:pendingImport.data.cartons.length,pallets:1,reserves:Number(data.reserves),candidates:Number(data.candidates)};
+    // Until the scan locks one pallet, every pallet and carton in the file counts toward the 500-label cap.
+    const allocation = {cartons:pendingImport.data.pallets.reduce((n,p) => n + p.cartons.length,0),pallets:pendingImport.data.pallets.length,
+      reserves:Number(data.reserves),candidates:Number(data.candidates)};
     const total = allocationTotal(allocation) + store.sessions.filter(other => other.id !== s.id).reduce((sum,other) => sum + allocationTotal(other.allocation),0);
     if (total > 500) throw new Error('POC label allocation cannot exceed 500 across sessions.');
     commit(() => {

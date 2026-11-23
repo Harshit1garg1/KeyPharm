@@ -300,5 +300,49 @@ with sync_playwright() as playwright:
     hardware.evaluate("window.keypharmEvent('release',{})")
     expect(hardware.locator(".tag-row[data-tag-status=unexpected]")).to_have_count(1)
     expect(hardware.get_by_role("button", name="Continue",exact=True)).to_be_disabled()
+
+    # One CSV with two pallets: the strongest tag (a pallet-B carton) locks pallet B; a pallet-A carton is then flagged.
+    multi = browser.new_page(viewport={"width":360, "height":700})
+    multi.on("pageerror", lambda error: errors.append(str(error)))
+    multi.route("https://handheld.test/**", serve_assets)
+    multi.add_init_script(r"""
+      window.KeypharmAndroid = {
+        publishSnapshot() {}, feedback() {},
+        liveSampleManifest() {
+          return 'pallet_ref;pallet_epc;carton_ref;carton_epc;sku\n' +
+            'PAL-A;A1A1;A-01;C0A1;x\nPAL-A;A1A1;A-02;C0A2;x\nPAL-B;B1B1;B-01;C0B1;y\nPAL-B;B1B1;B-02;C0B2;y\n';
+        },
+        connectReader() { window.keypharmEvent('reader', {ready:true, message:'UHF reader ready', profile:{region:'ETSI',powerDbm:30}}); },
+        startReader(id) { window.keypharmEvent('started', {id, profile:{region:'ETSI',powerDbm:30}}); },
+        stopReader(id) { window.keypharmEvent('ended', {id, reads:window.scanReads, interrupted:false}); }
+      };
+    """)
+    multi.goto("https://handheld.test/handheld.html")
+    as_person(multi, "admin", "Lead A")
+    multi.get_by_role("button", name="New test session").click()
+    multi.get_by_role("button", name="Create session").click()
+    multi.get_by_role("button", name="Use live sample").click()
+    expect(multi.get_by_text("2 pallet(s) / 4 cartons", exact=False)).to_be_visible()
+    multi.get_by_role("button", name="Save manifest").click()
+    expect(multi.get_by_text("Any of 2 pallets / 4 cartons, locks on scan", exact=False)).to_be_visible()
+    as_person(multi, "supervisor", "Verifier B")
+    multi.get_by_label("Contents and label assignment verified").check()
+    multi.get_by_role("button", name="Record verification").click()
+    as_person(multi, "operator", "Operator C")
+    multi.get_by_role("button", name="Open pallet scanner").click()
+    multi.evaluate("window.scanReads = [{epc:'C0A1', rssi:'-62.0'}, {epc:'C0B2', rssi:'-41.5'}, {epc:'FFFF', rssi:'-30'}]")
+    multi.get_by_role("button", name="Start scan").click()
+    multi.get_by_role("button", name="Stop scan").click()
+    expect(multi.get_by_role("heading", name="Scan cartons")).to_be_visible()
+    locked = multi.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0]")
+    assert (locked["manifest"]["pallet"], len(locked["manifest"]["cartons"]), locked["allocation"]["cartons"]) == ("PAL-B", 2, 2), locked["manifest"]
+    assert locked["logs"][-1]["action"] == "Pallet locked" and "-41.5 dBm" in locked["logs"][-1]["detail"], locked["logs"][-1]
+    multi.evaluate("window.scanReads = [{epc:'C0B1'}, {epc:'C0B2'}, {epc:'C0A1'}]")
+    multi.get_by_role("button", name="Start scan").click()
+    multi.get_by_role("button", name="Stop scan").click()
+    expect(multi.locator(".tag-row[data-tag-status=unexpected]")).to_contain_text("Belongs to pallet PAL-A")
+    expect(multi.locator(".tag-row[data-tag-status=matched]")).to_have_count(2)
+    expect(multi.get_by_role("button", name="Continue", exact=True)).to_be_disabled()
+
     assert not errors, errors
     print("Handheld and dashboard browser flow passed.")

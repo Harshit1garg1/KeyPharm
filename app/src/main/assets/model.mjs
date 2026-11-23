@@ -25,7 +25,8 @@ export function parseManifest(text) {
   const sep = [',', ';'].find(s => header.split(s).map(h => h.trim()).join() === columns.join());
   if (!sep) throw new Error('Use the five headers from the sample CSV, separated by commas or semicolons.');
   if (!lines.length) throw new Error('Manifest needs at least one carton.');
-  let manifest;
+  // One file may list several pallets; the scan later locks to one of them (see lockPallet).
+  const pallets = new Map(), palletRefs = new Map();
   const epcs = new Set();
   const references = new Set();
   const errors = [];
@@ -38,13 +39,19 @@ export function parseManifest(text) {
       const palletEpc = normalizeEpc(palletTag), epc = normalizeEpc(tag);
       if (!pallet || !carton) throw new Error('Row ' + row + ': provide pallet and carton references.');
       if (!validEpc(palletEpc) || !validEpc(epc)) throw new Error('Row ' + row + ': EPC must be even-length hexadecimal.');
-      if (epc === palletEpc || epcs.has(epc)) throw new Error('Row ' + row + ': duplicate EPC.');
+      if (epc === palletEpc || epcs.has(epc) || palletRefs.has(epc)) throw new Error('Row ' + row + ': duplicate EPC.');
       if (references.has(carton.toUpperCase())) throw new Error('Row ' + row + ': duplicate carton reference.');
-      manifest ??= {pallet, palletEpc, cartons: []};
-      if (pallet !== manifest.pallet || palletEpc !== manifest.palletEpc) throw new Error('Row ' + row + ': use one pallet per file.');
+      let entry = pallets.get(pallet);
+      if (entry && entry.palletEpc !== palletEpc) throw new Error('Row ' + row + ': pallet ' + pallet + ' already has another pallet EPC.');
+      if (!entry) {
+        if (palletRefs.has(palletEpc) || epcs.has(palletEpc)) throw new Error('Row ' + row + ': pallet EPC is already used in this file.');
+        entry = {pallet, palletEpc, cartons: []};
+        pallets.set(pallet, entry);
+        palletRefs.set(palletEpc, pallet);
+      }
       epcs.add(epc);
       references.add(carton.toUpperCase());
-      manifest.cartons.push({epc, carton, sku});
+      entry.cartons.push({epc, carton, sku});
     } catch (error) {
       errors.push(error.message);
     }
@@ -54,9 +61,33 @@ export function parseManifest(text) {
     const more = errors.length > 20 ? ['\u2026and ' + (errors.length - 20) + ' more rows.'] : [];
     throw new Error([...errors.slice(0, 20), ...more].join('\n'));
   }
-  if (!manifest) throw new Error('Manifest needs at least one carton.');
-  return manifest;
+  const list = [...pallets.values()];
+  if (!list.length) throw new Error('Manifest needs at least one carton.');
+  // A single-pallet file is already locked; a multi-pallet file has no expected cartons until the scan locks one.
+  return list.length === 1 ? {...list[0], pallets:list} :
+    {pallet:'Any of ' + list.length + ' pallets', palletEpc:'', cartons:[], pallets:list};
 }
+
+const palletsOf = m => m?.pallets?.length ? m.pallets : (m ? [m] : []);
+const tagsOf = p => [p.palletEpc, ...p.cartons.map(c => c.epc)];
+export const inManifest = (manifest, epc) => palletsOf(manifest).some(p => tagsOf(p).includes(epc));
+
+// Any tag of a pallet (its pallet tag or a carton) can lock it; the pallet with the strongest RSSI wins,
+// then the one with more tags read. ponytail: RSSI from one short read, raise power or move closer if the wrong pallet wins.
+export function lockPallet(manifest, observations) {
+  let best = null;
+  for (const pallet of palletsOf(manifest)) {
+    const seen = tagsOf(pallet).filter(epc => observations[epc]);
+    if (!seen.length) continue;
+    const rssi = Math.max(...seen.map(epc => parseFloat(observations[epc].rssi)).filter(Number.isFinite));
+    if (!best || rssi > best.rssi || (rssi === best.rssi && seen.length > best.seen)) best = {pallet, rssi, seen:seen.length};
+  }
+  return best;
+}
+export const lockTo = (manifest, pallet) => ({...manifest, pallet:pallet.pallet, palletEpc:pallet.palletEpc, cartons:pallet.cartons});
+// The other loaded pallet an unexpected EPC belongs to, if any.
+export const otherPallet = (manifest, epc) =>
+  palletsOf(manifest).find(p => p.palletEpc !== manifest.palletEpc && tagsOf(p).includes(epc))?.pallet;
 
 export function compare(manifest, observed) {
   const expected = new Set(manifest.cartons.map(c => c.epc));
@@ -157,21 +188,24 @@ export function specEvidenceCsv(store) {
         const outcome = log.action.slice('Unexpected EPC '.length);
         disposition.set(epc, {outcome:outcome.charAt(0).toUpperCase() + outcome.slice(1), note:note.join(' / ')});
       }
-      const row = (epc, classification, expected, observed, code) => {
+      const row = (epc, classification, expected, observed, code, note) => {
         const c = cartons.get(epc), read = run.observations[epc], d = disposition.get(epc);
         return [s.id, s.mode ?? 'POC', '', m?.pallet, s.testId, run.id, index ? 'Rescan' : 'First pass',
           run.startedAt, run.endedAt, run.elapsedSeconds, s.location, s.level, c?.sku, c?.carton,
           expected ? epc : '', observed ? epc : '', classification, p.model ?? p.name, p.deviceId, p.region, p.powerDbm,
           run.method ?? s.method, s.label, s.placement, s.shielding, r.percent,
           run.state === 'Finished' ? r.status : run.state, code, run.operator, s.closure?.actor, d?.outcome,
-          [run.reason && 'Rescan reason: ' + run.reason, d?.note, ...notes].filter(Boolean).join(' | '),
+          [note, run.reason && 'Rescan reason: ' + run.reason, d?.note, ...notes].filter(Boolean).join(' | '),
           read?.count, read?.first, read?.last, read?.rssi];
       };
       for (const c of m?.cartons ?? []) {
         const seen = r.matched.includes(c.epc);
         rows.push(row(c.epc, seen ? 'Matched' : 'Missing', true, seen, seen ? '' : 'MISSING_CARTON'));
       }
-      for (const epc of r.extra) rows.push(row(epc, 'Unexpected', false, true, 'UNEXPECTED_EPC'));
+      for (const epc of r.extra) {
+        const other = otherPallet(m, epc);
+        rows.push(row(epc, 'Unexpected', false, true, other ? 'OTHER_PALLET_EPC' : 'UNEXPECTED_EPC', other && 'Belongs to pallet ' + other));
+      }
       if (run.observations[m?.palletEpc]) rows.push(row(m.palletEpc, 'Pallet tag', false, true, ''));
     });
   }
