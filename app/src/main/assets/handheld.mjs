@@ -5,7 +5,6 @@ const root = document.querySelector('#app');
 const notice = document.querySelector('#notice');
 const bridge = window.KeypharmAndroid;
 const key = 'keypharm-poc-v1';
-const names = {admin:'Demo test lead', operator:'Demo operator', supervisor:'Demo supervisor', reviewer:'Demo reviewer'};
 const metadata = {
   testId:'Test ID', location:'Location', level:'Storage level', product:'Product mix', palletType:'Pallet type',
   label:'Label type and size', placement:'Label position and orientation', wrapping:'Wrapping',
@@ -17,7 +16,11 @@ const defaults = {
   shielding:'Not tested', method:'Walk around the pallet', planned:'Verify a mixed pallet', notes:''
 };
 const now = () => new Date().toISOString();
-const actor = () => names[role];
+// The person holding the device signs every record (operator, verifier, sign-off); roles stay local and unauthenticated.
+const actor = () => {
+  if (!store.person) throw new Error('Enter your name at the top before recording anything.');
+  return store.person;
+};
 const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]);
 const time = value => value ? new Date(value).toLocaleString() : '—';
 const id = () => crypto.randomUUID();
@@ -28,12 +31,13 @@ const counts = r => '<div class="counts">' + [
   ['Expected',r.expected],['Matched',r.matched.length],['Missing',r.missing.length],['Extra',r.extra.length]
 ].map(([name,n]) => '<div><strong>' + n + '</strong><span>' + name + '</span></div>').join('') + '</div>';
 
-let store = {sessions:[]}, storageError = false;
+let store = {sessions:[],people:[]}, storageError = false;
 try {
   const saved = localStorage.getItem(key);
   if (saved) {
     store = JSON.parse(saved);
     if (!Array.isArray(store.sessions)) throw new Error('Invalid local records');
+    store.people ??= [];
   }
 } catch {
   storageError = true;
@@ -101,6 +105,10 @@ function roleBar() {
   return '<div class="panel row spread"><label>Local identity<select id="role" ' + (active ? 'disabled' : '') + '>' +
     Object.entries(roles).map(([value,label]) => '<option value="' + value + '" ' + (role === value ? 'selected' : '') +
       '>' + escape(label) + '</option>').join('') + '</select></label>' +
+    // ponytail: names are only added, never edited; clear app data to reset the list if a typo matters.
+    '<label>Your name<input id="person" list="people" maxlength="60" autocomplete="off" placeholder="Pick or type your name" value="' +
+      escape(store.person) + '" ' + (active ? 'disabled' : '') + '></label><datalist id="people">' +
+      store.people.map(name => '<option value="' + escape(name) + '"></option>').join('') + '</datalist>' +
     (view === 'sessions' ? '' : button('back','Sessions','class="secondary" ' + (active ? 'disabled' : ''))) + '</div>';
 }
 function render() {
@@ -153,7 +161,7 @@ function showManifest(s,m) {
   let result = '<section class="panel"><h2>Expected cartons</h2>';
   if (m) result += '<p>' + escape(m.pallet) + ' / ' + m.cartons.length + ' cartons / Revision ' + m.revision +
     '</p><details><summary>Carton EPCs and SKUs</summary><p>' + escape(m.source) + '</p><ul class="log">' +
-    m.cartons.map(c => '<li>' + escape(c.carton) + ' / ' + escape(c.sku) + '<br><code>' + escape(c.epc) + '</code></li>').join('') + '</ul></details>';
+    m.cartons.map(c => '<li>' + escape([c.carton, c.sku].filter(Boolean).join(' / ')) + '<br><code>' + escape(c.epc) + '</code></li>').join('') + '</ul></details>';
   if (!s.closedAt && !s.runs.length && !active && permits(role,'manifest')) {
     result += '<p class="muted">Use the provisional CSV format. One row per carton.</p><div class="row">' +
       button('sample','Use sample manifest','class="secondary"') + button('csv','Choose CSV','class="secondary"') +
@@ -191,7 +199,7 @@ function scanPanel(s) {
     '<p class="provenance">' + escape(s.manifest.pallet) + '</p><div id="scan-results"><p class="status ' +
     escape(status.toLowerCase()) + '">' + escape(status) + '</p>' + (r ? counts(r) : '') + '</div>' +
     (s.identified ? '<p class="muted">Pallet verified by UHF EPC.</p>' : '<p>Present the pallet tag before scanning cartons.</p>') +
-    (canScan ? '<p>' + (isHardware ? 'Hold the trigger to scan. Release to finish.' : 'Hold the demo trigger. Release to finish.') + '</p>' : '') +
+    (canScan ? '<p>' + (isHardware ? 'Tap Start scan, or hold the trigger and release to finish.' : 'Hold the demo trigger. Release to finish.') + '</p>' : '') +
     (canScan && !isHardware && s.identified && !active ? '<label>Demo reads<select id="scenario">' +
       ['Missing one','Unexpected extra','Clean match','Interrupted'].map(item => '<option ' + (scenario === item ? 'selected' : '') +
         '>' + item + '</option>').join('') + '</select></label>' : '') +
@@ -199,6 +207,9 @@ function scanPanel(s) {
       '" placeholder="What changed before retrying?"></label>' : '') +
     (canScan && !isHardware ? '<button type="button" id="demo-trigger" class="secondary scan-cta" ' + (!ready ? 'disabled' : '') +
       '>Hold demo trigger</button>' : '') +
+    // Glove-friendly alternative to the trigger: tap once to start, tap again to stop (§6 scan screen).
+    (canScan && isHardware ? '<button type="button" id="hw-toggle" class="scan-cta" ' + (!ready && !active ? 'disabled' : '') +
+      '>' + (active ? 'Stop scan' : 'Start scan') + '</button>' : '') +
     (canScan && s.identified ? button('continue','Continue','class="scan-cta" ' +
       (!active && permits(role,'confirm') && canContinue(s,run) ? '' : 'disabled')) : '') +
     (s.confirmedAt ? '<p class="status match">Clean carton match confirmed.</p>' : '') + '</section>';
@@ -220,7 +231,7 @@ function issueList(label, epcs, s) {
   if (!epcs.length) return '<p>' + label + ': none</p>';
   return '<p>' + label + '</p><ul class="log">' + epcs.map(epc => {
     const c = s.manifest.cartons.find(item => item.epc === epc);
-    return '<li><code>' + escape(epc) + '</code>' + (c ? '<br>' + escape(c.carton + ' / ' + c.sku) : '') + '</li>';
+    return '<li><code>' + escape(epc) + '</code>' + (c ? '<br>' + escape([c.carton, c.sku].filter(Boolean).join(' / ')) : '') + '</li>';
   }).join('') + '</ul>';
 }
 function comparisons(s) {
@@ -238,7 +249,7 @@ function comparisons(s) {
     (run?.result?.extra.length && !active && !s.closedAt && permits(role,'investigate') ?
       '<form id="investigate" class="line stack"><label>Unexpected EPC<select name="epc">' +
       run.result.extra.map(epc => '<option>' + escape(epc) + '</option>').join('') + '</select></label>' +
-      '<label>Action<select name="outcome"><option>Investigated</option><option>Removed from zone</option><option>Unresolved</option></select></label>' +
+      '<label>Action<select name="outcome"><option>Investigated</option><option>Removed from zone</option><option>Neighbouring tag</option><option>Unresolved</option></select></label>' +
       field('note','Investigation note','','required maxlength="200"') + '<button class="secondary">Save investigation</button></form>' : '') + '</section>';
 }
 function closure(s) {
@@ -362,7 +373,12 @@ function updateScan() {
   const elapsed = Math.max(0,Math.floor((Date.now() - Date.parse(active.startedAt)) / 1000));
   element.innerHTML = '<p class="status">' + (active.ending ? 'Finishing' : 'Reading') + ' / ' + elapsed + ' s</p>' +
     (active.kind === 'cartons' ? counts(compare(s.manifest,Object.keys(latest(s).observations))) : '');
-  for (const control of root.querySelectorAll('button[data-action], #role, #scenario, #rescan')) control.disabled = true;
+  for (const control of root.querySelectorAll('button[data-action], #role, #person, #scenario, #rescan')) control.disabled = true;
+  const toggle = root.querySelector('#hw-toggle');
+  if (toggle) {
+    toggle.textContent = active.ending ? 'Finishing…' : 'Stop scan';
+    toggle.disabled = Boolean(active.ending);
+  }
 }
 function chooseManifest(text,name,demo = false) {
   if (view !== 'session' || !permits(role,'manifest') || session()?.closedAt || session()?.runs.length || active) return;
@@ -410,6 +426,15 @@ window.keypharmEvent = (name,data) => action(() => {
 root.addEventListener('change', event => action(() => {
   const target = event.target;
   if (target.id === 'role' && !active) { role = target.value; pendingImport = undefined; feedback(''); render(); }
+  if (target.id === 'person' && !active) {
+    const name = target.value.trim();
+    commit(() => {
+      store.person = name;
+      if (name && !store.people.includes(name)) store.people.push(name);
+    });
+    // No render here: change fires on blur, and re-rendering would swallow the tap that caused the blur.
+    feedback('');
+  }
   if (target.id === 'scenario') scenario = target.value;
   if (target.id === 'csv-file' && target.files[0]) {
     const file = target.files[0];
@@ -422,6 +447,7 @@ root.addEventListener('input', event => {
 });
 root.addEventListener('click', event => action(() => {
   const control = event.target.closest('button');
+  if (control?.id === 'hw-toggle') { if (active) end(); else begin(); return; }
   if (!control || active) return;
   const s = session(), command = control.dataset.action;
   if (control.dataset.open) {

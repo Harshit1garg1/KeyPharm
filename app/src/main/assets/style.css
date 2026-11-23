@@ -22,6 +22,7 @@ h2 {font-size:22px;margin:0 0 12px;text-wrap:balance}
 h3 {font-size:17px;margin:0 0 8px}
 p {margin:0 0 12px}
 small,.muted {color:var(--subtle)}
+#notice {white-space:pre-line}
 #notice:empty {display:none}
 #notice:not(:empty),.status {padding:8px 12px;background:var(--sky);border-radius:8px}
 #notice[data-error],.status.hold,.status.interrupted,.status.incomplete {color:var(--hold);background:var(--clay)}

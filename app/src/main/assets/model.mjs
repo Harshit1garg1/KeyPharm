@@ -7,11 +7,12 @@ KP-DEMO-01,A00000000000000000000001,Carton 04,C00000000000000000000004,Pomegrana
 `;
 export const EXTRA_EPC = 'E00000000000000000000009';
 const columns = ['pallet_ref', 'pallet_epc', 'carton_ref', 'carton_epc', 'sku'];
-const csvLine = /(?:^|,)(?:"((?:[^"]|"")*)"|([^",]*))(?=,|$)/g;
+// Excel saves ';' instead of ',' in Dutch and Belgian locales; the header decides which one the file uses.
+const csvLine = sep => new RegExp('(?:^|' + sep + ')(?:"((?:[^"]|"")*)"|([^"' + sep + ']*))(?=' + sep + '|$)', 'g');
 export const normalizeEpc = value => String(value ?? '').trim().toUpperCase();
 const validEpc = value => /^(?:[0-9A-F]{2}){2,31}$/.test(value);
-function cells(line, row) {
-  const parts = [...line.matchAll(csvLine)];
+function cells(line, row, sep) {
+  const parts = [...line.matchAll(csvLine(sep))];
   if (parts.map(p => p[0]).join('') !== line || parts.length !== columns.length) {
     throw new Error('Row ' + row + ': expected five CSV fields.');
   }
@@ -20,25 +21,40 @@ function cells(line, row) {
 
 export function parseManifest(text) {
   const lines = text.replace(/^\uFEFF/, '').trim().split(/\r?\n/);
-  if (lines.shift() !== columns.join(',')) throw new Error('Use the five headers from the sample CSV.');
+  const header = lines.shift().toLowerCase();
+  const sep = [',', ';'].find(s => header.split(s).map(h => h.trim()).join() === columns.join());
+  if (!sep) throw new Error('Use the five headers from the sample CSV, separated by commas or semicolons.');
   if (!lines.length) throw new Error('Manifest needs at least one carton.');
   let manifest;
   const epcs = new Set();
   const references = new Set();
+  const errors = [];
   for (const [index, line] of lines.entries()) {
     const row = index + 2;
-    const [pallet, palletTag, carton, tag, sku] = cells(line, row);
-    const palletEpc = normalizeEpc(palletTag), epc = normalizeEpc(tag);
-    if (!pallet || !carton || !sku) throw new Error('Row ' + row + ': provide pallet, carton and SKU references.');
-    if (!validEpc(palletEpc) || !validEpc(epc)) throw new Error('Row ' + row + ': EPC must be even-length hexadecimal.');
-    if (epc === palletEpc || epcs.has(epc)) throw new Error('Row ' + row + ': duplicate EPC.');
-    if (references.has(carton.toUpperCase())) throw new Error('Row ' + row + ': duplicate carton reference.');
-    manifest ??= {pallet, palletEpc, cartons: []};
-    if (pallet !== manifest.pallet || palletEpc !== manifest.palletEpc) throw new Error('Row ' + row + ': use one pallet per file.');
-    epcs.add(epc);
-    references.add(carton.toUpperCase());
-    manifest.cartons.push({epc, carton, sku});
+    // Excel leaves rows such as ";;;;" after the data.
+    if (!line.replace(new RegExp('[\\s"' + sep + ']', 'g'), '')) continue;
+    try {
+      const [pallet, palletTag, carton, tag, sku] = cells(line, row, sep);
+      const palletEpc = normalizeEpc(palletTag), epc = normalizeEpc(tag);
+      if (!pallet || !carton) throw new Error('Row ' + row + ': provide pallet and carton references.');
+      if (!validEpc(palletEpc) || !validEpc(epc)) throw new Error('Row ' + row + ': EPC must be even-length hexadecimal.');
+      if (epc === palletEpc || epcs.has(epc)) throw new Error('Row ' + row + ': duplicate EPC.');
+      if (references.has(carton.toUpperCase())) throw new Error('Row ' + row + ': duplicate carton reference.');
+      manifest ??= {pallet, palletEpc, cartons: []};
+      if (pallet !== manifest.pallet || palletEpc !== manifest.palletEpc) throw new Error('Row ' + row + ': use one pallet per file.');
+      epcs.add(epc);
+      references.add(carton.toUpperCase());
+      manifest.cartons.push({epc, carton, sku});
+    } catch (error) {
+      errors.push(error.message);
+    }
   }
+  if (errors.length) {
+    // ponytail: first 20 rows only, so a wrong file does not flood the screen.
+    const more = errors.length > 20 ? ['\u2026and ' + (errors.length - 20) + ' more rows.'] : [];
+    throw new Error([...errors.slice(0, 20), ...more].join('\n'));
+  }
+  if (!manifest) throw new Error('Manifest needs at least one carton.');
   return manifest;
 }
 

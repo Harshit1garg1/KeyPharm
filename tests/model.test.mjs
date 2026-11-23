@@ -17,6 +17,20 @@ test('reject duplicate, malformed and ambiguous manifest rows', () => {
   assert.throws(() => parseManifest(SAMPLE.replace('Carton 04', 'Carton 01')), /row 5.*carton/i);
 });
 
+test('manifest import lists every bad row at once', () => {
+  const bad = SAMPLE.replace('C00000000000000000000001', 'oops').replace('Carton 04', 'Carton 03');
+  assert.throws(() => parseManifest(bad), error => /Row 2.*EPC/.test(error.message) && /Row 5.*carton/.test(error.message));
+});
+
+test('manifest import accepts Excel semicolons, header case and blank SKU', () => {
+  const excel = SAMPLE.replaceAll(',', ';').replace('pallet_ref', 'Pallet_Ref').replace(';Pomegranate juice', ';') + ';;;;\n';
+  const manifest = parseManifest(excel);
+  assert.equal(manifest.cartons.length, 4);
+  assert.equal(manifest.cartons[3].sku, '');
+  assert.deepEqual(parseManifest(SAMPLE).cartons.map(c => c.epc), manifest.cartons.map(c => c.epc));
+  assert.throws(() => parseManifest(SAMPLE.replace(',Carton 01,', ',,')), /Row 2.*carton/);
+});
+
 test('attempts remain independent and extras block even at full completeness', () => {
   const manifest = parseManifest(SAMPLE);
   const [a,b,c,d] = manifest.cartons.map(row => row.epc);
