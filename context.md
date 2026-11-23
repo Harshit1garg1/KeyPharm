@@ -1,13 +1,13 @@
 # Keypharm RFID POC handoff
 
-Updated 23 November 2026 for the live RFID handover. The feature branch is `codex/keypharm-live-poc-handover`, based on GitHub `main` at `2a79461148f523571e5ebace8b5c492fac953fa7`. The Android build is 0.3.2. See [HANDOVER.md](HANDOVER.md) for the difference from main, rationale, verification and pickup steps.
+Updated 23 November 2026 for the live RFID handover. The feature branch is `Harshit-Dev`, based on GitHub `main` at `2a79461148f523571e5ebace8b5c492fac953fa7`. The Android build is 0.3.3. See [HANDOVER.md](HANDOVER.md) for the difference from main, rationale, verification and pickup steps.
 
 ## Requirements and decisions
 
 The source is Marc Flederus's *Keypharm Mobile RFID Application — Functional Design for Proof of Concept and Pilot*, v1.0, 17 November 2026. The source document stays outside this repository. [POC and Pilot scope](docs/poc-and-pilot-scope.md) maps its requirements and acceptance scenarios. [Approved design](docs/demo-design.md) and [questionnaire](docs/questionaire.md) record the user decisions and their status.
 
 - The POC runs locally on one C72. It covers outer cartons and tagged pallets, physical contents verification, reader configuration evidence, independent scan attempts, local records and evidence export. The source sets a one-day test and up to 500 RFID labels.
-- A pallet is identified on a dedicated scan screen. The reader uses an exact manifest EPC filter at 5 dBm. The operator holds the C72 close to the intended pallet. The app verifies the exact EPC and restores the usual power plus unfiltered scanning for cartons. The pallet EPC stays separate from carton counts. Each outer carton has one unique expected EPC.
+- A pallet is identified on a dedicated scan screen. Pallet and carton scans both use the current power selected by the Test lead. Other tags can be present during pallet identification. Only the exact manifest pallet EPC confirms the pallet, and the attempt retains the EPCs it observed. The pallet EPC stays separate from carton counts. The carton step still flags unexpected tags.
 - Hold the physical trigger to start inventory. Release to stop and finalize. Repeat key events during the hold count as one attempt. Keep Continue disabled during capture and for interrupted runs, missing EPCs or any unexpected EPC. A run with all expected tags plus an extra is 100% complete and stays on Hold. Investigating an extra tag records a log and requires a clean rescan.
 - An attempt counts distinct carton EPCs and stores repeat count, first/last timestamps and RSSI if available. Each rescan starts empty and requires a reason. Previous and current results show the EPC evidence and which cartons are newly seen or still missing. First-pass metrics stay visible.
 - Keep failed attempts as evidence. Session closure records reviewed coverage, skipped-test reasons and sign-off. Continue confirms a clean pallet result. Closure can document a failed test.

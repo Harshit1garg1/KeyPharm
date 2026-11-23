@@ -210,7 +210,8 @@ function scanPanel(s) {
     escape(isHardware ? (ready ? 'Reader ready' : 'Reader unavailable') : 'Simulation') + '</span></div>' +
     '<div class="scan-target"><div class="scan-signal" data-reading="false" aria-hidden="true"></div><div>' +
     '<p class="provenance">' + escape(s.manifest.pallet) + '</p>' +
-    (s.identified ? '<p class="muted">Pallet verified by UHF EPC.</p>' : '<p>Hold the reader close to the pallet tag.</p>') +
+    (s.identified ? '<p class="muted">Pallet verified by UHF EPC.</p>' : '<p>Scan near the pallet tag. Other tags can stay nearby.</p>') +
+    (isHardware && reader.profile?.powerDbm != null ? '<p class="muted">Reader power: ' + escape(reader.profile.powerDbm) + ' dBm</p>' : '') +
     '<p class="muted">' + (isHardware ? 'Hold the C72 trigger. Release to finish.' : 'Hold the demo trigger. Release to finish.') + '</p></div></div>' +
     (isHardware && !ready ? '<p class="status hold">' + escape(reader.message) + '</p>' +
       button('reconnect','Check reader','class="secondary"') : '') +
@@ -318,8 +319,7 @@ function begin() {
   });
   active = capture;
   feedback('');
-  if (hardware && kind === 'pallet') bridge.startPalletReader(active.id,s.manifest.palletEpc);
-  if (hardware && kind === 'cartons') bridge.startReader(active.id);
+  if (hardware) bridge.startReader(active.id);
   updateScan();
 }
 function simReads(s, capture) {
@@ -336,11 +336,14 @@ function collect(reads) {
   for (const read of reads ?? []) {
     const epc = normalizeEpc(read.epc);
     if (!/^[0-9A-F]{2,128}$/.test(epc) || epc.length % 2) {
-      active.invalid = (active.invalid ?? 0) + 1;
+      if (active.kind === 'cartons') active.invalid = (active.invalid ?? 0) + 1;
       continue;
     }
     const at = read.ms ? new Date(read.ms).toISOString() : now();
-    if (!observations[epc]) { observations[epc] = {count:0,first:at}; fresh++; }
+    if (!observations[epc]) {
+      observations[epc] = {count:0,first:at};
+      if (active.kind === 'cartons' || epc === s.manifest.palletEpc) fresh++;
+    }
     const entry = observations[epc];
     entry.last = at;
     entry.count++;
@@ -375,7 +378,7 @@ function finalize(interrupted, message) {
   commit(() => {
     if (capture.kind === 'pallet') {
       const seen = Object.keys(capture.observations);
-      s.identified = !interrupted && seen.length === 1 && seen[0] === s.manifest.palletEpc;
+      s.identified = !interrupted && seen.includes(s.manifest.palletEpc);
       (s.palletAttempts ??= []).push({
         id:capture.id, startedAt:capture.startedAt, endedAt, observations:capture.observations,
         profile:s.palletPending?.profile, actor:actor(), result:s.identified ? 'Identified' : 'Unconfirmed'
@@ -396,7 +399,7 @@ function finalize(interrupted, message) {
   if (interrupted) bridge?.feedback('error');
   active = undefined;
   rescanReason = '';
-  feedback(capture.kind === 'pallet' && !s.identified ? 'Pallet EPC not confirmed. Isolate the pallet tag and retry.' : '',capture.kind === 'pallet' && !s.identified);
+  feedback(capture.kind === 'pallet' && !s.identified ? 'Pallet EPC not confirmed. Scan near the pallet tag and retry.' : '',capture.kind === 'pallet' && !s.identified);
   render();
   if (capture.kind === 'pallet' && s.identified) focusScan();
 }
@@ -469,7 +472,6 @@ window.keypharmEvent = (name,data) => action(() => {
   }
   if (name === 'ended' && active?.id === data.id) {
     collect(data.reads);
-    if (data.profile) reader = {...reader, profile:data.profile};
     finalize(data.interrupted,data.message);
     if (data.interrupted) bridge?.connectReader();
   }

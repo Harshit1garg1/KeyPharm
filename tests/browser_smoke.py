@@ -163,15 +163,8 @@ with sync_playwright() as playwright:
           window.keypharmEvent('reader-power', {id:requestId, ok:true, ready:true, previousPower:30,
             message:'Reader power set to ' + power + ' dBm', profile:{region:'ETSI',powerDbm:power}});
         },
-        startPalletReader(id, epc) {
-          window.scanEpc = epc;
-          window.scanReads = [{epc}];
-          window.keypharmEvent('started', {id, profile:{region:'ETSI',powerDbm:5}});
-        },
         startReader(id) {
-          window.scanEpc = null;
-          window.scanReads = [{epc:'C00000000000000000000001'}, {epc:'E00000000000000000000009'}];
-          window.keypharmEvent('started', {id, profile:{region:'ETSI',powerDbm:30}});
+          window.keypharmEvent('started', {id, profile:{region:'ETSI',powerDbm:18}});
         },
         stopReader(id) {
           window.keypharmEvent('ended', {id, reads:window.scanReads, interrupted:false});
@@ -188,25 +181,30 @@ with sync_playwright() as playwright:
     expect(hardware.get_by_text("KP-LIVE-SORTED-01 / 1 cartons", exact=False)).to_be_visible()
     assert hardware.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].manifest.demo") is False
     expect(hardware.get_by_role("heading", name="Reader settings")).to_be_visible(timeout=3000)
-    hardware.get_by_label("Output power (dBm)").fill("5")
+    hardware.get_by_label("Output power (dBm)").fill("18")
     hardware.get_by_role("button", name="Set power").click()
-    expect(hardware.locator("#notice")).to_contain_text("Reader power set to 5 dBm")
+    expect(hardware.locator("#notice")).to_contain_text("Reader power set to 18 dBm")
     saved = hardware.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].logs")
-    assert saved[-1]["action"] == "Reader power changed" and "30 to 5 dBm" in saved[-1]["detail"]
+    assert saved[-1]["action"] == "Reader power changed" and "30 to 18 dBm" in saved[-1]["detail"]
     hardware.get_by_label("Local identity").select_option("operator")
     expect(hardware.get_by_role("button", name="Set power")).to_have_count(0)
-    expect(hardware.get_by_text("ETSI / 5 dBm")).to_be_visible()
+    expect(hardware.get_by_text("ETSI / 18 dBm")).to_be_visible()
     hardware.get_by_label("Local identity").select_option("supervisor")
     hardware.get_by_label("Contents and label assignment verified").check()
     hardware.get_by_role("button", name="Record verification").click()
     hardware.get_by_label("Local identity").select_option("operator")
     hardware.get_by_role("button", name="Open pallet scanner").click()
-    hardware.evaluate("window.keypharmEvent('press',{})")
-    assert hardware.evaluate("window.scanEpc") == "A00000000000000000000001"
+    hardware.evaluate("window.scanReads = [{epc:'E00000000000000000000009'}]; window.keypharmEvent('press',{})")
+    hardware.evaluate("window.keypharmEvent('release',{})")
+    expect(hardware.get_by_role("heading", name="Scan pallet")).to_be_visible()
+    expect(hardware.locator("#notice")).to_contain_text("Pallet EPC not confirmed", timeout=3000)
+    hardware.evaluate("window.scanReads.push({epc:'A00000000000000000000001'}); window.keypharmEvent('press',{})")
     hardware.evaluate("window.keypharmEvent('release',{})")
     expect(hardware.get_by_role("heading", name="Scan cartons")).to_be_visible()
-    hardware.evaluate("window.keypharmEvent('press',{})")
-    assert hardware.evaluate("window.scanEpc") is None
+    saved = hardware.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].palletAttempts.at(-1)")
+    assert saved["profile"]["powerDbm"] == 18
+    assert len(saved["observations"]) == 2
+    hardware.evaluate("window.scanReads.push({epc:'C00000000000000000000001'}); window.keypharmEvent('press',{})")
     hardware.evaluate("window.keypharmEvent('release',{})")
     expect(hardware.locator(".tag-row[data-tag-status=unexpected]")).to_have_count(1)
     expect(hardware.get_by_role("button", name="Continue",exact=True)).to_be_disabled()

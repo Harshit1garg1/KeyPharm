@@ -129,8 +129,7 @@ public final class MainActivity extends Activity {
         main.removeCallbacks(tick);
         boolean stopped = reader.stop();
         event("ended", C72Reader.json("id", id, "reads", reader.drain(),
-                "interrupted", interrupted || !stopped, "message", stopped ? reason : "Reader did not confirm a complete capture or settings restore",
-                "profile", reader.currentProfile()));
+                "interrupted", interrupted || !stopped, "message", stopped ? reason : "Reader did not confirm a complete capture"));
     }
 
     @Override public void onWindowFocusChanged(boolean focused) {
@@ -184,17 +183,9 @@ public final class MainActivity extends Activity {
         }
 
         @JavascriptInterface public void startReader(String id) {
-            startCapture(id, null);
-        }
-
-        @JavascriptInterface public void startPalletReader(String id, String epc) {
-            startCapture(id, epc == null ? "" : epc);
-        }
-
-        private void startCapture(String id, String palletEpc) {
             hardware.execute(() -> {
                 boolean allowed = foreground && hardwareRun == null;
-                JSONObject settings = allowed ? reader.start(palletEpc) : null;
+                JSONObject settings = allowed ? reader.start() : null;
                 if (settings == null) {
                     event("ended", C72Reader.json("id", id, "interrupted", true,
                             "message", allowed ? reader.failure : "UHF inventory did not start"));
