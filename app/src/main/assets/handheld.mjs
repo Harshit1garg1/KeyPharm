@@ -169,7 +169,7 @@ function history() {
       '<p class="muted">Switch to Operator or Test lead to start a test.</p>') +
     (records ? '<div class="records">' + records + '</div>' :
       '<p class="muted">No tests yet. Start one, load its cartons, then scan the pallet.</p>') + '</section>' +
-    planPanel() +
+    (bridge ? readerCard() : '') + planPanel() +
     (permits(role,'export') ? '<section class="panel"><h2>Evidence</h2><div class="row">' +
       button('export','Export CSV and summary','class="secondary" ' + (!store.sessions.length ? 'disabled' : '')) +
       (bridge ? button('dashboard',dashboardUrl ? 'Stop dashboard sharing' : 'Share web dashboard','class="secondary"') : '') +
@@ -188,7 +188,7 @@ function planPanel() {
   html += tests.length ? '<ul class="log">' + tests.map(t => '<li><strong>' + escape(t.id) + '</strong> ' + escape(t.title) +
       '<br><small>' + escape(t.status) + (plan.closure?.skipped?.[t.id] ? ' / not run: ' + escape(plan.closure.skipped[t.id]) : '') +
       '</small></li>').join('') + '</ul>' + (unplanned.length ? '<p class="muted">Not in plan: ' + escape(unplanned.join(', ')) + '</p>' : '')
-    : '<p class="muted">No planned tests yet.' + (permits(role,'manifest') ? '' : ' Switch to Test lead in the menu at the top left to enter them.') + '</p>';
+    : '<p class="muted">No planned tests yet.' + (permits(role,'manifest') ? '' : ' Switch to Test lead in the menu at the top right to enter them.') + '</p>';
   if (plan?.closedAt) return html + '<p class="status match">PoC day closed by ' + escape(plan.closure.actor) + ' on ' +
     escape(time(plan.closedAt)) + '.</p></section>';
   if (permits(role,'manifest')) html += '<details' + (tests.length ? '' : ' open') + '><summary>Edit planned tests</summary>' +
@@ -310,16 +310,28 @@ function manifestControls(s,m) {
     '</div><button>Save manifest</button></form>';
   return result;
 }
-function readerSettings(s) {
+// Reader power is device-wide: the Test lead sets it from the home screen or from a hardware session's Details.
+function readerStatus() {
   const profile = reader.profile;
-  const canSet = !s.closedAt && permits(role,'reader-power') && bridge?.setReaderPower;
-  return '<details><summary>Reader: ' + escape(profile ? profile.region + ' / ' + (profile.powerDbm ?? 'Unknown') + ' dBm' :
-      reader.ready ? 'ready' : 'not ready') + '</summary><p>' + escape(reader.message) + '</p>' +
-    (canSet && reader.ready ?
-      '<form id="reader-power" class="row">' + field('power','Output power (dBm)',profile?.powerDbm,
-        'type="number" min="5" max="30" step="1" required ' + (powerRequest ? 'disabled' : '')) +
-      '<button ' + (powerRequest ? 'disabled' : '') + '>' + (powerRequest ? 'Setting power…' : 'Set power') + '</button></form>' :
-      (canSet && !reader.ready ? button('reconnect','Check reader','class="secondary"') : '')) + '</details>';
+  return profile ? profile.region + ' / ' + (profile.powerDbm ?? 'Unknown') + ' dBm' : reader.ready ? 'Ready' : 'Not ready';
+}
+function readerControls(closed) {
+  if (closed || !bridge?.setReaderPower) return '';
+  if (!permits(role,'reader-power')) return '<p class="muted">The Test lead sets reader power.</p>' +
+    button('as-role','Switch to Test lead','class="secondary" data-role="admin"');
+  if (!reader.ready) return button('reconnect','Check reader','class="secondary"');
+  return '<form id="reader-power" class="row">' + field('power','Output power (dBm)',reader.profile?.powerDbm,
+      'type="number" min="5" max="30" step="1" required ' + (powerRequest ? 'disabled' : '')) +
+    '<button ' + (powerRequest ? 'disabled' : '') + '>' + (powerRequest ? 'Setting power…' : 'Set power') + '</button></form>' +
+    '<p class="muted">5 to 30 dBm. Each scan records the power it used.</p>';
+}
+function readerCard() {
+  return '<section class="panel reader-card"><div class="row spread"><h2>C72 reader</h2><span class="reader-state" data-ready="' +
+    reader.ready + '">' + escape(readerStatus()) + '</span></div><p>' + escape(reader.message) + '</p>' + readerControls(false) + '</section>';
+}
+function readerSettings(s) {
+  return '<details><summary>Reader settings: ' + escape(readerStatus()) + '</summary><p>' + escape(reader.message) + '</p>' +
+    readerControls(s.closedAt) + '</details>';
 }
 function scanPanel(s) {
   const run = latest(s);
@@ -577,13 +589,14 @@ function action(fn) {
 window.keypharmEvent = (name,data) => action(() => {
   if (name === 'reader') {
     reader = data;
-    if (!active && !powerRequest && (view === 'scan' || (view === 'session' && session()?.source === 'C72 hardware'))) render();
+    if (!active && !powerRequest && (view === 'scan' || view === 'sessions' || (view === 'session' && session()?.source === 'C72 hardware'))) render();
   }
   if (name === 'reader-power' && powerRequest?.id === data.id) {
     const target = powerRequest.session;
     powerRequest = undefined;
     reader = {...reader, ready:data.ready ?? reader.ready, profile:data.profile ?? reader.profile};
-    if (data.ok && data.previousPower !== data.profile?.powerDbm) {
+    // From the home screen there is no session to log to; every scan still records its own power.
+    if (target && data.ok && data.previousPower !== data.profile?.powerDbm) {
       commit(() => log(target,'Reader power changed',data.previousPower + ' to ' + data.profile.powerDbm + ' dBm'));
     }
     feedback(data.message,!data.ok);
@@ -711,11 +724,12 @@ root.addEventListener('submit', event => action(() => {
   event.preventDefault();
   if (active || powerRequest) return;
   const form = event.target, data = Object.fromEntries(new FormData(form)), s = session();
-  if (form.id === 'reader-power' && view === 'session' && s?.source === 'C72 hardware' && !s.closedAt &&
+  const hardwareSession = view === 'session' && s?.source === 'C72 hardware' && !s.closedAt;
+  if (form.id === 'reader-power' && (view === 'sessions' || hardwareSession) &&
       reader.ready && permits(role,'reader-power') && bridge?.setReaderPower) {
     const power = Number(data.power);
     if (!Number.isInteger(power) || power < 5 || power > 30) throw new Error('Choose a power from 5 to 30 dBm.');
-    powerRequest = {id:id(), session:s};
+    powerRequest = {id:id(), session:hardwareSession ? s : null};
     feedback('');
     render();
     bridge.setReaderPower(powerRequest.id,power);

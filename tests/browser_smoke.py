@@ -314,6 +314,15 @@ with sync_playwright() as playwright:
       };
     """)
     hardware.goto("https://handheld.test/handheld.html")
+    # Reader power is on the home screen: the Test lead sets it, other roles see who does.
+    as_person(hardware, "admin", "Lead A")
+    expect(hardware.locator(".reader-card")).to_contain_text("ETSI / 30 dBm")
+    hardware.locator(".reader-card").get_by_label("Output power (dBm)").fill("25")
+    hardware.locator(".reader-card").get_by_role("button", name="Set power").click()
+    expect(hardware.locator("#notice")).to_contain_text("Reader power set to 25 dBm")
+    expect(hardware.locator(".reader-card")).to_contain_text("ETSI / 25 dBm")
+    pick_role(hardware, "operator")
+    expect(hardware.locator(".reader-card")).to_contain_text("The Test lead sets reader power.")
     as_person(hardware, "operator", "Operator C")
     hardware.get_by_role("button", name="New test session").click()
     hardware.get_by_role("button", name="Create session").click()
@@ -323,7 +332,7 @@ with sync_playwright() as playwright:
     hardware.get_by_role("button", name="Save manifest").click()
     expect(hardware.locator(".next").get_by_text("KP-LIVE-SORTED-01 / 1 cartons", exact=False)).to_be_visible()
     assert hardware.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].manifest.demo") is False
-    hardware.locator("summary", has_text="Reader: ETSI / 30 dBm").click(timeout=3000)
+    hardware.locator("summary", has_text="Reader settings: ETSI / 25 dBm").click(timeout=3000)
     hardware.get_by_label("Output power (dBm)").fill("18")
     hardware.get_by_role("button", name="Set power").click()
     expect(hardware.locator("#notice")).to_contain_text("Reader power set to 18 dBm")
