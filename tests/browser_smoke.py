@@ -107,6 +107,10 @@ with sync_playwright() as playwright:
     device.reload()  # the open session and the half-typed note both come back from localStorage
     expect(device.get_by_label("Note on the current run")).to_have_value("Carton behind stretch wrap")
     device.get_by_role("button", name="Save run note").click()
+    by_sku = device.locator(".by-sku").last  # current run: a mixed pallet reads per SKU (AT-02)
+    by_sku.locator("summary").click()
+    expect(by_sku).to_contain_text("Ginger 2 of 2 matched")
+    expect(by_sku).to_contain_text("Pomegranate juice 0 of 1 matched / 1 missing")
 
     # Manifest revision after a scan: needs a reason, then verification and pallet identification again.
     as_person(device, "admin", "Lead A")
@@ -124,10 +128,11 @@ with sync_playwright() as playwright:
     expect(device.get_by_role("heading", name="Scan cartons")).to_be_visible()
 
     device.get_by_label("Demo reads").select_option("Unexpected extra")
+    expect(device.locator("#rescan-reasons option")).to_have_count(5)  # FR-19: pick a reason or type one
     device.get_by_label("Rescan reason").fill("Check neighboring tags")
     hold(device)
     expect(proceed).to_be_disabled()
-    expect(device.locator("#scan-results")).to_contain_text("Hold")
+    expect(device.locator("#scan-results .status")).to_have_text("Hold: unexpected reads")
     expect(device.locator(".tag-row[data-tag-status=unexpected]")).to_contain_text("Unexpected")
     device.get_by_role("button", name="Session details").click()
     device.get_by_label("Action").select_option("Neighbouring tag")
@@ -418,6 +423,10 @@ with sync_playwright() as playwright:
     hardware.locator(".reader-card").get_by_role("button", name="Set power").click()
     expect(hardware.locator("#notice")).to_contain_text("Reader power set to 25 dBm")
     expect(hardware.locator(".reader-card")).to_contain_text("ETSI / 25 dBm")
+    audit = lambda: hardware.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).audit")
+    assert [(a["action"], a["actor"], a["detail"]) for a in audit()] == \
+        [("Reader power changed", "Lead A", "30 to 25 dBm (home screen)")], audit()  # FR-35: no session, so the device log
+    expect(hardware.locator("summary", has_text="Device log (1)")).to_be_visible()
     pick_role(hardware, "operator")
     expect(hardware.locator(".reader-card")).to_contain_text("The Test lead sets reader power.")
     as_person(hardware, "operator", "Operator C")
@@ -435,6 +444,7 @@ with sync_playwright() as playwright:
     expect(hardware.locator("#notice")).to_contain_text("Reader power set to 18 dBm")
     saved = hardware.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].logs")
     assert saved[-1]["action"] == "Reader power changed" and "30 to 18 dBm" in saved[-1]["detail"]
+    assert len(audit()) == 1, audit()  # a change inside a session stays in that session's log
     pick_role(hardware, "operator")
     expect(hardware.get_by_role("button", name="Set power")).to_have_count(0)
     expect(hardware.get_by_text("ETSI / 18 dBm")).to_be_visible()
@@ -549,6 +559,30 @@ with sync_playwright() as playwright:
     gen.get_by_role("button", name="Save manifest").click()
     built = gen.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].manifest")
     assert (built["palletEpc"], [c["epc"] for c in built["cartons"]]) == ("AA01", ["CC01", "CC02"]), built
+
+    # Home screen: mode and network line, and the session search across test, level, date and status (section 6, FR-33).
+    seeded = browser.new_page(viewport={"width":360, "height":700})
+    seeded.on("pageerror", lambda error: errors.append(str(error)))
+    seeded.route("https://handheld.test/**", serve_assets)
+    seeded.add_init_script("""localStorage.setItem('keypharm-poc-v1', JSON.stringify({people:[], sessions:[
+      {id:'a', testId:'KP-GINGER', location:'Dock 1', level:'Ground', source:'Simulation', createdAt:'2026-11-24T09:00:00.000Z',
+        creator:'Lead A', runs:[], logs:[], allocation:{}},
+      {id:'b', testId:'KP-JUICE', location:'Rack', level:'Level 2', source:'Simulation', createdAt:'2026-11-25T09:00:00.000Z',
+        creator:'Lead A', runs:[], logs:[], allocation:{}}]}))""")
+    seeded.goto("https://handheld.test/handheld.html")
+    expect(seeded.locator(".mode-line")).to_contain_text("PoC Test mode")
+    records = seeded.locator(".record")
+    search = seeded.get_by_label("Search sessions")
+    search.fill("level 2")
+    expect(records.filter(visible=True)).to_have_count(1)
+    expect(records.filter(visible=True)).to_contain_text("KP-JUICE")
+    search.fill("2026-11-24 load cartons")
+    expect(records.filter(visible=True)).to_contain_text("KP-GINGER")
+    search.fill("nothing like this")
+    expect(records.filter(visible=True)).to_have_count(0)
+    expect(seeded.locator("#no-match")).to_be_visible()
+    search.fill("")
+    expect(records.filter(visible=True)).to_have_count(2)
 
     assert not errors, errors
     print("Handheld and dashboard browser flow passed.")

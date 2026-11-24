@@ -2,7 +2,58 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {parseManifest, compare, scanDelta, canContinue, permits, allocationTotal, canClose, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary, EXPORT_COLUMNS, SAMPLE,
   parsePlan, planCoverage, closePlanErrors, manifestFor, lockPallet, lockTo, otherPallet, inManifest, manifestCsv,
-  missingSku, unexported} from '../app/src/main/assets/model.mjs';
+  missingSku, unexported, matchesQuery, skuBreakdown, statusLabel} from '../app/src/main/assets/model.mjs';
+
+// A finished carton run against the sample manifest; `seen` = how many of the 4 cartons were read.
+const sampleRun = (manifest, seen, at, extra = []) => {
+  const epcs = [...manifest.cartons.slice(0, seen).map(c => c.epc), ...extra];
+  return {id:'r' + at, state:'Finished', startedAt:at, endedAt:at, operator:'Op', observations:Object.fromEntries(epcs.map(e => [e,{count:1}])),
+    result:compare(manifest, epcs)};
+};
+
+test('session search needs every term somewhere in test, pallet, SKU, location, level, people, date or status (FR-33)', () => {
+  const manifest = {...parseManifest(SAMPLE), revision:1};
+  const s = {testId:'KP-TEST-07', location:'Dock 3', level:'Level 1', creator:'Lead A', createdAt:'2026-11-24T09:00:00.000Z',
+    manifest, runs:[{operator:'Operator C'}], logs:[]};
+  for (const q of ['', 'kp-test-07', 'pomegranate', 'KP-DEMO-01', 'dock level 1', 'operator c', '2026-11-24', 'hold']) {
+    assert.equal(matchesQuery(s, q, 'Hold, rescan'), true, q);
+  }
+  for (const q of ['ginger dock 9', 'KP-TEST-08', '2026-11-25']) assert.equal(matchesQuery(s, q, 'Hold, rescan'), false, q);
+});
+
+test('result breaks down by SKU so a mixed pallet can be read per product (AT-02)', () => {
+  const manifest = {...parseManifest(SAMPLE.replace(',Pomegranate juice', ',')), revision:1};
+  assert.deepEqual(skuBreakdown(manifest, compare(manifest, manifest.cartons.slice(0, 2).map(c => c.epc))), [
+    {sku:'Ginger', expected:2, matched:2, missing:0},
+    {sku:'Essential oil', expected:1, matched:0, missing:1},
+    {sku:'No SKU', expected:1, matched:0, missing:1}]);
+});
+
+test('Hold names its reason; other states keep their label (section 9.3)', () => {
+  assert.equal(statusLabel('Hold'), 'Hold: unexpected reads');
+  assert.equal(statusLabel('Incomplete'), 'Incomplete');
+  assert.equal(statusLabel('Interrupted'), 'Interrupted');
+});
+
+test('summary groups results by configuration without blending runs, and lists the device log (section 12, FR-35)', () => {
+  const manifest = {...parseManifest(SAMPLE), revision:1};
+  const setup = {product:'Ginger', label:'Paper 90x30', placement:'Upper right', level:'Ground', method:'Walk around', shielding:'None', manifest, logs:[]};
+  const sessions = [
+    {...setup, testId:'KP-1', runs:[sampleRun(manifest, 3, '1'), sampleRun(manifest, 4, '2')]},
+    {...setup, testId:'KP-2', runs:[sampleRun(manifest, 4, '3')]},
+    {...setup, testId:'KP-3', level:'Level 2', runs:[sampleRun(manifest, 2, '4')]},
+    {...setup, testId:'KP-4', runs:[]}];
+  const audit = [{at:'2026-11-24T08:00:00.000Z', actor:'Lead A', action:'Reader power changed', detail:'30 to 25 dBm (home screen)'}];
+  const summary = evidenceSummary({sessions, audit});
+  assert.match(summary, /Results by configuration/);
+  assert.match(summary, /Ginger \/ Paper 90x30 \/ Upper right \/ Ground \/ Walk around \/ None: 2 sessions, 3 runs, first pass 75% to 100%/);
+  assert.match(summary, /KP-1: first pass 75% \(3\/4\), final 100% \(4\/4\), 2 runs/);
+  assert.match(summary, /KP-2: first pass 100% \(4\/4\), final 100% \(4\/4\), 1 run/);
+  assert.match(summary, /Level 2 \/ Walk around \/ None: 1 session, 1 run, first pass 50%/);
+  assert.doesNotMatch(summary, /KP-4: first pass/);
+  assert.match(summary, /Device log\n2026-11-24T08:00:00.000Z Lead A: Reader power changed 30 to 25 dBm \(home screen\)/);
+  assert.match(evidenceCsv({sessions:[], audit}), /"Device log","","","","","2026-11-24T08:00:00.000Z","Lead A",.*"Reader power changed: 30 to 25 dBm \(home screen\)"/);
+});
 
 test('sample validates and pallet EPC is not a carton', () => {
   const manifest = parseManifest(SAMPLE);

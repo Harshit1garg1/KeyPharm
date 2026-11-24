@@ -1,6 +1,7 @@
 import {SAMPLE, EXTRA_EPC, normalizeEpc, parseManifest, compare, scanDelta, canContinue, canClose,
   roles, permits, allocationTotal, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary,
-  parsePlan, planCoverage, closePlanErrors, lockPallet, lockTo, otherPallet, inManifest, manifestCsv, missingSku, unexported} from './model.mjs';
+  parsePlan, planCoverage, closePlanErrors, lockPallet, lockTo, otherPallet, inManifest, manifestCsv, missingSku, unexported,
+  matchesQuery, skuBreakdown, statusLabel, manifestFor} from './model.mjs';
 import qrcode from './qrcode-generator.mjs';
 
 const root = document.querySelector('#app');
@@ -70,6 +71,7 @@ let dashboardQr = '';
 let includeOtherRecords = false;
 let dashboardResetPending = false;
 let simulatedKeys = false;
+let query = ''; // session search on the home screen (FR-33)
 let builder; // manifest generator: {tags:{epc:{count,rssi}}, capture, palletRef, sku}
 // The open screen and half-typed form fields survive re-renders and restarts (records stay in `key`).
 const uiKey = 'keypharm-poc-ui-v1';
@@ -191,15 +193,21 @@ function render() {
 }
 function history() {
   const total = store.sessions.reduce((sum,s) => sum + allocationTotal(s.allocation),0);
-  const records = store.sessions.slice().reverse().map(s => '<button class="record" data-open="' + escape(s.id) +
-    '"><span><strong>' + escape(s.testId) + '</strong><small>' + escape(s.manifest?.pallet ?? 'No cartons loaded') + ' / ' +
+  const records = store.sessions.slice().reverse().map(s => '<button class="record" data-open="' + escape(s.id) + '"' +
+    (matchesQuery(s,query,nextLabel(s)) ? '' : ' hidden') + '><span><strong>' + escape(s.testId) + '</strong><small>' + escape(s.manifest?.pallet ?? 'No cartons loaded') + ' / ' +
     escape(s.source) + '</small></span><span class="record-next" data-step="' + stepOf(s) + '" data-alert="' + /^(Hold|Incomplete|Interrupted)/.test(nextLabel(s)) +
     '">' + escape(nextLabel(s)) +
     '</span></button>').join('');
   // Reader status first (checked before any scan), then the sessions as one list; the main action sits in the thumb zone.
   return (bridge ? readerCard() : '') +
+    // Section 6 home: the mode, the device and whether a network is present (the PoC never needs one).
+    '<p class="muted mode-line">PoC Test mode' + (reader.profile?.model ? ' / ' + escape(reader.profile.model) : '') + ' / ' +
+      (navigator.onLine ? 'Network connected, not required' : 'Offline') + '</p>' +
     '<section class="home"><div class="row spread section-head"><h1>Sessions</h1><small>' + total + ' of 500 labels used</small></div>' +
-    (records ? '<div class="group records">' + records + '</div>' :
+    (store.sessions.length > 1 ? '<input type="search" id="search" class="search" aria-label="Search sessions" maxlength="80" ' +
+      'placeholder="Search test, pallet, SKU, place, date, status" value="' + escape(query) + '">' : '') +
+    (records ? '<div class="group records">' + records + '</div>' + '<p class="muted" id="no-match"' +
+      (store.sessions.some(s => matchesQuery(s,query,nextLabel(s))) ? ' hidden' : '') + '>No session matches the search.</p>' :
       '<p class="empty">No tests yet. Start one, load its cartons, then scan the pallet.</p>') +
     (permits(role,'create') ? '' : '<p class="muted">Switch to Operator or Test lead to start a test.</p>') + '</section>' +
     planPanel() +
@@ -214,7 +222,11 @@ function history() {
       (includeOtherRecords ? 'All local sessions are shared.' : 'Sample simulation sessions are shared.') + '</p><p><code>' + escape(dashboardUrl) +
       '</code></p>' + button('copy','Copy dashboard link','class="secondary"') + '</div></div>' : '') +
       (role === 'admin' ? '<div class="line">' + button('reset','Reset all local data',
-        'class="secondary" ' + (powerRequest ? 'disabled' : '')) + '</div>' : '') + '</section>' : '') +
+        'class="secondary" ' + (powerRequest ? 'disabled' : '')) + '</div>' : '') +
+      (store.audit?.length ? '<details class="line"><summary>Device log (' + store.audit.length + ')</summary><ul class="log">' +
+        store.audit.slice().reverse().map(e => '<li><strong>' + escape(e.action) + '</strong><br>' + escape(e.detail) +
+          '<br><small>' + escape(e.actor) + ' / ' + escape(time(e.at)) + '</small></li>').join('') + '</ul></details>' : '') +
+      '</section>' : '') +
     (permits(role,'create') ? '<div class="actionbar">' + button('new','New test session','class="scan-cta"') + '</div>' : '');
 }
 // Section 13 recovery: say which sessions changed since their last export, so nothing is cleared unexported.
@@ -299,7 +311,7 @@ function lastRun(s) {
   const run = latest(s), r = run?.result;
   if (!run) return '';
   const status = run.state === 'Finished' ? r.status : run.state;
-  return '<p class="status ' + escape(status.toLowerCase()) + '">Run ' + s.runs.length + ': ' + escape(status) +
+  return '<p class="status ' + escape(status.toLowerCase()) + '">Run ' + s.runs.length + ': ' + escape(statusLabel(status)) +
     (r ? ' / ' + r.matched.length + ' of ' + r.expected + ' matched' + (r.extra.length ? ' / ' + r.extra.length + ' unexpected' : '') : '') + '</p>';
 }
 function closeForm(s) {
@@ -466,8 +478,11 @@ function scanPanel(s) {
     (!isHardware && s.identified ? '<label>Demo reads<select id="scenario">' +
       ['Missing one','Unexpected extra','Clean match','Interrupted'].map(item => '<option ' + (scenario === item ? 'selected' : '') +
         '>' + item + '</option>').join('') + '</select></label>' : '') +
-    (s.identified && run ? '<label>Rescan reason<input id="rescan" maxlength="160" value="' + escape(rescanReason) +
-      '" placeholder="What changed before retrying?"></label>' : '') +
+    // FR-19: pick one of the design's reasons or type another.
+    (s.identified && run ? '<label>Rescan reason<input id="rescan" list="rescan-reasons" maxlength="160" value="' + escape(rescanReason) +
+      '" placeholder="Pick or type what changed"></label><datalist id="rescan-reasons">' +
+      ['Missed carton','Label repositioned','Pallet rebuilt','Shielding adjusted','Scan method changed']
+        .map(reason => '<option value="' + reason + '"></option>').join('') + '</datalist>' : '') +
     (!isHardware ? '<button type="button" id="demo-trigger" class="secondary scan-cta">Hold demo trigger</button>' : '') +
     // Glove-friendly alternative to the trigger: tap once to start, tap again to stop (§6 scan screen).
     (isHardware ? '<button type="button" id="hw-toggle" class="scan-cta" ' + (!ready && !active ? 'disabled' : '') +
@@ -487,7 +502,7 @@ function scanSummary(s,r = scanResult(s)) {
   const run = latest(s);
   const status = active ? (active.ending ? 'Finishing' : 'Reading') :
     run ? (run.state === 'Finished' ? run.result.status : run.state) : 'Ready to scan';
-  return '<p role="status" class="status ' + status.toLowerCase().replaceAll(' ','-') + '">' + status + '</p>' +
+  return '<p role="status" class="status ' + status.toLowerCase().replaceAll(' ','-') + '">' + statusLabel(status) + '</p>' +
     (r ? counts(r,Boolean(!active && run?.result)) : '');
 }
 function tagRows(s,r = scanResult(s)) {
@@ -505,10 +520,15 @@ function tagRows(s,r = scanResult(s)) {
 function resultBox(s, title, run) {
   if (!run) return '<div><h3>' + title + '</h3><p class="muted">No earlier run.</p></div>';
   const r = run.result;
-  return '<div><h3>' + title + '</h3><p>' + escape(run.state === 'Finished' ? r.status : run.state) +
+  const bySku = r ? skuBreakdown(manifestFor(s,run),r) : [];
+  return '<div><h3>' + title + '</h3><p>' + escape(statusLabel(run.state === 'Finished' ? r.status : run.state)) +
     (r ? ' / ' + r.matched.length + ' of ' + r.expected + ' matched' : '') +
     (run.endedAt ? ' / ' + run.elapsedSeconds + ' s' : '') + '</p>' +
     (r ? '<p>Missing: ' + r.missing.length + ' / Extra: ' + r.extra.length + '</p>' : '') +
+    // AT-02: a mixed pallet reads per SKU; the EPC stays the carton identity.
+    (bySku.length > 1 ? '<details class="by-sku"><summary>By SKU</summary><ul class="log">' + bySku.map(row => '<li><strong>' +
+      escape(row.sku) + '</strong> ' + row.matched + ' of ' + row.expected + ' matched' + (row.missing ? ' / ' + row.missing + ' missing' : '') +
+      '</li>').join('') + '</ul></details>' : '') +
     '<details><summary>EPC evidence</summary>' +
     (r ? issueList('Missing',r.missing,s) + issueList('Unexpected',r.extra,s) : '') +
     s.logs.filter(l => l.run === run.id && l.action === 'Run note').map(l => '<p><strong>Note</strong> ' + escape(l.detail) + '</p>').join('') +
@@ -727,12 +747,14 @@ window.keypharmEvent = (name,data) => action(() => {
     if (!active && !powerRequest && (view === 'scan' || view === 'sessions' || (view === 'session' && session()?.source === 'C72 hardware'))) render();
   }
   if (name === 'reader-power' && powerRequest?.id === data.id) {
-    const target = powerRequest.session;
+    const {session:target, actor:changedBy} = powerRequest;
     powerRequest = undefined;
     reader = {...reader, ready:data.ready ?? reader.ready, profile:data.profile ?? reader.profile};
-    // From the home screen there is no session to log to; every scan still records its own power.
-    if (target && data.ok && data.previousPower !== data.profile?.powerDbm) {
-      commit(() => log(target,'Reader power changed',data.previousPower + ' to ' + data.profile.powerDbm + ' dBm'));
+    // A session change goes to its log; a home-screen change goes to the device log (FR-35). Every scan still records its power.
+    if (data.ok && data.previousPower !== data.profile?.powerDbm) {
+      const detail = data.previousPower + ' to ' + data.profile.powerDbm + ' dBm';
+      commit(() => target ? log(target,'Reader power changed',detail) :
+        (store.audit ??= []).push({at:now(), actor:changedBy, action:'Reader power changed', detail:detail + ' (home screen)'}));
     }
     feedback(data.message,!data.ok);
     render();
@@ -810,6 +832,17 @@ document.addEventListener('change', event => action(() => {
 document.addEventListener('input', event => {
   if (draftable(event.target)) { ui.drafts[draftPrefix(event.target.form.id) + event.target.name] = event.target.value; saveUi(); }
   if (event.target.id === 'rescan') rescanReason = event.target.value;
+  // Filter in place: a re-render would close the keyboard on every letter.
+  if (event.target.id === 'search') {
+    query = event.target.value;
+    let shown = 0;
+    for (const record of root.querySelectorAll('.record')) {
+      const s = store.sessions.find(entry => entry.id === record.dataset.open);
+      record.hidden = !(s && matchesQuery(s,query,nextLabel(s)));
+      shown += !record.hidden;
+    }
+    root.querySelector('#no-match')?.toggleAttribute('hidden',shown > 0);
+  }
 });
 document.addEventListener('click', event => action(() => {
   // Tapping anywhere outside the identity menu folds it away.
@@ -915,7 +948,7 @@ root.addEventListener('submit', event => action(() => {
       reader.ready && permits(role,'reader-power') && bridge?.setReaderPower) {
     const power = Number(data.power);
     if (!Number.isInteger(power) || power < 5 || power > 30) throw new Error('Choose a power from 5 to 30 dBm.');
-    powerRequest = {id:id(), session:hardwareSession ? s : null};
+    powerRequest = {id:id(), session:hardwareSession ? s : null, actor:actor()};
     feedback('');
     render();
     bridge.setReaderPower(powerRequest.id,power);
@@ -1019,6 +1052,7 @@ window.addEventListener('blur', () => {
   if (active && !active.hardware) { simulatedKeys = false; action(() => end(true)); }
 });
 setInterval(updateScan,300);
+for (const change of ['online','offline']) window.addEventListener(change, () => { if (!active && !powerRequest && view === 'sessions') render(); });
 // Reopen where the user was; a scan or manifest build cannot resume, so those land on their session.
 if (ui.selected && store.sessions.some(s => s.id === ui.selected)) {
   selected = ui.selected;
