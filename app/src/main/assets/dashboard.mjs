@@ -66,7 +66,7 @@ function runEvidence(run) {
   return facts(['Operator',run.operator],['Source',run.source],['Started',time(run.startedAt)],['Finished',time(run.endedAt)],
     ['Duration',run.elapsedSeconds == null ? null : run.elapsedSeconds + ' s'],['Manifest revision',run.manifestRevision],
     ['Expected',r?.expected],['Matched',r?.matched?.length],['Completeness',r?.percent == null ? null : r.percent + '%'],
-    ['Reader profile',run.profile?.name],['Region / power',readerPower(run.profile)],['Reader build',run.profile?.build],
+    ['Reader profile',run.profile?.name],['Profile version',run.profile?.version],['Region / power',readerPower(run.profile)],['Reader build',run.profile?.build],
     ['Rescan reason',run.reason],['Notes',run.note ?? run.notes],['Error',run.error]) +
     fold('Missing EPCs (' + (r?.missing?.length ?? 0) + ')',list(r?.missing,code)) +
     fold('Unexpected EPCs (' + (r?.extra?.length ?? 0) + ')',list(r?.extra,code)) +

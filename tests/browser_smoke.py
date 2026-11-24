@@ -177,8 +177,10 @@ with sync_playwright() as playwright:
     downloads = []
     device.on("download", lambda download: downloads.append(download))
     device.get_by_role("button", name="Sessions").click()
+    expect(device.locator(".export-state")).to_have_text("1 of 1 sessions not exported since their last change: KP-TEST-01")
     device.get_by_role("button", name="Export CSV and summary").click()
     device.wait_for_timeout(1000)
+    expect(device.locator(".export-state")).to_have_text("Every session is exported.")
     files = {d.suggested_filename: Path(d.path()).read_text(encoding="utf-8-sig") for d in downloads}
     assert sorted(files) == ["keypharm-evidence.csv", "keypharm-records.csv", "keypharm-summary.txt"], sorted(files)
     evidence = files["keypharm-evidence.csv"].splitlines()
@@ -516,6 +518,16 @@ with sync_playwright() as playwright:
     expect(gen.locator("#share-all")).to_be_checked()  # the dashboard shares hardware records by default
     gen.get_by_role("button", name="New test session").click()
     gen.get_by_role("button", name="Create session").click()
+    # A rejected file is logged with its name and errors; a blank SKU is accepted but named before scanning (FR-04).
+    gen.evaluate("""window.keypharmEvent('manifest-file', {name:'bad.csv',
+      text:'pallet_ref,pallet_epc,carton_ref,carton_epc,sku\\nP1,AA01,C1,XYZ,\\n'})""")
+    expect(gen.locator("#notice")).to_contain_text("EPC must be even-length hexadecimal")
+    failed = gen.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].logs.at(-1)")
+    assert (failed["action"], failed["actor"]) == ("Manifest import failed", "Lead A"), failed
+    assert failed["detail"].startswith("bad.csv / Row 2: EPC must be even-length hexadecimal"), failed
+    gen.evaluate("""window.keypharmEvent('manifest-file', {name:'nosku.csv',
+      text:'pallet_ref,pallet_epc,carton_ref,carton_epc,sku\\nP1,AA01,C1,CC01,\\nP1,AA01,C2,CC02,Ginger\\n'})""")
+    expect(gen.locator(".sku-gap")).to_have_text("1 carton has no SKU: C1")
     gen.get_by_role("button", name="Build from scan").click()
     gen.get_by_role("button", name="Start scan").click()
     gen.get_by_role("button", name="Stop scan").click()
@@ -530,6 +542,7 @@ with sync_playwright() as playwright:
         "PAL-KP-TEST-01,AA01,Carton 01,CC01,Ginger", "PAL-KP-TEST-01,AA01,Carton 02,CC02,Ginger"], csv
     gen.get_by_role("button", name="Use as manifest").click()
     expect(gen.get_by_text("1 pallet(s) / 2 cartons", exact=False)).to_be_visible()
+    expect(gen.locator(".sku-gap")).to_have_count(0)
     gen.get_by_role("button", name="Save manifest").click()
     built = gen.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].manifest")
     assert (built["palletEpc"], [c["epc"] for c in built["cartons"]]) == ("AA01", ["CC01", "CC02"]), built

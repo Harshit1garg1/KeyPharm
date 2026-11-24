@@ -1,7 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {parseManifest, compare, scanDelta, canContinue, permits, allocationTotal, canClose, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary, EXPORT_COLUMNS, SAMPLE,
-  parsePlan, planCoverage, closePlanErrors, manifestFor, lockPallet, lockTo, otherPallet, inManifest, manifestCsv} from '../app/src/main/assets/model.mjs';
+  parsePlan, planCoverage, closePlanErrors, manifestFor, lockPallet, lockTo, otherPallet, inManifest, manifestCsv,
+  missingSku, unexported} from '../app/src/main/assets/model.mjs';
 
 test('sample validates and pallet EPC is not a carton', () => {
   const manifest = parseManifest(SAMPLE);
@@ -224,3 +225,28 @@ test('manifest built from a scan: chosen pallet tag, the rest become numbered ca
   assert.throws(() => manifestCsv('PAL', 'AA01', ['CC01'], '@SUM(1)'), /start with/);
 });
 
+
+test('cartons without a SKU are listed before scanning, per locked pallet or across a multi-pallet file (FR-04)', () => {
+  assert.deepEqual(missingSku(parseManifest(SAMPLE)), []);
+  assert.deepEqual(missingSku(parseManifest(SAMPLE.replace(',Pomegranate juice', ','))), ['Carton 04']);
+  const multi = parseManifest('pallet_ref,pallet_epc,carton_ref,carton_epc,sku\nP1,AA01,C1,CC01,\nP1,AA01,C2,CC02,Ginger\nP2,AA02,C3,CC03,\n');
+  assert.deepEqual(missingSku(multi), ['P1 / C1', 'P2 / C3']);
+  assert.deepEqual(missingSku(lockTo(multi, multi.pallets[1])), ['C3']);
+  assert.deepEqual(missingSku(undefined), []);
+});
+
+test('a session counts as unexported until an export follows its last logged change (section 13 recovery)', () => {
+  const s = {logs:[{at:'2026-11-24T10:00:00.000Z'}]};
+  assert.equal(unexported(s), true);
+  assert.equal(unexported({...s, exportedAt:'2026-11-24T10:05:00.000Z'}), false);
+  assert.equal(unexported({logs:[...s.logs, {at:'2026-11-24T10:06:00.000Z'}], exportedAt:'2026-11-24T10:05:00.000Z'}), true);
+});
+
+test('each export row carries the reader profile version of its run (section 9.1)', () => {
+  const manifest = {...parseManifest(SAMPLE), revision:1};
+  const run = {id:'r1',state:'Finished',observations:{},profile:{region:'ETSI',powerDbm:30,version:'C72-ETSI-1'},result:compare(manifest,[])};
+  const [header,row] = specEvidenceCsv({sessions:[{id:'s',testId:'T',manifest,runs:[run],logs:[]}]}).replace(/^﻿/,'').trim().split('\r\n')
+    .map(line => line.split('","').map(cell => cell.replace(/^"|"$/g,'')));
+  assert.equal(header.at(-1), 'ProfileVersion');
+  assert.equal(row[header.indexOf('ProfileVersion')], 'C72-ETSI-1');
+});

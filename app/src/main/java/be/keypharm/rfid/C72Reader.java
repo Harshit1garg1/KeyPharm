@@ -14,6 +14,9 @@ final class C72Reader {
     private static final int ETSI = 0x04;
     private static final int MIN_POWER_DBM = 5;
     private static final int MAX_POWER_DBM = 30;
+    // Functional design 9.1: stored with every run so runs are comparable. Bump it when the approved
+    // profile rules change (region lock, power limits, SDK). Power itself is recorded per run.
+    private static final String PROFILE_VERSION = "C72-ETSI-1";
     private final Context context;
     private RFIDWithUHFUART sdk;
     private JSONObject profile;
@@ -127,7 +130,7 @@ final class C72Reader {
     private JSONObject settings(int region, int power) {
         String device = android.provider.Settings.Secure.getString(context.getContentResolver(),
                 android.provider.Settings.Secure.ANDROID_ID);
-        return json("name", "C72 ETSI", "model", Build.MODEL, "build", Build.DISPLAY, "deviceId", device,
+        return json("name", "C72 ETSI", "version", PROFILE_VERSION, "model", Build.MODEL, "build", Build.DISPLAY, "deviceId", device,
                 "firmware", sdk.getVersion(), "region", region == ETSI ? "ETSI" : "Unverified (" + region + ")",
                 "powerDbm", power > 0 ? power : JSONObject.NULL, "antenna", "Not reported");
     }

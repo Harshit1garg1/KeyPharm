@@ -1,6 +1,6 @@
 import {SAMPLE, EXTRA_EPC, normalizeEpc, parseManifest, compare, scanDelta, canContinue, canClose,
   roles, permits, allocationTotal, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary,
-  parsePlan, planCoverage, closePlanErrors, lockPallet, lockTo, otherPallet, inManifest, manifestCsv} from './model.mjs';
+  parsePlan, planCoverage, closePlanErrors, lockPallet, lockTo, otherPallet, inManifest, manifestCsv, missingSku, unexported} from './model.mjs';
 import qrcode from './qrcode-generator.mjs';
 
 const root = document.querySelector('#app');
@@ -38,6 +38,12 @@ const field = (name,label,value = '',attributes = '') => '<label>' + escape(labe
 const counts = (r,finished) => '<div class="counts">' + [
   ['Expected',r.expected],['Matched',r.matched.length],[finished ? 'Missing' : 'Waiting',r.missing.length],['Extra',r.extra.length]
 ].map(([name,n]) => '<div><strong>' + n + '</strong><span>' + name + '</span></div>').join('') + '</div>';
+// FR-04: name the cartons without a SKU before anyone scans; a blank SKU is allowed, not hidden.
+const skuNote = m => {
+  const gaps = missingSku(m);
+  return gaps.length ? '<p class="status sku-gap">' + gaps.length + (gaps.length === 1 ? ' carton has' : ' cartons have') +
+    ' no SKU: ' + escape(gaps.slice(0,5).join(', ')) + (gaps.length > 5 ? ', …' : '') + '</p>' : '';
+};
 
 let store = {sessions:[],people:[]}, storageError = false;
 try {
@@ -197,7 +203,7 @@ function history() {
       '<p class="empty">No tests yet. Start one, load its cartons, then scan the pallet.</p>') +
     (permits(role,'create') ? '' : '<p class="muted">Switch to Operator or Test lead to start a test.</p>') + '</section>' +
     planPanel() +
-    (permits(role,'export') ? '<h2 class="section-title">Evidence</h2><section class="panel"><div class="row">' +
+    (permits(role,'export') ? '<h2 class="section-title">Evidence</h2><section class="panel">' + exportState() + '<div class="row">' +
       button('export','Export CSV and summary','class="secondary" ' + (!store.sessions.length ? 'disabled' : '')) +
       (bridge ? button('dashboard',dashboardUrl ? 'Stop dashboard sharing' : 'Share web dashboard',
         'class="secondary" ' + (dashboardResetPending ? 'disabled' : '')) : '') +
@@ -210,6 +216,14 @@ function history() {
       (role === 'admin' ? '<div class="line">' + button('reset','Reset all local data',
         'class="secondary" ' + (powerRequest ? 'disabled' : '')) + '</div>' : '') + '</section>' : '') +
     (permits(role,'create') ? '<div class="actionbar">' + button('new','New test session','class="scan-cta"') + '</div>' : '');
+}
+// Section 13 recovery: say which sessions changed since their last export, so nothing is cleared unexported.
+function exportState() {
+  if (!store.sessions.length) return '';
+  const pending = store.sessions.filter(unexported);
+  return pending.length ? '<p class="status export-state" data-pending="true">' + pending.length + ' of ' + store.sessions.length +
+      ' sessions not exported since their last change: ' + escape(pending.map(s => s.testId).join(', ')) + '</p>' :
+    '<p class="muted export-state">Every session is exported.</p>';
 }
 // Planned tests for the day (FR-28 coverage): the Test lead enters them, closing the day needs a reason for every test not run.
 function planPanel() {
@@ -263,7 +277,7 @@ function nextCard(s, step) {
   const [needRole, needAction] = STEP_ROLE[step];
   const title = {manifest:'Load the expected cartons', verify:'Check the pallet by hand', close:'Review and close the test',
     scan:!s.identified ? 'Scan the pallet' : latest(s)?.result ? 'Rescan the cartons' : 'Scan the cartons'}[step];
-  let body = step === 'verify' ? '<p><strong>' + escape(manifestSummary(s.manifest)) + '</strong></p>' : '';
+  let body = step === 'verify' ? '<p><strong>' + escape(manifestSummary(s.manifest)) + '</strong></p>' + skuNote(s.manifest) : '';
   if (!permits(role,needAction)) {
     body += '<p>The ' + escape(roles[needRole]) + ' does this step.</p>' +
       button('as-role','Switch to ' + escape(roles[needRole]),'class="scan-cta" data-role="' + needRole + '"');
@@ -317,7 +331,7 @@ function manifestSummary(m) {
 }
 function manifestList(m) {
   const pallets = m.pallets?.length > 1 && !m.palletEpc ? m.pallets : null;
-  return '<p>' + escape(manifestSummary(m)) + '</p><p class="muted">' + escape(m.source) + '</p><ul class="log">' +
+  return '<p>' + escape(manifestSummary(m)) + '</p><p class="muted">' + escape(m.source) + '</p>' + skuNote(m) + '<ul class="log">' +
     (pallets ? pallets.flatMap(p => p.cartons.map(c => ({...c, carton:p.pallet + ' / ' + c.carton}))) : m.cartons)
       .map(c => '<li>' + escape([c.carton, c.sku].filter(Boolean).join(' / ')) + '<br><code>' + escape(c.epc) + '</code></li>').join('') + '</ul>';
 }
@@ -334,7 +348,7 @@ function manifestControls(s,m) {
   if (!bridge) result += '<label class="line">CSV file<input id="csv-file" type="file" accept=".csv,text/csv"></label>';
   if (pendingImport) result += '<form class="line stack" id="manifest"><p>' + escape(pendingImport.name) + ' / ' +
     pendingImport.data.pallets.length + ' pallet(s) / ' + pendingImport.data.pallets.reduce((n,p) => n + p.cartons.length,0) +
-    ' cartons</p><div class="fields">' +
+    ' cartons</p>' + skuNote(pendingImport.data) + '<div class="fields">' +
     field('reserves','Reserve labels',s.allocation.reserves ?? 0,'type="number" min="0" max="500" required') +
     field('candidates','Candidate labels',s.allocation.candidates ?? 0,'type="number" min="0" max="500" required') +
     (m ? field('reason','Revision reason','','maxlength="160" required') : '') +
@@ -674,8 +688,19 @@ function updateScan() {
   }
 }
 function chooseManifest(text,name,demo = false) {
-  if (view !== 'session' || !permits(role,'manifest') || session()?.closedAt || session()?.confirmedAt || active) return;
-  pendingImport = {data:parseManifest(text),name,demo};
+  const s = session();
+  if (view !== 'session' || !permits(role,'manifest') || s?.closedAt || s?.confirmedAt || active) return;
+  let data;
+  try {
+    data = parseManifest(text);
+  } catch (error) {
+    // Section 10 manifest import error: keep file name, time and the first errors in the session log.
+    // ponytail: skipped while no name is set, because every log entry needs a signer.
+    const rows = String(error.message).split('\n');
+    if (s && store.person) commit(() => log(s,'Manifest import failed',name + ' / ' + rows.slice(0,3).join(' | ') + (rows.length > 3 ? ' | …' : '')));
+    throw error;
+  }
+  pendingImport = {data,name,demo};
   feedback('');
   render();
 }
@@ -923,7 +948,8 @@ root.addEventListener('submit', event => action(() => {
       s.verifiedBy = s.verifiedAt = null;
       s.identified = false;
       log(s,'Manifest saved','Revision ' + s.manifest.revision + ' / ' + s.manifest.source +
-        ' / ' + total + ' cumulative labels' + (data.reason ? ' / ' + data.reason : ''));
+        ' / ' + total + ' cumulative labels' + (missingSku(s.manifest).length ? ' / ' + missingSku(s.manifest).length + ' cartons without SKU' : '') +
+        (data.reason ? ' / ' + data.reason : ''));
     });
     pendingImport = undefined;
   }
@@ -959,6 +985,10 @@ function exportRecords(records) {
   const evidence = specEvidenceCsv(records), full = evidenceCsv(records), summary = evidenceSummary(records);
   if (bridge) bridge.exportEvidence(evidence,full,summary);
   else { download('keypharm-evidence.csv',evidence); download('keypharm-records.csv',full); download('keypharm-summary.txt',summary); }
+  // ponytail: marked when the share sheet opens; Android does not report a cancelled share back to the page.
+  const at = now();
+  commit(() => { for (const s of records.sessions) s.exportedAt = at; });
+  render();
 }
 function download(name,text) {
   const url = URL.createObjectURL(new Blob([text],{type:'text/plain;charset=utf-8'}));
