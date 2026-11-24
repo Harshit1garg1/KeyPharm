@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {parseManifest, compare, scanDelta, canContinue, permits, allocationTotal, canClose, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary, EXPORT_COLUMNS, SAMPLE,
-  parsePlan, planCoverage, closePlanErrors, manifestFor, lockPallet, lockTo, otherPallet, inManifest} from '../app/src/main/assets/model.mjs';
+  parsePlan, planCoverage, closePlanErrors, manifestFor, lockPallet, lockTo, otherPallet, inManifest, manifestCsv} from '../app/src/main/assets/model.mjs';
 
 test('sample validates and pallet EPC is not a carton', () => {
   const manifest = parseManifest(SAMPLE);
@@ -210,3 +210,17 @@ test('strongest signal locks the pallet, and a carton read first locks its own p
   assert.match(other, /Belongs to pallet PAL-B/);
   assert.match(rows.find(row => row.includes('"FFFF"')), /UNEXPECTED_EPC/);
 });
+
+test('manifest built from a scan: chosen pallet tag, the rest become numbered cartons, and it parses back', () => {
+  const csv = manifestCsv('PAL-C72-03', 'aa01', ['CC02', 'aa01', 'cc01', 'CC01'], 'Ginger 50ml');
+  const m = parseManifest(csv);
+  assert.equal(m.pallet, 'PAL-C72-03');
+  assert.equal(m.palletEpc, 'AA01');
+  assert.deepEqual(m.cartons.map(c => [c.carton, c.epc, c.sku]), [['Carton 01', 'CC01', 'Ginger 50ml'], ['Carton 02', 'CC02', 'Ginger 50ml']]);
+  assert.throws(() => manifestCsv('PAL', '', ['CC01']), /pallet tag/);
+  assert.throws(() => manifestCsv('PAL', 'AA01', ['AA01']), /carton/);
+  assert.throws(() => manifestCsv('PAL;1', 'AA01', ['CC01']), /commas/);
+  assert.throws(() => manifestCsv('=HYPERLINK(1)', 'AA01', ['CC01']), /start with/);
+  assert.throws(() => manifestCsv('PAL', 'AA01', ['CC01'], '@SUM(1)'), /start with/);
+});
+

@@ -25,7 +25,7 @@ public final class MainActivity extends Activity {
     private static final int PICK_MANIFEST = 10;
     private static final int SAVE_TEMPLATE = 11;
     private static final Set<String> ASSETS = Set.of(
-            "/handheld.html", "/handheld.mjs", "/model.mjs", "/qrcode-generator.mjs", "/style.css", "/keypharm-logo.png");
+            "/handheld.html", "/handheld.mjs", "/model.mjs", "/qrcode-generator.mjs", "/style.css", "/keypharm-logo.png", "/keypharm-logo-hd.png");
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService hardware = Executors.newSingleThreadExecutor();
     private WebView web;

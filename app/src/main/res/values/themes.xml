@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App theme. The light window matches the WebView ground (#F1F5F2) so there is no flash after the splash. -->
+    <style name="Theme.Keypharm" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/keypharm_ground</item>
+        <item name="android:statusBarColor">@color/keypharm_paper</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+    <color name="keypharm_ground">#F1F5F2</color>
+    <color name="keypharm_paper">#FCFDFC</color>
+    <color name="keypharm_green">#064D19</color>
+</resources>

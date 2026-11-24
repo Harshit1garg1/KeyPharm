@@ -20,7 +20,7 @@ body {margin:0;background:var(--workspace);color:var(--ink);font:16px/1.5 var(--
 .shell {max-width:1200px;margin:auto;padding:24px}
 .handheld .shell,.handheld .mast-inner {max-width:720px}
 h1,h2,h3 {line-height:1.15;letter-spacing:-.025em;overflow-wrap:break-word;min-width:0}
-h1 {font-size:30px;margin:0 0 16px;text-wrap:balance}
+h1 {font-size:26px;margin:0 0 16px;text-wrap:balance}
 h2 {font-size:22px;margin:0 0 12px;text-wrap:balance}
 h3 {font-size:17px;margin:0 0 8px}
 p {margin:0 0 12px}
@@ -89,10 +89,14 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .tag-row[data-tag-status="matched"] .tag-badge {background:var(--leaf);color:var(--match)}
 .tag-row[data-tag-status="missing"] .tag-badge {background:var(--amber-surface);color:var(--amber)}
 .tag-row[data-tag-status="unexpected"] .tag-badge {background:var(--clay);color:var(--hold)}
-.handheld summary {display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;margin:8px 0;background:var(--workspace);color:var(--action);border:1px solid var(--line);border-radius:7px;list-style:none}
+.handheld summary {display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:48px;padding:12px 0;margin:0;background:none;color:var(--ink);border:0;border-top:1px solid var(--line);border-radius:0;list-style:none}
 .handheld summary::-webkit-details-marker {display:none}
-.handheld summary::after {content:"+";font-size:20px;line-height:1}
-.handheld details[open] > summary::after {content:"−"}
+/* Drawn chevron: points down when closed, up when open. */
+.handheld summary::after {content:"";flex:none;width:8px;height:8px;margin:0 4px 4px 0;border:solid var(--subtle);border-width:0 2px 2px 0;transform:rotate(45deg);transition:transform .15s ease-out}
+.handheld details[open] > summary::after {margin-bottom:-4px;transform:rotate(-135deg)}
+.handheld details[open] > summary {color:var(--action)}
+.panel > details:first-child > summary,.panel > h2 + details > summary {border-top:0}
+@media(prefers-reduced-motion:reduce) {.handheld summary::after {transition:none}}
 .scan-cta {width:100%;min-height:56px;margin-top:12px}
 #demo-trigger {touch-action:none;user-select:none}
 .full {grid-column:1/-1}
@@ -101,7 +105,7 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .log li:last-child {border:0}
 .warehouse {display:grid;grid-template-columns:minmax(260px,.8fr) minmax(0,1.45fr);gap:20px;align-items:start}
 .warehouse .panel {margin-top:0}
-.record {width:100%;justify-content:space-between;text-align:left;background:var(--paper);color:var(--ink);border-color:var(--line);gap:8px;margin-top:8px}
+.record {width:100%;justify-content:space-between;text-align:left;background:var(--paper);color:var(--ink);border-color:var(--line);gap:8px;margin-top:8px;font-weight:400}
 .record[aria-current=true] {background:var(--sky);border-color:var(--action)}
 .record span {overflow-wrap:anywhere}
 .provenance {font-size:14px;font-weight:650}
@@ -144,14 +148,53 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .panel.next {border:2px solid var(--action)}
 .panel.next[data-step=done] {border-color:var(--line)}
 .panel.next .status {margin-bottom:12px}
-.panel.details > h2 {font-size:17px}
 
-/* Session list: each row says what it needs next. */
-.records {margin-top:16px}
+/* Section titles sit outside their card, Android inset-list style. */
+.section-title {font-size:17px;margin:24px 4px 8px}
+.section-head {align-items:baseline;margin:24px 4px 8px}
+.section-head h1 {margin:0}
+.empty {margin:0;padding:16px;background:var(--paper);border:1px dashed var(--line);border-radius:12px;color:var(--subtle)}
+.panel.details {padding-top:4px;padding-bottom:12px}
+
+/* Session list: one grouped list, each row says what it needs next. */
+.group {background:var(--paper);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.group .record {margin:0;border:0;border-top:1px solid var(--line);border-radius:0;min-height:64px;padding:12px 16px}
+.group .record:first-child {border-top:0}
+.group .record:hover:not(:disabled) {background:var(--workspace);color:var(--ink);border-color:var(--line)}
 .home > .muted {margin-top:12px}
-.record {min-height:64px;padding:12px}
 .record > span:first-child {display:grid;gap:2px}
 .record small {font-weight:500}
 .record-next {flex:none;padding:4px 8px;border-radius:6px;background:var(--workspace);color:var(--action);font-size:13px;white-space:nowrap}
 .record-next[data-step=done] {background:var(--leaf);color:var(--match)}
-@media(max-width:420px) {.brand {width:120px;height:31px}.brand img {width:160px;margin-left:-12px}.handheld .who > summary {max-width:200px}}
+.record-next[data-alert=true] {background:var(--clay);color:var(--hold)}
+
+/* Reader: one glanceable row at the top of the home screen; tap to change power. */
+.reader-card {padding:0 16px;margin-top:4px}
+.handheld .reader-card > summary {border-top:0;min-height:64px}
+.reader-label {display:grid;gap:2px;min-width:0;margin-right:auto}
+.reader-label small {font-weight:400;font-size:13px}
+.reader-body {padding:0 0 16px;display:grid;gap:12px}
+.reader-body p {margin:0}
+
+/* Primary action in the thumb zone, always reachable. */
+.actionbar {position:fixed;left:0;right:0;bottom:0;z-index:5;padding:12px 24px;background:var(--workspace);border-top:1px solid var(--line)}
+.actionbar .scan-cta {display:flex;max-width:672px;margin:0 auto}
+.shell:has(.actionbar) {padding-bottom:104px}
+@media(max-width:420px) {.actionbar {padding:12px}.shell:has(.actionbar) {padding-bottom:92px}.reader-card {padding:0 12px}.brand {width:120px;height:31px}.brand img {width:160px;margin-left:-12px}.handheld .who > summary {max-width:156px}}
+
+/* Header logo: the official mark, cut from its white box and upscaled (tools/logo-hd.py), shown about twice the old size. */
+.handheld .brand {width:auto;height:auto;overflow:visible;min-width:0}
+.handheld .brand img {display:block;width:auto;height:44px;max-width:100%;margin:0}
+
+/* Manifest builder: one row per tag read, keep-checkbox on the left, pallet choice on the right. */
+.build-tags {margin:0;padding:0 16px;min-width:0}
+.build-tags legend {padding:12px 0 4px;font-size:14px;font-weight:650;float:left;width:100%}
+.build-tag {clear:both;display:flex;align-items:center;justify-content:space-between;gap:8px;border-top:1px solid var(--line)}
+.build-tag .check {flex:1;min-width:0;font-weight:400}
+.build-tag .check span {display:grid;min-width:0}
+.build-tag code {overflow-wrap:anywhere}
+.build-tag small {font-size:13px}
+.pallet-pick {display:flex;align-items:center;gap:6px;min-height:48px;font-size:14px;flex:none}
+.pallet-pick input {width:22px;min-height:22px;accent-color:var(--action)}
+#build-form .secondary {width:100%}
+@media(max-width:420px) {.handheld .brand img {height:34px}}

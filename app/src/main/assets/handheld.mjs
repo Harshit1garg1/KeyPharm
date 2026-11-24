@@ -1,6 +1,6 @@
 import {SAMPLE, EXTRA_EPC, normalizeEpc, parseManifest, compare, scanDelta, canContinue, canClose,
   roles, permits, allocationTotal, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary,
-  parsePlan, planCoverage, closePlanErrors, lockPallet, lockTo, otherPallet, inManifest} from './model.mjs';
+  parsePlan, planCoverage, closePlanErrors, lockPallet, lockTo, otherPallet, inManifest, manifestCsv} from './model.mjs';
 import qrcode from './qrcode-generator.mjs';
 
 const root = document.querySelector('#app');
@@ -62,7 +62,26 @@ let powerRequest;
 let dashboardUrl = '';
 let dashboardQr = '';
 let includeOtherRecords = false;
+let dashboardResetPending = false;
 let simulatedKeys = false;
+let builder; // manifest generator: {tags:{epc:{count,rssi}}, capture, palletRef, sku}
+// The open screen and half-typed form fields survive re-renders and restarts (records stay in `key`).
+const uiKey = 'keypharm-poc-ui-v1';
+let ui = {drafts:{}};
+try { ui = {drafts:{}, ...JSON.parse(localStorage.getItem(uiKey) ?? '{}')}; } catch {}
+function saveUi() {
+  try {
+    if (view === 'sessions' && !selected && !Object.keys(ui.drafts).length) localStorage.removeItem(uiKey);
+    else localStorage.setItem(uiKey,JSON.stringify({view, selected, drafts:ui.drafts}));
+  } catch {}
+}
+const draftable = el => el.form?.id && el.name && el.form.id !== 'reader-power' &&
+  !['file','checkbox','radio','hidden','submit','button'].includes(el.type);
+const draftPrefix = formId => (['session','scan','build'].includes(view) ? selected : '') + '|' + formId + '|';
+function clearDrafts(prefix) {
+  for (const k of Object.keys(ui.drafts)) if (k.startsWith(prefix)) delete ui.drafts[k];
+  saveUi();
+}
 
 const session = () => store.sessions.find(entry => entry.id === selected);
 const latest = s => s?.runs.at(-1);
@@ -122,7 +141,7 @@ function identityMenu(open) {
     '</summary><div class="who-sheet"><label>Role<select id="role" ' + locked + '>' +
     Object.entries(roles).map(([value,label]) => '<option value="' + value + '" ' + (role === value ? 'selected' : '') +
       '>' + escape(label) + '</option>').join('') + '</select></label>' +
-    // ponytail: names are only added, never edited; clear app data to reset the list if a typo matters.
+    // Saved names are kept until the Test lead resets local data.
     '<label>Your name<input id="person" list="people" maxlength="60" autocomplete="off" placeholder="Pick or type your name" value="' +
       escape(name) + '" ' + locked + '></label><datalist id="people">' +
       store.people.map(person => '<option value="' + escape(person) + '"></option>').join('') + '</datalist></div></details>';
@@ -154,41 +173,53 @@ function render() {
   }
   const s = session();
   if (!s && (view === 'session' || view === 'scan')) view = 'sessions';
-  root.innerHTML = view === 'scan' ? scanPanel(s) : view === 'new' ? subbar() + creation() :
+  if (view === 'build' && (!s || !builder)) view = 'session';
+  root.innerHTML = view === 'scan' ? scanPanel(s) : view === 'build' ? buildPanel(s) : view === 'new' ? subbar() + creation() :
     view === 'session' ? subbar() + showSession(s) : history();
+  for (const el of root.querySelectorAll('form[id] [name]')) {
+    const k = draftable(el) && draftPrefix(el.form.id) + el.name;
+    if (k && k in ui.drafts) el.value = ui.drafts[k];
+  }
+  saveUi();
   if (active) updateScan();
 }
 function history() {
   const total = store.sessions.reduce((sum,s) => sum + allocationTotal(s.allocation),0);
   const records = store.sessions.slice().reverse().map(s => '<button class="record" data-open="' + escape(s.id) +
     '"><span><strong>' + escape(s.testId) + '</strong><small>' + escape(s.manifest?.pallet ?? 'No cartons loaded') + ' / ' +
-    escape(s.source) + '</small></span><span class="record-next" data-step="' + stepOf(s) + '">' + escape(nextLabel(s)) +
+    escape(s.source) + '</small></span><span class="record-next" data-step="' + stepOf(s) + '" data-alert="' + /^(Hold|Incomplete|Interrupted)/.test(nextLabel(s)) +
+    '">' + escape(nextLabel(s)) +
     '</span></button>').join('');
-  return '<section class="home"><div class="row spread title-row"><h1>Sessions</h1><small>' + total + ' of 500 labels used</small></div>' +
-    (permits(role,'create') ? button('new','New test session','class="scan-cta"') :
-      '<p class="muted">Switch to Operator or Test lead to start a test.</p>') +
-    (records ? '<div class="records">' + records + '</div>' :
-      '<p class="muted">No tests yet. Start one, load its cartons, then scan the pallet.</p>') + '</section>' +
+  // Reader status first (checked before any scan), then the sessions as one list; the main action sits in the thumb zone.
+  return (bridge ? readerCard() : '') +
+    '<section class="home"><div class="row spread section-head"><h1>Sessions</h1><small>' + total + ' of 500 labels used</small></div>' +
+    (records ? '<div class="group records">' + records + '</div>' :
+      '<p class="empty">No tests yet. Start one, load its cartons, then scan the pallet.</p>') +
+    (permits(role,'create') ? '' : '<p class="muted">Switch to Operator or Test lead to start a test.</p>') + '</section>' +
     planPanel() +
-    (permits(role,'export') ? '<section class="panel"><h2>Evidence</h2><div class="row">' +
+    (permits(role,'export') ? '<h2 class="section-title">Evidence</h2><section class="panel"><div class="row">' +
       button('export','Export CSV and summary','class="secondary" ' + (!store.sessions.length ? 'disabled' : '')) +
-      (bridge ? button('dashboard',dashboardUrl ? 'Stop dashboard sharing' : 'Share web dashboard','class="secondary"') : '') +
+      (bridge ? button('dashboard',dashboardUrl ? 'Stop dashboard sharing' : 'Share web dashboard',
+        'class="secondary" ' + (dashboardResetPending ? 'disabled' : '')) : '') +
       '</div>' + (bridge && role === 'admin' && !dashboardUrl ?
-        '<label class="check"><input id="share-all" type="checkbox">Include hardware and imported records</label>' : '') +
+        '<label class="check"><input id="share-all" type="checkbox" checked>Include hardware and imported records</label>' : '') +
       (dashboardUrl ? '<div class="line dashboard-share"><div class="dashboard-qr" role="img" aria-label="Dashboard QR code">' +
       dashboardQr + '</div><div><p>Scan the QR code or open the private link on the same Wi-Fi network. ' +
       (includeOtherRecords ? 'All local sessions are shared.' : 'Sample simulation sessions are shared.') + '</p><p><code>' + escape(dashboardUrl) +
-      '</code></p>' + button('copy','Copy dashboard link','class="secondary"') + '</div></div>' : '') + '</section>' : '');
+      '</code></p>' + button('copy','Copy dashboard link','class="secondary"') + '</div></div>' : '') +
+      (role === 'admin' ? '<div class="line">' + button('reset','Reset all local data',
+        'class="secondary" ' + (powerRequest ? 'disabled' : '')) + '</div>' : '') + '</section>' : '') +
+    (permits(role,'create') ? '<div class="actionbar">' + button('new','New test session','class="scan-cta"') + '</div>' : '');
 }
 // Planned tests for the day (FR-28 coverage): the Test lead enters them, closing the day needs a reason for every test not run.
 function planPanel() {
   const plan = store.plan;
   const {tests, unplanned} = planCoverage(plan, store.sessions);
-  let html = '<section class="panel"><h2>PoC test plan</h2>';
+  let html = '<h2 class="section-title">PoC test plan</h2><section class="panel">';
   html += tests.length ? '<ul class="log">' + tests.map(t => '<li><strong>' + escape(t.id) + '</strong> ' + escape(t.title) +
       '<br><small>' + escape(t.status) + (plan.closure?.skipped?.[t.id] ? ' / not run: ' + escape(plan.closure.skipped[t.id]) : '') +
       '</small></li>').join('') + '</ul>' + (unplanned.length ? '<p class="muted">Not in plan: ' + escape(unplanned.join(', ')) + '</p>' : '')
-    : '<p class="muted">No planned tests yet.' + (permits(role,'manifest') ? '' : ' Switch to Test lead in the menu at the top left to enter them.') + '</p>';
+    : '<p class="muted">No planned tests yet.' + (permits(role,'manifest') ? '' : ' Switch to Test lead in the menu at the top right to enter them.') + '</p>';
   if (plan?.closedAt) return html + '<p class="status match">PoC day closed by ' + escape(plan.closure.actor) + ' on ' +
     escape(time(plan.closedAt)) + '.</p></section>';
   if (permits(role,'manifest')) html += '<details' + (tests.length ? '' : ' open') + '><summary>Edit planned tests</summary>' +
@@ -265,7 +296,7 @@ function closeForm(s) {
 }
 function detailsPanel(s, step) {
   const m = s.manifest;
-  return '<section class="panel details"><h2>Details</h2>' +
+  return '<h2 class="section-title">Details</h2><section class="panel details">' +
     '<details><summary>Test setup</summary><ul class="log">' + Object.entries(metadata).slice(2).map(([k,v]) =>
       '<li><strong>' + escape(v) + '</strong> ' + escape(s[k] || '—') + '</li>').join('') + '</ul></details>' +
     (m ? '<details' + (pendingImport ? ' open' : '') + '><summary>Expected cartons</summary>' + manifestList(m) +
@@ -298,7 +329,7 @@ function manifestControls(s,m) {
       'Earlier runs stay on the revision they were scanned against.</p>' : '') +
     '<p class="muted">One CSV row per carton. Several pallets in one file are fine.</p><div class="row">' +
     (hardware ? (liveSample ? button('sample','Use live sample','class="secondary"') : '') :
-      button('sample','Use sample manifest','class="secondary"')) + button('csv','Choose CSV','class="secondary"') +
+      button('sample','Use sample manifest','class="secondary"')) + button('csv','Choose CSV','class="secondary"') + button('build-open','Build from scan','class="secondary"') +
     button('template',hardware && liveSample ? 'Save live sample CSV' : 'Save CSV template','class="secondary"') + '</div>';
   if (!bridge) result += '<label class="line">CSV file<input id="csv-file" type="file" accept=".csv,text/csv"></label>';
   if (pendingImport) result += '<form class="line stack" id="manifest"><p>' + escape(pendingImport.name) + ' / ' +
@@ -310,16 +341,94 @@ function manifestControls(s,m) {
     '</div><button>Save manifest</button></form>';
   return result;
 }
-function readerSettings(s) {
+// Reader power is device-wide: the Test lead sets it from the home screen or from a hardware session's Details.
+// Manifest generator: scan one pallet's tags, keep the right ones, choose the pallet tag, then load or save the CSV.
+function buildPanel(s) {
+  const tags = Object.entries(builder.tags).sort((a,b) => (parseFloat(b[1].rssi) || -999) - (parseFloat(a[1].rssi) || -999));
+  const hardware = s.source === 'C72 hardware', reading = Boolean(builder.capture);
+  return '<nav class="subbar">' + button('build-close','<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">' +
+      '<path d="M10 3L5 8l5 5" fill="none" stroke="currentColor" stroke-width="2"/></svg>' + escape(s.testId),
+      'class="back" ' + (reading ? 'disabled' : '')) + '</nav>' +
+    '<div class="title-row"><h1>Build manifest from scan</h1><p class="muted">Scan the tags on one pallet. The strongest tag ' +
+      'is taken as the pallet tag; change it if needed.</p></div>' +
+    '<section class="panel"><div class="row spread"><strong id="build-count">' + tags.length + ' tags read</strong>' +
+      '<span class="reader-state" data-ready="' + (!hardware || reader.ready) + '">' + escape(hardware ? readerStatus() : 'Simulation') + '</span></div>' +
+      button('build-toggle',reading ? 'Stop scan' : tags.length ? 'Scan again' : 'Start scan',
+        'class="scan-cta" ' + (hardware && !reader.ready && !reading ? 'disabled' : '')) +
+      (hardware ? '<p class="muted line">Or hold the C72 trigger and release to finish. Scanning again adds to the list.</p>' : '') + '</section>' +
+    (tags.length && !reading ? '<form id="build-form" class="stack"><div class="fields">' +
+      field('palletRef','Pallet reference',builder.palletRef ?? 'PAL-' + s.testId,'maxlength="60" required') +
+      field('sku','SKU for all cartons (optional)',builder.sku ?? '','maxlength="60"') + '</div>' +
+      '<fieldset class="group build-tags"><legend>Tick the tags to keep and choose the pallet tag</legend>' + tags.map(([epc,t],i) =>
+        '<div class="build-tag"><label class="check"><input type="checkbox" name="keep" value="' + escape(epc) + '" checked>' +
+        '<span><code>' + escape(epc) + '</code><small>' + (t.rssi != null ? escape(t.rssi) + ' dBm / ' : '') + t.count + (t.count === 1 ? ' read' : ' reads') + '</small></span></label>' +
+        '<label class="pallet-pick"><input type="radio" name="palletEpc" value="' + escape(epc) + '"' + (i ? '' : ' checked') + '>Pallet</label></div>').join('') +
+      '</fieldset><button class="scan-cta">Use as manifest</button>' + button('build-save','Save CSV file','class="secondary"') + '</form>' : '');
+}
+function builtCsv() {
+  const data = new FormData(document.querySelector('#build-form'));
+  const keep = data.getAll('keep').map(String), palletEpc = String(data.get('palletEpc') ?? '');
+  builder.palletRef = String(data.get('palletRef') ?? '');
+  builder.sku = String(data.get('sku') ?? '');
+  if (palletEpc && !keep.includes(palletEpc)) throw new Error('Keep the pallet tag ticked.');
+  return manifestCsv(builder.palletRef,palletEpc,keep,builder.sku);
+}
+function buildCollect(reads) {
+  for (const read of reads ?? []) {
+    const epc = normalizeEpc(read.epc);
+    if (!/^[0-9A-F]{2,128}$/.test(epc) || epc.length % 2) continue;
+    const tag = builder.tags[epc] ??= {count:0};
+    tag.count++;
+    // Keep the strongest signal seen, so the pallet tag held closest sorts first.
+    if (read.rssi != null && (tag.rssi == null || parseFloat(read.rssi) > parseFloat(tag.rssi))) tag.rssi = read.rssi;
+  }
+  const count = document.querySelector('#build-count');
+  if (count) count.textContent = Object.keys(builder.tags).length + ' tags read';
+}
+function buildToggle() {
+  const s = session();
+  if (builder.capture) {
+    if (!builder.capture.ending) { builder.capture.ending = true; bridge.stopReader(builder.capture.id,false); }
+    return;
+  }
+  const hardware = s.source === 'C72 hardware';
+  if (hardware && !reader.ready) { feedback(reader.message,true); return; }
+  if (hardware) {
+    builder.capture = {id:id()};
+    bridge.startReader(builder.capture.id);
+    render();
+    return;
+  }
+  // Simulation: the demo pallet and its cartons, the pallet tag strongest.
+  const m = parseManifest(SAMPLE);
+  buildCollect([m.palletEpc, ...m.cartons.map(c => c.epc)].map((epc,i) => ({epc, rssi:String(-38 - i * 4)})));
+  render();
+}
+function readerStatus() {
   const profile = reader.profile;
-  const canSet = !s.closedAt && permits(role,'reader-power') && bridge?.setReaderPower;
-  return '<details><summary>Reader: ' + escape(profile ? profile.region + ' / ' + (profile.powerDbm ?? 'Unknown') + ' dBm' :
-      reader.ready ? 'ready' : 'not ready') + '</summary><p>' + escape(reader.message) + '</p>' +
-    (canSet && reader.ready ?
-      '<form id="reader-power" class="row">' + field('power','Output power (dBm)',profile?.powerDbm,
-        'type="number" min="5" max="30" step="1" required ' + (powerRequest ? 'disabled' : '')) +
-      '<button ' + (powerRequest ? 'disabled' : '') + '>' + (powerRequest ? 'Setting power…' : 'Set power') + '</button></form>' :
-      (canSet && !reader.ready ? button('reconnect','Check reader','class="secondary"') : '')) + '</details>';
+  return profile ? profile.region + ' / ' + (profile.powerDbm ?? 'Unknown') + ' dBm' : reader.ready ? 'Ready' : 'Not ready';
+}
+function readerControls(closed) {
+  if (closed || !bridge?.setReaderPower) return '';
+  if (!permits(role,'reader-power')) return '<p class="muted">The Test lead sets reader power.</p>' +
+    button('as-role','Switch to Test lead','class="secondary" data-role="admin"');
+  if (!reader.ready) return button('reconnect','Check reader','class="secondary"');
+  return '<form id="reader-power" class="row">' + field('power','Output power (dBm)',reader.profile?.powerDbm,
+      'type="number" min="5" max="30" step="1" required ' + (powerRequest ? 'disabled' : '')) +
+    '<button ' + (powerRequest ? 'disabled' : '') + '>' + (powerRequest ? 'Setting power…' : 'Set power') + '</button></form>' +
+    '<p class="muted">5 to 30 dBm. Each scan records the power it used.</p>';
+}
+// One glanceable row (Android settings pattern: show the current value); tap to change. The old DOM is still in place
+// while this string is built, so its open state carries over the re-render.
+function readerCard() {
+  const open = document.querySelector('#reader-card')?.open || powerRequest;
+  return '<details class="panel reader-card" id="reader-card"' + (open ? ' open' : '') + '><summary><span class="reader-label">' +
+    '<strong>C72 reader</strong><small>' + escape(reader.message) + '</small></span><span class="reader-state" data-ready="' +
+    reader.ready + '">' + escape(readerStatus()) + '</span></summary><div class="reader-body">' + readerControls(false) + '</div></details>';
+}
+function readerSettings(s) {
+  return '<details><summary>Reader settings: ' + escape(readerStatus()) + '</summary><p>' + escape(reader.message) + '</p>' +
+    readerControls(s.closedAt) + '</details>';
 }
 function scanPanel(s) {
   const run = latest(s);
@@ -575,15 +684,29 @@ function action(fn) {
   try { fn(); } catch (error) { feedback(error?.message ?? 'Action could not be completed.',true); }
 }
 window.keypharmEvent = (name,data) => action(() => {
+  if (builder?.capture && data?.id === builder.capture.id) {
+    if (name === 'reads' || name === 'ended') buildCollect(data.reads);
+    if (name === 'ended') {
+      builder.capture = undefined;
+      if (data.interrupted) { feedback(data.message || 'Scan interrupted.',true); bridge?.connectReader(); }
+      render();
+    }
+    return;
+  }
+  if (view === 'build' && builder && ['press','release','cancel'].includes(name)) {
+    if ((name === 'press') !== Boolean(builder.capture)) buildToggle();
+    return;
+  }
   if (name === 'reader') {
     reader = data;
-    if (!active && !powerRequest && (view === 'scan' || (view === 'session' && session()?.source === 'C72 hardware'))) render();
+    if (!active && !powerRequest && (view === 'scan' || view === 'sessions' || (view === 'session' && session()?.source === 'C72 hardware'))) render();
   }
   if (name === 'reader-power' && powerRequest?.id === data.id) {
     const target = powerRequest.session;
     powerRequest = undefined;
     reader = {...reader, ready:data.ready ?? reader.ready, profile:data.profile ?? reader.profile};
-    if (data.ok && data.previousPower !== data.profile?.powerDbm) {
+    // From the home screen there is no session to log to; every scan still records its own power.
+    if (target && data.ok && data.previousPower !== data.profile?.powerDbm) {
       commit(() => log(target,'Reader power changed',data.previousPower + ' to ' + data.profile.powerDbm + ' dBm'));
     }
     feedback(data.message,!data.ok);
@@ -591,6 +714,14 @@ window.keypharmEvent = (name,data) => action(() => {
   }
   if (name === 'manifest-file') chooseManifest(data.text,data.name);
   if (name === 'dashboard') {
+    if (dashboardResetPending) {
+      // A previous share request can report its URL before the stop request completes.
+      if (!data.url && !data.message) {
+        dashboardResetPending = false;
+        root.querySelector('[data-action="dashboard"]')?.removeAttribute('disabled');
+      }
+      return;
+    }
     dashboardUrl = data.url ?? '';
     dashboardQr = '';
     if (dashboardUrl) {
@@ -642,12 +773,17 @@ document.addEventListener('change', event => action(() => {
   }
   if (target.id === 'scenario') scenario = target.value;
   if (target.id === 'csv-file' && target.files[0]) {
-    const file = target.files[0];
+    const file = target.files[0], uploadSession = selected;
     if (file.size > 512000) throw new Error('Use a CSV smaller than 512 KB.');
-    file.text().then(text => action(() => chooseManifest(text,file.name))).catch(() => feedback('Could not read the CSV.',true));
+    file.text().then(text => {
+      if (selected === uploadSession) action(() => chooseManifest(text,file.name));
+    }).catch(() => {
+      if (selected === uploadSession) feedback('Could not read the CSV.',true);
+    });
   }
 }));
 document.addEventListener('input', event => {
+  if (draftable(event.target)) { ui.drafts[draftPrefix(event.target.form.id) + event.target.name] = event.target.value; saveUi(); }
   if (event.target.id === 'rescan') rescanReason = event.target.value;
 });
 document.addEventListener('click', event => action(() => {
@@ -664,6 +800,14 @@ document.addEventListener('click', event => action(() => {
     rescanReason = '';
   }
   if (command === 'new' && permits(role,'create')) view = 'new';
+  if (command === 'build-open' && s && permits(role,'manifest') && !s.closedAt && !s.confirmedAt) { builder = {tags:{}}; view = 'build'; }
+  if (command === 'build-toggle' && view === 'build' && builder) { buildToggle(); return; }
+  if (command === 'build-close' && !builder?.capture) { builder = undefined; view = 'session'; }
+  if (command === 'build-save' && view === 'build' && builder) {
+    const csv = builtCsv(), filename = 'manifest-' + s.testId.replace(/[^\w-]+/g,'_') + '.csv';
+    if (bridge) bridge.saveTemplate(csv,filename); else download(filename,csv);
+    return;
+  }
   if (command === 'as-role' && roles[control.dataset.role]) { role = control.dataset.role; pendingImport = undefined; }
   if (command === 'back') { view = 'sessions'; pendingImport = undefined; }
   if (command === 'open-scan' && s?.manifest && s.verifiedBy && permits(role,'scan') && !s.closedAt && !s.confirmedAt) {
@@ -689,9 +833,39 @@ document.addEventListener('click', event => action(() => {
     return;
   }
   if (command === 'reconnect') { bridge?.connectReader(); return; }
-  if (command === 'dashboard' && permits(role,'export')) {
+  if (command === 'reset' && view === 'sessions' && role === 'admin' && !builder?.capture) {
+    if (!window.confirm('Permanently delete all sessions, loaded manifests, scans, the PoC test plan, saved names, and form drafts on this device? ' +
+      'This also stops dashboard sharing. Export evidence first if you need to keep it.')) return;
+    localStorage.removeItem(uiKey);
+    localStorage.removeItem(key);
+    store = {sessions:[],people:[]};
+    ui = {drafts:{}};
+    role = 'operator';
+    selected = undefined;
+    builder = undefined;
+    pendingImport = undefined;
+    rescanReason = '';
+    scenario = 'Missing one';
+    simulatedKeys = false;
+    dashboardUrl = '';
+    dashboardQr = '';
+    includeOtherRecords = false;
+    document.querySelector('#reader-card')?.removeAttribute('open');
+    publish();
+    if (bridge?.shareDashboard) {
+      dashboardResetPending = true;
+      bridge.shareDashboard(false);
+    }
+    feedback('Local data reset.');
+    render();
+    window.scrollTo(0,0);
+    root.querySelector('[data-action="new"]')?.focus({preventScroll:true});
+    return;
+  }
+  if (command === 'dashboard' && permits(role,'export') && !dashboardResetPending) {
     if (!dashboardUrl) {
-      includeOtherRecords = role === 'admin' && Boolean(document.querySelector('#share-all')?.checked);
+      // All records by default (hardware sessions too); the Test lead can untick to share sample sessions only.
+      includeOtherRecords = document.querySelector('#share-all')?.checked !== false;
       publish();
     }
     bridge?.shareDashboard(!dashboardUrl);
@@ -710,16 +884,23 @@ document.addEventListener('click', event => action(() => {
 root.addEventListener('submit', event => action(() => {
   event.preventDefault();
   if (active || powerRequest) return;
-  const form = event.target, data = Object.fromEntries(new FormData(form)), s = session();
-  if (form.id === 'reader-power' && view === 'session' && s?.source === 'C72 hardware' && !s.closedAt &&
+  const form = event.target, data = Object.fromEntries(new FormData(form)), s = session(), drafts = draftPrefix(form.id);
+  const hardwareSession = view === 'session' && s?.source === 'C72 hardware' && !s.closedAt;
+  if (form.id === 'reader-power' && (view === 'sessions' || hardwareSession) &&
       reader.ready && permits(role,'reader-power') && bridge?.setReaderPower) {
     const power = Number(data.power);
     if (!Number.isInteger(power) || power < 5 || power > 30) throw new Error('Choose a power from 5 to 30 dBm.');
-    powerRequest = {id:id(), session:s};
+    powerRequest = {id:id(), session:hardwareSession ? s : null};
     feedback('');
     render();
     bridge.setReaderPower(powerRequest.id,power);
     return;
+  }
+  if (form.id === 'build-form' && view === 'build' && builder && s && permits(role,'manifest')) {
+    const csv = builtCsv();
+    builder = undefined;
+    view = 'session';
+    chooseManifest(csv,'Built from scan ' + new Date().toLocaleString());
   }
   if (form.id === 'create' && permits(role,'create')) {
     if (Object.keys(metadata).some(k => k !== 'notes' && !data[k]?.trim())) throw new Error('Fill in the test setup fields.');
@@ -771,6 +952,7 @@ root.addEventListener('submit', event => action(() => {
   if (form.id === 'close' && canClose(s,data,role)) {
     commit(() => { s.closedAt = now(); s.closure = {coverage:data.coverage.trim(),actor:actor()}; log(s,'Session closed',s.closure.coverage); });
   }
+  clearDrafts(drafts);
   feedback(''); render();
 }));
 function exportRecords(records) {
@@ -807,5 +989,10 @@ window.addEventListener('blur', () => {
   if (active && !active.hardware) { simulatedKeys = false; action(() => end(true)); }
 });
 setInterval(updateScan,300);
+// Reopen where the user was; a scan or manifest build cannot resume, so those land on their session.
+if (ui.selected && store.sessions.some(s => s.id === ui.selected)) {
+  selected = ui.selected;
+  view = ['session','scan','build'].includes(ui.view) ? 'session' : 'sessions';
+} else if (ui.view === 'new') view = 'new';
 render();
 bridge?.connectReader();

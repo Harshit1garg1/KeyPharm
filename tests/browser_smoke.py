@@ -1,11 +1,29 @@
 """Run with an installed Python Playwright and Chromium."""
 import copy
 import json
+import re
 from pathlib import Path
 from playwright.sync_api import sync_playwright, expect
 
 assets = Path(__file__).resolve().parents[1] / "app/src/main/assets"
 types = {".html":"text/html", ".mjs":"text/javascript", ".css":"text/css", ".png":"image/png"}
+
+
+# The APK serves only the files listed in MainActivity.ASSETS; a file the handheld loads but the list misses
+# works here (served from disk) yet breaks on the device, as the 0.8.0 header logo did.
+java = (assets.parent / "java/be/keypharm/rfid/MainActivity.java").read_text(encoding="utf-8")
+start = java.index("ASSETS = Set.of(")
+served = set(re.findall(r'"(/[\w.-]+)"', java[start:java.index(");", start)]))
+loaded, queue = set(), ["handheld.html"]
+while queue:
+    name = queue.pop()
+    loaded.add("/" + name)
+    if not name.endswith((".html", ".mjs", ".css")):
+        continue
+    text = (assets / name).read_text(encoding="utf-8")
+    refs = re.findall(r'(?:src|href)="([\w.-]+)"', text) + re.findall(r"from '\./([\w.-]+)'", text) + re.findall(r"url\(([\w.-]+)\)", text)
+    queue += [ref for ref in refs if "/" + ref not in loaded and ref not in queue]
+assert loaded <= served, "Add to MainActivity.ASSETS: " + ", ".join(sorted(loaded - served))
 
 
 def serve_assets(route):
@@ -47,7 +65,7 @@ with sync_playwright() as playwright:
     device.on("pageerror", lambda error: errors.append(str(error)))
     device.route("https://handheld.test/**", serve_assets)
     device.goto("https://handheld.test/handheld.html")
-    assert device.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth === 339")
+    assert device.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth === 681")
     assert device.locator(".brand").bounding_box()["x"] < device.locator("#who").bounding_box()["x"]
     pick_role(device, "admin")
     device.get_by_label("One test per line: Test ID, then description").fill("KP-TEST-01 Mixed pallet check\nKP-TEST-02 Ginger pallet")
@@ -86,6 +104,8 @@ with sync_playwright() as playwright:
     expect(device.locator(".tag-row[data-tag-status=missing]")).to_have_count(1)
     device.get_by_role("button", name="Session details").click()
     device.get_by_label("Note on the current run").fill("Carton behind stretch wrap")
+    device.reload()  # the open session and the half-typed note both come back from localStorage
+    expect(device.get_by_label("Note on the current run")).to_have_value("Carton behind stretch wrap")
     device.get_by_role("button", name="Save run note").click()
 
     # Manifest revision after a scan: needs a reason, then verification and pallet identification again.
@@ -143,8 +163,7 @@ with sync_playwright() as playwright:
     device.get_by_role("button", name="Close test session").click()
     expect(device.get_by_role("heading", name="Session closed")).to_be_visible()
 
-    device.reload()
-    device.get_by_role("button", name="KP-TEST-01", exact=False).click()
+    device.reload()  # reopens on the same session
     expect(device.get_by_role("heading", name="Session closed")).to_be_visible()
     snapshot = device.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1'))")
     runs = snapshot["sessions"][0]["runs"]
@@ -183,19 +202,64 @@ with sync_playwright() as playwright:
     device.get_by_role("button", name="Close PoC day").click()
     expect(device.get_by_text("PoC day closed by Operator C", exact=False)).to_be_visible()
 
+    reset = device.get_by_role("button", name="Reset all local data")
+    expect(reset).to_have_count(0)
+    pick_role(device, "admin")
+    device.get_by_role("button", name="New test session").click()
+    device.get_by_label("Test ID").fill("KP-DRAFT")
+    device.get_by_role("button", name="Sessions").click()
+    before_reset = device.evaluate("""() => {
+      localStorage.setItem('unrelated-preference', 'keep');
+      return ['keypharm-poc-v1', 'keypharm-poc-ui-v1'].map(key => localStorage.getItem(key));
+    }""")
+    assert "KP-DRAFT" in json.loads(before_reset[1])["drafts"].values()
+    dialog_messages = []
+
+    def cancel_reset(dialog):
+        dialog_messages.append(dialog.message)
+        dialog.dismiss()
+
+    device.once("dialog", cancel_reset)
+    reset.click()
+    assert dialog_messages[0].startswith("Permanently delete all sessions")
+    assert "form drafts" in dialog_messages[0]
+    assert device.evaluate("['keypharm-poc-v1', 'keypharm-poc-ui-v1'].map(key => localStorage.getItem(key))") == before_reset
+    expect(device.get_by_text("PoC day closed by Operator C", exact=False)).to_be_visible()
+
+    device.once("dialog", lambda dialog: dialog.accept())
+    reset.click()
+    expect(device.locator("#notice")).to_have_text("Local data reset.")
+    expect(device.get_by_text("0 of 500 labels used")).to_be_visible()
+    assert device.evaluate("['keypharm-poc-v1', 'keypharm-poc-ui-v1'].map(key => localStorage.getItem(key))") == [None, None]
+    assert device.evaluate("localStorage.getItem('unrelated-preference')") == "keep"
+    device.reload()
+    expect(device.get_by_text("No tests yet.", exact=False)).to_be_visible()
+    expect(device.get_by_text("No planned tests yet.", exact=False)).to_be_visible()
+    assert device.evaluate("localStorage.getItem('keypharm-poc-ui-v1')") is None
+    device.get_by_label("Role and name").click()
+    expect(device.locator("#role")).to_have_value("operator")
+    expect(device.get_by_label("Your name")).to_have_value("")
+    expect(device.locator("#people option")).to_have_count(0)
+    device.get_by_role("button", name="New test session").click()
+    expect(device.get_by_label("Test ID")).to_have_value("KP-TEST-01")
+
     # C72 path with a fake Android bridge: on-screen Start scan / Stop scan drives the same reader calls as the trigger.
     c72 = browser.new_page(viewport={"width":360, "height":700})
     c72.on("pageerror", lambda error: errors.append(str(error)))
     c72.add_init_script("""
       window.bridgeCalls = [];
+      window.dashboardCalls = [];
       const fire = (name, data) => setTimeout(() => window.keypharmEvent(name, data), 10);
       window.KeypharmAndroid = {
         connectReader: () => fire('reader', {ready:true, message:'Reader ready', profile:{region:'ETSI', powerDbm:30}}),
         startReader: id => { bridgeCalls.push('start'); fire('started', {id, profile:{region:'ETSI', powerDbm:30}});
           fire('reads', {id, reads:[{epc:'A00000000000000000000001'}]}); },
         stopReader: id => { bridgeCalls.push('stop'); fire('ended', {id, reads:[], interrupted:false}); },
-        feedback: () => {}, publishSnapshot: () => {},
-        shareDashboard: enabled => fire('dashboard', {url: enabled ? 'http://192.0.2.12:8787/12345678-1234-5678-90ab-1234567890ab/' : ''}),
+        feedback: () => {}, publishSnapshot: data => dashboardCalls.push(JSON.parse(data)),
+        shareDashboard: enabled => {
+          dashboardCalls.push(enabled);
+          if (!window.deferDashboardEvents) fire('dashboard', {url: enabled ? 'http://192.0.2.12:8787/12345678-1234-5678-90ab-1234567890ab/' : ''});
+        },
         copyLink: url => { window.copiedLink = url; },
         liveSampleManifest: () => %s
       };""" % json.dumps(open(assets / "model.mjs", encoding="utf-8").read().split("`")[1]))
@@ -231,6 +295,26 @@ with sync_playwright() as playwright:
     expect(c72.get_by_text("Pallet verified by UHF EPC.")).to_be_visible()
     expect(c72.get_by_role("button", name="Start scan")).to_be_enabled()
     assert c72.evaluate("bridgeCalls") == ["start", "stop"]
+
+    c72.get_by_role("button", name="Session details").click()
+    c72.get_by_role("button", name="Sessions").click()
+    pick_role(c72, "admin")
+    c72.evaluate("window.deferDashboardEvents = true")
+    share = c72.get_by_role("button", name="Share web dashboard")
+    share.click()
+    assert c72.evaluate("dashboardCalls.at(-1)") is True
+    assert len(c72.evaluate("dashboardCalls.at(-2).sessions")) == 1
+    c72.once("dialog", lambda dialog: dialog.accept())
+    c72.get_by_role("button", name="Reset all local data").click()
+    assert c72.evaluate("dashboardCalls.slice(-2)") == [{"sessions": []}, False]
+    expect(share).to_be_disabled()
+    c72.evaluate("url => window.keypharmEvent('dashboard', {url})", url)
+    expect(share).to_be_disabled()
+    expect(code).to_have_count(0)
+    expect(c72.get_by_role("button", name="Copy dashboard link")).to_have_count(0)
+    c72.evaluate("window.keypharmEvent('dashboard', {url:''})")
+    expect(share).to_be_enabled()
+    expect(c72.locator("#notice")).to_have_text("Local data reset.")
 
     dashboard = browser.new_page(viewport={"width":1280, "height":800})
     dashboard.on("pageerror", lambda error: errors.append(str(error)))
@@ -314,6 +398,16 @@ with sync_playwright() as playwright:
       };
     """)
     hardware.goto("https://handheld.test/handheld.html")
+    # Reader power is on the home screen: the Test lead sets it, other roles see who does.
+    as_person(hardware, "admin", "Lead A")
+    expect(hardware.locator(".reader-card")).to_contain_text("ETSI / 30 dBm")
+    hardware.locator("#reader-card > summary").click()  # one glanceable row; tap it to change power
+    hardware.locator(".reader-card").get_by_label("Output power (dBm)").fill("25")
+    hardware.locator(".reader-card").get_by_role("button", name="Set power").click()
+    expect(hardware.locator("#notice")).to_contain_text("Reader power set to 25 dBm")
+    expect(hardware.locator(".reader-card")).to_contain_text("ETSI / 25 dBm")
+    pick_role(hardware, "operator")
+    expect(hardware.locator(".reader-card")).to_contain_text("The Test lead sets reader power.")
     as_person(hardware, "operator", "Operator C")
     hardware.get_by_role("button", name="New test session").click()
     hardware.get_by_role("button", name="Create session").click()
@@ -323,7 +417,7 @@ with sync_playwright() as playwright:
     hardware.get_by_role("button", name="Save manifest").click()
     expect(hardware.locator(".next").get_by_text("KP-LIVE-SORTED-01 / 1 cartons", exact=False)).to_be_visible()
     assert hardware.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].manifest.demo") is False
-    hardware.locator("summary", has_text="Reader: ETSI / 30 dBm").click(timeout=3000)
+    hardware.locator("summary", has_text="Reader settings: ETSI / 25 dBm").click(timeout=3000)
     hardware.get_by_label("Output power (dBm)").fill("18")
     hardware.get_by_role("button", name="Set power").click()
     expect(hardware.locator("#notice")).to_contain_text("Reader power set to 18 dBm")
@@ -394,6 +488,44 @@ with sync_playwright() as playwright:
     expect(multi.locator(".tag-row[data-tag-status=unexpected]")).to_contain_text("Belongs to pallet PAL-A")
     expect(multi.locator(".tag-row[data-tag-status=matched]")).to_have_count(2)
     expect(multi.get_by_role("button", name="Continue", exact=True)).to_be_disabled()
+
+    # Manifest generator: scan one pallet's tags on the C72, drop a stray tag, save the CSV, then load it.
+    gen = browser.new_page(viewport={"width":360, "height":700})
+    gen.on("pageerror", lambda error: errors.append(str(error)))
+    gen.route("https://handheld.test/**", serve_assets)
+    gen.add_init_script(r"""
+      window.saved = [];
+      window.KeypharmAndroid = {
+        publishSnapshot() {}, feedback() {},
+        connectReader() { window.keypharmEvent('reader', {ready:true, message:'UHF reader ready', profile:{region:'ETSI',powerDbm:30}}); },
+        startReader(id) { window.keypharmEvent('started', {id}); },
+        stopReader(id) { window.keypharmEvent('ended', {id, interrupted:false, reads:[{epc:'cc02', rssi:'-60'},
+          {epc:'AA01', rssi:'-35'}, {epc:'CC01', rssi:'-58'}, {epc:'FFEE', rssi:'-70'}, {epc:'CC01', rssi:'-52'}]}); },
+        saveTemplate(csv, name) { window.saved.push([name, csv]); }
+      };
+    """)
+    gen.goto("https://handheld.test/handheld.html")
+    as_person(gen, "admin", "Lead A")
+    expect(gen.locator("#share-all")).to_be_checked()  # the dashboard shares hardware records by default
+    gen.get_by_role("button", name="New test session").click()
+    gen.get_by_role("button", name="Create session").click()
+    gen.get_by_role("button", name="Build from scan").click()
+    gen.get_by_role("button", name="Start scan").click()
+    gen.get_by_role("button", name="Stop scan").click()
+    expect(gen.locator("#build-count")).to_have_text("4 tags read")
+    expect(gen.locator("input[name=palletEpc][value=AA01]")).to_be_checked()  # strongest tag
+    gen.locator("input[name=keep][value=FFEE]").uncheck()
+    gen.get_by_label("SKU for all cartons (optional)").fill("Ginger")
+    gen.get_by_role("button", name="Save CSV file").click()
+    name, csv = gen.evaluate("window.saved")[0]
+    assert name == "manifest-KP-TEST-01.csv", name
+    assert csv.splitlines() == ["pallet_ref,pallet_epc,carton_ref,carton_epc,sku",
+        "PAL-KP-TEST-01,AA01,Carton 01,CC01,Ginger", "PAL-KP-TEST-01,AA01,Carton 02,CC02,Ginger"], csv
+    gen.get_by_role("button", name="Use as manifest").click()
+    expect(gen.get_by_text("1 pallet(s) / 2 cartons", exact=False)).to_be_visible()
+    gen.get_by_role("button", name="Save manifest").click()
+    built = gen.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].manifest")
+    assert (built["palletEpc"], [c["epc"] for c in built["cartons"]]) == ("AA01", ["CC01", "CC02"]), built
 
     assert not errors, errors
     print("Handheld and dashboard browser flow passed.")
