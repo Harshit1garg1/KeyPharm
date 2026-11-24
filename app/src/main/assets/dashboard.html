@@ -1,12 +1,12 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Review records and activity from the KeyPharm RFID handheld.">
-<title>KeyPharm records</title><link rel="stylesheet" href="style.css"><link rel="stylesheet" href="dashboard.css"><script type="module" src="dashboard.mjs"></script></head>
-<body class="records-dashboard">
+<meta name="description" content="Review records from the KeyPharm RFID handheld."><meta name="color-scheme" content="dark">
+<title>KeyPharm records</title><link rel="stylesheet" href="dashboard.css"><script type="module" src="dashboard.mjs"></script></head>
+<body>
 <a class="dashboard-skip" href="#content">Skip to dashboard</a>
-<header class="mast"><div class="mast-inner"><span class="brand"><img src="keypharm-logo.png" alt="KeyPharm Laboratories" width="339" height="133"></span><span class="mode">Records dashboard</span></div></header>
-<div class="shell dashboard-shell">
+<div class="dashboard-shell">
 <aside class="dashboard-rail">
+  <a class="dashboard-brand" href="#overview"><img src="keypharm-logo-hd.png" alt="KeyPharm Laboratories"></a>
   <button type="button" class="secondary dashboard-toggle" id="menu-toggle" aria-expanded="false" aria-controls="dashboard-nav">Sections</button>
   <nav id="dashboard-nav" aria-label="Dashboard sections">
     <a href="#overview" aria-current="page">Overview</a>
@@ -19,16 +19,29 @@
 </aside>
 <main id="content" class="dashboard-content" tabindex="-1">
   <div class="row spread dashboard-toolbar">
-    <h1 id="page-title" tabindex="-1">Overview</h1>
+    <p id="connection" class="status" role="status">Connecting to handheld…</p>
     <button type="button" id="refresh" class="secondary">Refresh records</button>
   </div>
-  <p id="connection" class="status" role="status">Connecting to handheld…</p>
-  <p id="section-description" class="muted">Totals cover all records shared by the handheld.</p>
+  <header id="page-heading" class="dashboard-heading" data-overview="true">
+    <div><h1 id="page-title" tabindex="-1">Overview</h1>
+      <p id="section-description">Totals cover all records shared by the handheld.</p></div>
+    <div class="dashboard-signal" aria-hidden="true"><span></span></div>
+  </header>
   <div id="overview">
-    <div id="totals" class="dashboard-totals"></div>
+    <div id="totals" class="dashboard-totals" aria-label="Record totals"></div>
     <div class="dashboard-overview-grid">
-      <section class="panel dashboard-outcomes"><h2>Carton scan outcomes</h2><div id="outcomes"></div></section>
-      <section class="panel dashboard-recent"><div class="row spread"><h2>Recent activity</h2><a href="#activity">View activity</a></div><ul id="recent" class="log"></ul></section>
+      <section class="panel dashboard-sessions">
+        <div class="panel-heading row spread"><h2>Recent sessions</h2><a href="#sessions">View all sessions</a></div>
+        <table>
+          <thead><tr><th scope="col">Test ID</th><th scope="col">Pallet</th><th scope="col">Source</th><th scope="col">Status</th></tr></thead>
+          <tbody id="recent-sessions"></tbody>
+        </table>
+        <p id="sessions-empty" class="muted">Waiting for records…</p>
+      </section>
+      <section class="panel dashboard-outcomes">
+        <div class="panel-heading"><h2>Carton scan outcomes</h2></div>
+        <div id="outcomes"></div>
+      </section>
     </div>
   </div>
   <div id="catalog" class="dashboard-catalog" hidden>
