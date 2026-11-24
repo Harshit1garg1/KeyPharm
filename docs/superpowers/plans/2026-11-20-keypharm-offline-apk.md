@@ -1,5 +1,7 @@
 # Keypharm Offline APK Implementation Plan
 
+> **Not adopted.** Kotlin/Compose plan superseded by the WebView + Java app. Kept for reference only. Current state: [context.md](../../../context.md), scope: [prd-poc.md](../../prd-poc.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A sideloaded Kotlin/Compose APK for the Chainway C72 that runs the full spec §5.1 PoC flow offline: import manifest, scan, compare, rescan, close, and export reconciled evidence.

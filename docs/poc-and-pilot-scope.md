@@ -1,6 +1,6 @@
 # Keypharm POC and Pilot scope
 
-Requirements baseline updated 20 November 2026. The README tracks implementation and verification.
+Requirements baseline from 20 November 2026, treatment lines updated 24 November 2026 (app 0.8.6). What is built and what is pending per requirement: [prd-poc.md](prd-poc.md); day-to-day state: [context.md](../context.md).
 
 ## Evidence and precedence
 
@@ -32,7 +32,7 @@ The source defines a one-day technical test on one local handheld with offline s
 3. **Previous/current comparison.** Show previous and current run details, retain first pass, and identify EPCs newly seen or still missing. Display comparisons never combine the observed sets.
 4. **Read-only web dashboard.** Fetches application records and logs only while the handheld app is online. Scanning, saving and evidence export remain local and available offline.
 5. **Small, editable demo.** Use reversible demo defaults where answers are missing. Clearly distinguish simulated reader activity, sample manifests, and imported records from verified device evidence.
-6. **Physical trigger.** Hold the C72 trigger to collect reads. Release ends the attempt and finalizes its result. Continue stays disabled during capture.
+6. **Physical trigger.** Hold the C72 trigger to collect reads. Release ends the attempt and finalizes its result. An on-screen **Start scan / Stop scan** button does the same for gloved use. Continue stays disabled during capture.
 
 The dashboard only fetches when it can reach the running handheld app. Retaining a previously fetched view with its last refresh time is a proposed dashboard display behavior.
 
@@ -54,7 +54,7 @@ Pilot reuses proven scan logic for a defined outbound step. It introduces contro
 
 | Source IDs | Priority | Source phase | Treatment |
 | --- | --- | --- | --- |
-| FR-01 | MUST | Both | Store POC mode now; show Pilot as future/unavailable rather than implement outbound capture. Source describes two selectable modes; deferral is the user's staged scope. |
+| FR-01 | MUST | Both | Store POC mode now (every record and export says `POC`; the home screen shows "PoC Test mode"). No Pilot choice is offered until the Pilot. Source describes two selectable modes; deferral is the user's staged scope. |
 | FR-02–04 | MUST | Both | Session identity, expected manifest and validation now. |
 | FR-05 | MUST | POC | Complete local workflow now. |
 | FR-06 | MUST | Pilot | Agreed operational manifest interface later. |
@@ -64,14 +64,14 @@ Pilot reuses proven scan logic for a defined outbound step. It introduces contro
 | FR-24 | MUST | Both | Scan method and instructions now. |
 | FR-25 | SHOULD | Pilot | Station/wrapper configuration later; POC shielding/location evidence still required. |
 | FR-26 | MUST | POC | Storage location and level now. |
-| FR-27 | SHOULD | Both | Notes first; photos optional. |
+| FR-27 | SHOULD | Both | Run and investigation notes built; photos not built. |
 | FR-28 | MUST | POC | Coverage review and sign-off now; do not confuse test closure with pallet confirmation. |
 | FR-29–30 | MUST | Pilot | Operational disposition and override audit later. |
 | FR-31 | MUST | POC | Complete evidence export now. |
 | FR-32 | MUST | Pilot | Approved result exchange later. |
-| FR-33 | SHOULD | Both | History/search now at demo scale; no invented trend claims. |
+| FR-33 | SHOULD | Both | Built: home-screen search over test, pallet, carton, SKU, location, level, name, date and next step. No invented trend claims. |
 | FR-34 | MUST | POC | Local persistence and controlled backup now. |
-| FR-35 | SHOULD | Both | Lightweight configuration change history now. |
+| FR-35 | SHOULD | Both | Built: manifest revisions need a reason; power changes go to the session log or, from the home screen, the device log. |
 
 ## Result rule
 

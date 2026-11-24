@@ -1,5 +1,7 @@
 # Keypharm POC Implementation Plan
 
+> **Adopted plan, historical (20 November 2026).** The app was built along this plan. Current state: [context.md](../../../context.md).
+
 **Goal:** Run the offline pallet and carton workflow on the C72 and view its committed records and logs in a browser while the app is online.
 
 **Architecture:** Package the handheld screens as local WebView assets. Keep comparison, manifest mapping and record transitions in JavaScript. Use a small native bridge for the Chainway SDK, physical trigger, Android exports and a read-only LAN endpoint. The browser dashboard uses the same endpoint origin.
