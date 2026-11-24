@@ -97,6 +97,13 @@ export function lockPallet(manifest, observations) {
   }
   return best;
 }
+// FR-04: a blank SKU is allowed but shown before scanning. Ambiguous mappings (one carton reference twice) are rejected by parseManifest.
+export function missingSku(m) {
+  const pallets = m?.palletEpc ? [m] : (m?.pallets ?? []);
+  return pallets.flatMap(p => p.cartons.filter(c => !c.sku).map(c => (pallets.length > 1 ? p.pallet + ' / ' : '') + c.carton));
+}
+// Section 13 recovery: a session is unexported until an export follows its last logged change (ISO times compare as text).
+export const unexported = s => !s.exportedAt || (s.logs.at(-1)?.at ?? '') > s.exportedAt;
 export const lockTo = (manifest, pallet) => ({...manifest, pallet:pallet.pallet, palletEpc:pallet.palletEpc, cartons:pallet.cartons});
 // The other loaded pallet an unexpected EPC belongs to, if any.
 export const otherPallet = (manifest, epc) =>
@@ -186,7 +193,7 @@ export function evidenceCsv(store) {
 export const EXPORT_COLUMNS = ['SessionID','Mode','TransactionRef','PalletRef','TestID','RunID','RunType','RunStart','RunEnd',
   'DurationSeconds','Location','StorageLevel','SKU','CartonRef','ExpectedEPC','ObservedEPC','Classification','ReaderModel','DeviceID',
   'RegionProfile','PowerSetting','ScanMethod','LabelType','LabelPosition','ShieldingStatus','CompletenessPct','ResultStatus',
-  'ExceptionCode','Operator','Reviewer','Disposition','Notes','ReadCount','FirstSeen','LastSeen','RSSI'];
+  'ExceptionCode','Operator','Reviewer','Disposition','Notes','ReadCount','FirstSeen','LastSeen','RSSI','ProfileVersion'];
 export function specEvidenceCsv(store) {
   const rows = [EXPORT_COLUMNS];
   for (const s of store.sessions) {
@@ -209,7 +216,7 @@ export function specEvidenceCsv(store) {
           run.method ?? s.method, s.label, s.placement, s.shielding, r.percent,
           run.state === 'Finished' ? r.status : run.state, code, run.operator, s.closure?.actor, d?.outcome,
           [note, run.reason && 'Rescan reason: ' + run.reason, d?.note, ...notes].filter(Boolean).join(' | '),
-          read?.count, read?.first, read?.last, read?.rssi];
+          read?.count, read?.first, read?.last, read?.rssi, p.version];
       };
       for (const c of m?.cartons ?? []) {
         const seen = r.matched.includes(c.epc);
