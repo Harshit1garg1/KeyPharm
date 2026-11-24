@@ -332,6 +332,7 @@ with sync_playwright() as playwright:
     dashboard.route("https://dashboard.test/records", records)
     dashboard.goto("https://dashboard.test/dashboard.html")
     assert dashboard.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth > 339")
+    assert dashboard.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => getComputedStyle(logo).filter === 'none'")
     assert dashboard.evaluate("getComputedStyle(document.documentElement).colorScheme") == "dark"
     expect(dashboard.get_by_role("status")).to_contain_text("Handheld online")
     expect(dashboard.get_by_role("heading", name="Overview")).to_be_visible(timeout=3000)
@@ -340,6 +341,8 @@ with sync_playwright() as playwright:
     expect(dashboard.locator("[data-total=exceptions]")).to_have_text("2")
     expect(dashboard.get_by_role("heading", name="Recent sessions")).to_be_visible()
     expect(dashboard.get_by_role("heading", name="Recent activity")).to_have_count(0)
+    assert dashboard.locator(".dashboard-rail").bounding_box()["x"] < dashboard.locator(".dashboard-heading").bounding_box()["x"]
+    assert dashboard.locator(".dashboard-outcomes").bounding_box()["x"] > dashboard.locator(".dashboard-heading").bounding_box()["x"]
     dashboard.screenshot(path="build/dashboard-smoke.png", full_page=True)
     dashboard.locator("#recent-sessions").get_by_role("link", name="KP-TEST-01").click()
     expect(dashboard.locator("#detail").get_by_role("heading", name="KP-TEST-01")).to_be_visible()
