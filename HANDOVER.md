@@ -1,5 +1,7 @@
 # KeyPharm live RFID POC handover
 
+> **Historical record (app 0.3.3, 23 November 2026).** Kept as Harshit's handover for that branch. Current version, behaviour and open items: [context.md](context.md).
+
 23 November 2026. Feature branch `Harshit-Dev`. Comparison baseline is GitHub `main` at `2a79461148f523571e5ebace8b5c492fac953fa7` (PR #1, app 0.2.0). This branch produces Android 0.3.3, version code 6.
 
 ## What changed from main and why

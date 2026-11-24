@@ -1,3 +1,5 @@
+> **Historical prompt (20 November 2026)** used to request a planning review. Not a requirement. Current state: [context.md](../../context.md).
+
 You are a senior architect. Produce an independent, critical implementation plan. Do NOT write code. Read-only.
 
 INPUTS (read them fully):

@@ -107,6 +107,10 @@ with sync_playwright() as playwright:
     device.reload()  # the open session and the half-typed note both come back from localStorage
     expect(device.get_by_label("Note on the current run")).to_have_value("Carton behind stretch wrap")
     device.get_by_role("button", name="Save run note").click()
+    by_sku = device.locator(".by-sku").last  # current run: a mixed pallet reads per SKU (AT-02)
+    by_sku.locator("summary").click()
+    expect(by_sku).to_contain_text("Ginger 2 of 2 matched")
+    expect(by_sku).to_contain_text("Pomegranate juice 0 of 1 matched / 1 missing")
 
     # Manifest revision after a scan: needs a reason, then verification and pallet identification again.
     as_person(device, "admin", "Lead A")
@@ -124,10 +128,11 @@ with sync_playwright() as playwright:
     expect(device.get_by_role("heading", name="Scan cartons")).to_be_visible()
 
     device.get_by_label("Demo reads").select_option("Unexpected extra")
+    expect(device.locator("#rescan-reasons option")).to_have_count(5)  # FR-19: pick a reason or type one
     device.get_by_label("Rescan reason").fill("Check neighboring tags")
     hold(device)
     expect(proceed).to_be_disabled()
-    expect(device.locator("#scan-results")).to_contain_text("Hold")
+    expect(device.locator("#scan-results .status")).to_have_text("Hold: unexpected reads")
     expect(device.locator(".tag-row[data-tag-status=unexpected]")).to_contain_text("Unexpected")
     device.get_by_role("button", name="Session details").click()
     device.get_by_label("Action").select_option("Neighbouring tag")
@@ -177,8 +182,10 @@ with sync_playwright() as playwright:
     downloads = []
     device.on("download", lambda download: downloads.append(download))
     device.get_by_role("button", name="Sessions").click()
+    expect(device.locator(".export-state")).to_have_text("1 of 1 sessions not exported since their last change: KP-TEST-01")
     device.get_by_role("button", name="Export CSV and summary").click()
     device.wait_for_timeout(1000)
+    expect(device.locator(".export-state")).to_have_text("Every session is exported.")
     files = {d.suggested_filename: Path(d.path()).read_text(encoding="utf-8-sig") for d in downloads}
     assert sorted(files) == ["keypharm-evidence.csv", "keypharm-records.csv", "keypharm-summary.txt"], sorted(files)
     evidence = files["keypharm-evidence.csv"].splitlines()
@@ -329,13 +336,23 @@ with sync_playwright() as playwright:
 
     dashboard.route("https://dashboard.test/records", records)
     dashboard.goto("https://dashboard.test/dashboard.html")
-    assert dashboard.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth === 339")
+    assert dashboard.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth > 339")
+    assert dashboard.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => getComputedStyle(logo).filter === 'none'")
+    assert dashboard.evaluate("getComputedStyle(document.documentElement).colorScheme") == "dark"
     expect(dashboard.get_by_role("status")).to_contain_text("Handheld online")
     expect(dashboard.get_by_role("heading", name="Overview")).to_be_visible(timeout=3000)
     expect(dashboard.locator("[data-total=sessions]")).to_have_text("1")
     expect(dashboard.locator("[data-total=scans]")).to_have_text("3")
     expect(dashboard.locator("[data-total=exceptions]")).to_have_text("2")
+    expect(dashboard.get_by_role("heading", name="Recent sessions")).to_be_visible()
+    expect(dashboard.get_by_role("heading", name="Recent activity")).to_have_count(0)
+    assert dashboard.locator(".dashboard-rail").bounding_box()["x"] < dashboard.locator(".dashboard-heading").bounding_box()["x"]
+    assert dashboard.locator(".dashboard-outcomes").bounding_box()["x"] > dashboard.locator(".dashboard-heading").bounding_box()["x"]
     dashboard.screenshot(path="build/dashboard-smoke.png", full_page=True)
+    dashboard.locator("#recent-sessions").get_by_role("link", name="KP-TEST-01").click()
+    expect(dashboard.locator("#detail").get_by_role("heading", name="KP-TEST-01")).to_be_visible()
+    dashboard.reload()
+    expect(dashboard.locator("#detail").get_by_role("heading", name="KP-TEST-01")).to_be_visible()
     dashboard.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Sessions").click()
     expect(dashboard.get_by_role("heading", name="KP-TEST-01")).to_be_visible()
     expect(dashboard.locator("#detail").get_by_text("Unexpected EPC neighbouring tag",exact=True)).to_be_visible()
@@ -406,6 +423,10 @@ with sync_playwright() as playwright:
     hardware.locator(".reader-card").get_by_role("button", name="Set power").click()
     expect(hardware.locator("#notice")).to_contain_text("Reader power set to 25 dBm")
     expect(hardware.locator(".reader-card")).to_contain_text("ETSI / 25 dBm")
+    audit = lambda: hardware.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).audit")
+    assert [(a["action"], a["actor"], a["detail"]) for a in audit()] == \
+        [("Reader power changed", "Lead A", "30 to 25 dBm (home screen)")], audit()  # FR-35: no session, so the device log
+    expect(hardware.locator("summary", has_text="Device log (1)")).to_be_visible()
     pick_role(hardware, "operator")
     expect(hardware.locator(".reader-card")).to_contain_text("The Test lead sets reader power.")
     as_person(hardware, "operator", "Operator C")
@@ -423,6 +444,7 @@ with sync_playwright() as playwright:
     expect(hardware.locator("#notice")).to_contain_text("Reader power set to 18 dBm")
     saved = hardware.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].logs")
     assert saved[-1]["action"] == "Reader power changed" and "30 to 18 dBm" in saved[-1]["detail"]
+    assert len(audit()) == 1, audit()  # a change inside a session stays in that session's log
     pick_role(hardware, "operator")
     expect(hardware.get_by_role("button", name="Set power")).to_have_count(0)
     expect(hardware.get_by_text("ETSI / 18 dBm")).to_be_visible()
@@ -509,6 +531,16 @@ with sync_playwright() as playwright:
     expect(gen.locator("#share-all")).to_be_checked()  # the dashboard shares hardware records by default
     gen.get_by_role("button", name="New test session").click()
     gen.get_by_role("button", name="Create session").click()
+    # A rejected file is logged with its name and errors; a blank SKU is accepted but named before scanning (FR-04).
+    gen.evaluate("""window.keypharmEvent('manifest-file', {name:'bad.csv',
+      text:'pallet_ref,pallet_epc,carton_ref,carton_epc,sku\\nP1,AA01,C1,XYZ,\\n'})""")
+    expect(gen.locator("#notice")).to_contain_text("EPC must be even-length hexadecimal")
+    failed = gen.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].logs.at(-1)")
+    assert (failed["action"], failed["actor"]) == ("Manifest import failed", "Lead A"), failed
+    assert failed["detail"].startswith("bad.csv / Row 2: EPC must be even-length hexadecimal"), failed
+    gen.evaluate("""window.keypharmEvent('manifest-file', {name:'nosku.csv',
+      text:'pallet_ref,pallet_epc,carton_ref,carton_epc,sku\\nP1,AA01,C1,CC01,\\nP1,AA01,C2,CC02,Ginger\\n'})""")
+    expect(gen.locator(".sku-gap")).to_have_text("1 carton has no SKU: C1")
     gen.get_by_role("button", name="Build from scan").click()
     gen.get_by_role("button", name="Start scan").click()
     gen.get_by_role("button", name="Stop scan").click()
@@ -523,9 +555,34 @@ with sync_playwright() as playwright:
         "PAL-KP-TEST-01,AA01,Carton 01,CC01,Ginger", "PAL-KP-TEST-01,AA01,Carton 02,CC02,Ginger"], csv
     gen.get_by_role("button", name="Use as manifest").click()
     expect(gen.get_by_text("1 pallet(s) / 2 cartons", exact=False)).to_be_visible()
+    expect(gen.locator(".sku-gap")).to_have_count(0)
     gen.get_by_role("button", name="Save manifest").click()
     built = gen.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].manifest")
     assert (built["palletEpc"], [c["epc"] for c in built["cartons"]]) == ("AA01", ["CC01", "CC02"]), built
+
+    # Home screen: mode and network line, and the session search across test, level, date and status (section 6, FR-33).
+    seeded = browser.new_page(viewport={"width":360, "height":700})
+    seeded.on("pageerror", lambda error: errors.append(str(error)))
+    seeded.route("https://handheld.test/**", serve_assets)
+    seeded.add_init_script("""localStorage.setItem('keypharm-poc-v1', JSON.stringify({people:[], sessions:[
+      {id:'a', testId:'KP-GINGER', location:'Dock 1', level:'Ground', source:'Simulation', createdAt:'2026-11-24T09:00:00.000Z',
+        creator:'Lead A', runs:[], logs:[], allocation:{}},
+      {id:'b', testId:'KP-JUICE', location:'Rack', level:'Level 2', source:'Simulation', createdAt:'2026-11-25T09:00:00.000Z',
+        creator:'Lead A', runs:[], logs:[], allocation:{}}]}))""")
+    seeded.goto("https://handheld.test/handheld.html")
+    expect(seeded.locator(".mode-line")).to_contain_text("PoC Test mode")
+    records = seeded.locator(".record")
+    search = seeded.get_by_label("Search sessions")
+    search.fill("level 2")
+    expect(records.filter(visible=True)).to_have_count(1)
+    expect(records.filter(visible=True)).to_contain_text("KP-JUICE")
+    search.fill("2026-11-24 load cartons")
+    expect(records.filter(visible=True)).to_contain_text("KP-GINGER")
+    search.fill("nothing like this")
+    expect(records.filter(visible=True)).to_have_count(0)
+    expect(seeded.locator("#no-match")).to_be_visible()
+    search.fill("")
+    expect(records.filter(visible=True)).to_have_count(2)
 
     assert not errors, errors
     print("Handheld and dashboard browser flow passed.")

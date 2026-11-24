@@ -198,3 +198,7 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .pallet-pick input {width:22px;min-height:22px;accent-color:var(--action)}
 #build-form .secondary {width:100%}
 @media(max-width:420px) {.handheld .brand img {height:34px}}
+.mode-line {margin:12px 4px 0;font-size:14px}
+.home .search {margin-bottom:12px}
+.sku-gap {margin:8px 0}
+[hidden] {display:none !important}

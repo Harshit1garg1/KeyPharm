@@ -34,8 +34,8 @@ const logBody = log => '<strong>' + escape(log.action) + '</strong><br>' + escap
 
 function updateOverview() {
   const displayCount = n => previousBody === undefined ? '—' : count.format(n);
-  find('#totals').innerHTML = Object.entries(sections).map(([key,s]) =>
-    '<a class="dashboard-total" href="#' + key + '"><span>' + s.title + '</span><strong data-total="' +
+  find('#totals').innerHTML = ['sessions','pallets','scans','exceptions'].map(key =>
+    '<a class="dashboard-total" href="#' + key + '"><span>' + sections[key].title + '</span><strong data-total="' +
     key + '">' + displayCount(data.rows[key].length) + '</strong>' +
     (key === 'sessions' && previousBody !== undefined ?
       '<small>' + count.format(data.rows.sessions.length - data.closed) + ' open / ' + count.format(data.closed) + ' closed</small>' : '') +
@@ -45,9 +45,14 @@ function updateOverview() {
     '<div class="outcome-row" data-state="' + state.toLowerCase() + '"><div class="row spread"><strong>' + state +
     '</strong><span>' + displayCount(total) + '</span></div>' +
     '<progress aria-label="' + state + ' scans" value="' + total + '" max="' + (scans || 1) + '"></progress></div>').join('');
-  find('#recent').innerHTML = data.rows.activity.slice(0,5).map(row => '<li><strong>' + escape(row.title) +
-    '</strong><small>' + escape(row.description) + '</small><small>' + escape(time(row.at)) + '</small></li>').join('') ||
-    '<li class="muted">No activity received.</li>';
+  const sessions = data.rows.sessions.slice(0,6);
+  find('#recent-sessions').innerHTML = sessions.map(row =>
+    '<tr><th scope="row"><a href="#sessions/' + escape(encodeURIComponent(row.id)) + '">' + escape(row.title) +
+    '</a></th><td>' + escape(row.session.manifest?.pallet ?? '—') + '</td><td>' + escape(row.session.source ?? '—') +
+    '</td><td>' + badge(row.status) + '</td></tr>').join('');
+  const empty = find('#sessions-empty');
+  empty.hidden = sessions.length > 0;
+  empty.textContent = previousBody === undefined ? 'Waiting for records…' : 'No shared sessions yet.';
 }
 
 function observationDetails(observations) {
@@ -61,7 +66,7 @@ function runEvidence(run) {
   return facts(['Operator',run.operator],['Source',run.source],['Started',time(run.startedAt)],['Finished',time(run.endedAt)],
     ['Duration',run.elapsedSeconds == null ? null : run.elapsedSeconds + ' s'],['Manifest revision',run.manifestRevision],
     ['Expected',r?.expected],['Matched',r?.matched?.length],['Completeness',r?.percent == null ? null : r.percent + '%'],
-    ['Reader profile',run.profile?.name],['Region / power',readerPower(run.profile)],['Reader build',run.profile?.build],
+    ['Reader profile',run.profile?.name],['Profile version',run.profile?.version],['Region / power',readerPower(run.profile)],['Reader build',run.profile?.build],
     ['Rescan reason',run.reason],['Notes',run.note ?? run.notes],['Error',run.error]) +
     fold('Missing EPCs (' + (r?.missing?.length ?? 0) + ')',list(r?.missing,code)) +
     fold('Unexpected EPCs (' + (r?.extra?.length ?? 0) + ')',list(r?.extra,code)) +
@@ -137,16 +142,21 @@ function renderRecords() {
 }
 
 function navigate(focusTitle = false) {
-  const requested = window.location.hash.slice(1);
+  const [requested, sessionId] = window.location.hash.slice(1).split('/');
   if (requested === 'content') return;
   const next = Object.hasOwn(sections,requested) ? requested : 'overview';
   if (section !== next) { selected = undefined; search.value = ''; }
   section = next;
+  if (section === 'sessions' && sessionId) {
+    selected = data.rows.sessions.find(row => encodeURIComponent(row.id) === sessionId)?.id;
+    search.value = '';
+  }
   for (const link of nav.querySelectorAll('a')) {
     if (link.hash === '#' + section) link.setAttribute('aria-current','page');
     else link.removeAttribute('aria-current');
   }
   find('#page-title').textContent = sections[section]?.title ?? 'Overview';
+  find('#page-heading').dataset.overview = String(section === 'overview');
   find('#section-description').textContent = sections[section]?.description ?? 'Totals cover all records shared by the handheld.';
   find('#overview').hidden = section !== 'overview';
   catalog.hidden = section === 'overview';
@@ -169,7 +179,10 @@ async function fetchRecords() {
       data = indexRecords(store.sessions);
       previousBody = body;
       updateOverview();
-      if (!catalog.hidden) renderRecords();
+      if (!catalog.hidden) {
+        if (section === 'sessions' && !selected && window.location.hash.startsWith('#sessions/')) navigate();
+        else renderRecords();
+      }
     }
     refreshed = new Date();
     connection.className = 'status match';

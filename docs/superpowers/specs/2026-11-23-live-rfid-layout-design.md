@@ -1,5 +1,7 @@
 # Live RFID workflow and layout proposal
 
+> **Historical design record (23 November 2026).** The layout has changed since (0.7 navigation, 0.7.4 home screen). Current layout: [context.md](../../../context.md).
+
 23 November 2026. The work is isolated on `codex/live-rfid-layout`, based on the merged `main`.
 
 ## Confirmed decisions

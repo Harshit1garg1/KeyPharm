@@ -1,5 +1,7 @@
 # POC demo design for review
 
+> **Design record from 20 November 2026.** The app shipped close to this design, with three changes: pallets are UHF-tagged, an on-screen Start/Stop button joins the trigger, and the KeyPharm brand colours replace the tokens below. Current behaviour: [README](../README.md) and [context.md](../context.md).
+
 Approved for POC implementation on 20 November 2026. See the README for the implemented workflow and current verification status.
 
 ## Intended outcome

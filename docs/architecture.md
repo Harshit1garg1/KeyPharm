@@ -1,5 +1,7 @@
 # Keypharm RFID PoC — Offline APK Architecture
 
+> **Not adopted.** This Kotlin/Compose/Room plan was written before the team chose the existing WebView + Java app (typed pallet references were also replaced by tagged pallets). Kept for reference only. Current architecture: [context.md](../context.md).
+
 **Status:** draft for review · 2026-11-20
 **Spec:** [keypaharm_functional_design.md](../keypaharm_functional_design.md)
 **Inputs:** Codex plan ([research/codex-plan-v2.md](research/codex-plan-v2.md)), Gemini plan (Gemini web, "Keypharm RFID Android Architecture Plan" chat, 2026-11-20), brief ([research/planning-brief-v2.md](research/planning-brief-v2.md)). The earlier [research/codex-plan.md](research/codex-plan.md) is superseded: it treated web middleware as co-equal and chose Laravel.

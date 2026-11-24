@@ -97,6 +97,33 @@ export function lockPallet(manifest, observations) {
   }
   return best;
 }
+// FR-04: a blank SKU is allowed but shown before scanning. Ambiguous mappings (one carton reference twice) are rejected by parseManifest.
+export function missingSku(m) {
+  const pallets = m?.palletEpc ? [m] : (m?.pallets ?? []);
+  return pallets.flatMap(p => p.cartons.filter(c => !c.sku).map(c => (pallets.length > 1 ? p.pallet + ' / ' : '') + c.carton));
+}
+// Section 13 recovery: a session is unexported until an export follows its last logged change (ISO times compare as text).
+export const unexported = s => !s.exportedAt || (s.logs.at(-1)?.at ?? '') > s.exportedAt;
+// FR-33: every search term must appear in the test, pallet, carton, SKU, location, level, people, date or status text.
+export function matchesQuery(s, query, status = '') {
+  const text = [s.testId, s.location, s.level, s.product, s.creator, s.createdAt?.slice(0,10), status,
+    ...palletsOf(s.manifest).flatMap(p => [p.pallet, ...p.cartons.flatMap(c => [c.carton, c.sku])]),
+    ...s.runs.map(run => run.operator)].join(' ').toLowerCase();
+  return String(query ?? '').toLowerCase().split(/\s+/).filter(Boolean).every(term => text.includes(term));
+}
+// AT-02: expected, matched and missing cartons per SKU for one run; SKU never replaces the EPC identity.
+export function skuBreakdown(manifest, result) {
+  const matched = new Set(result.matched), rows = new Map();
+  for (const c of manifest.cartons) {
+    const sku = c.sku || 'No SKU', row = rows.get(sku) ?? {sku, expected:0, matched:0, missing:0};
+    row.expected++;
+    if (matched.has(c.epc)) row.matched++; else row.missing++;
+    rows.set(sku, row);
+  }
+  return [...rows.values()];
+}
+// Section 9.3 lists "Unexpected reads" as its own state; FR-15 calls it Hold. Show both.
+export const statusLabel = status => status === 'Hold' ? 'Hold: unexpected reads' : status;
 export const lockTo = (manifest, pallet) => ({...manifest, pallet:pallet.pallet, palletEpc:pallet.palletEpc, cartons:pallet.cartons});
 // The other loaded pallet an unexpected EPC belongs to, if any.
 export const otherPallet = (manifest, epc) =>
@@ -179,6 +206,8 @@ export function evidenceCsv(store) {
     }
     for (const log of s.logs) rows.push(['Log',...identity,log.run ?? '',log.at,log.actor,'','','','','','','',log.action + ': ' + (log.detail ?? '')]);
   }
+  // FR-35: device-wide changes that have no session, such as reader power set from the home screen.
+  for (const log of store.audit ?? []) rows.push(['Device log','','','','',log.at,log.actor,'','','','','','','',log.action + ': ' + (log.detail ?? '')]);
   return '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
 }
 
@@ -186,7 +215,7 @@ export function evidenceCsv(store) {
 export const EXPORT_COLUMNS = ['SessionID','Mode','TransactionRef','PalletRef','TestID','RunID','RunType','RunStart','RunEnd',
   'DurationSeconds','Location','StorageLevel','SKU','CartonRef','ExpectedEPC','ObservedEPC','Classification','ReaderModel','DeviceID',
   'RegionProfile','PowerSetting','ScanMethod','LabelType','LabelPosition','ShieldingStatus','CompletenessPct','ResultStatus',
-  'ExceptionCode','Operator','Reviewer','Disposition','Notes','ReadCount','FirstSeen','LastSeen','RSSI'];
+  'ExceptionCode','Operator','Reviewer','Disposition','Notes','ReadCount','FirstSeen','LastSeen','RSSI','ProfileVersion'];
 export function specEvidenceCsv(store) {
   const rows = [EXPORT_COLUMNS];
   for (const s of store.sessions) {
@@ -209,7 +238,7 @@ export function specEvidenceCsv(store) {
           run.method ?? s.method, s.label, s.placement, s.shielding, r.percent,
           run.state === 'Finished' ? r.status : run.state, code, run.operator, s.closure?.actor, d?.outcome,
           [note, run.reason && 'Rescan reason: ' + run.reason, d?.note, ...notes].filter(Boolean).join(' | '),
-          read?.count, read?.first, read?.last, read?.rssi];
+          read?.count, read?.first, read?.last, read?.rssi, p.version];
       };
       for (const c of m?.cartons ?? []) {
         const seen = r.matched.includes(c.epc);
@@ -243,7 +272,35 @@ export function evidenceSummary(store) {
         (r?.missing.length ?? 0) + ' missing | ' + (r?.extra.length ?? 0) + ' extra');
     }
   }
+  lines.push(...configResults(store.sessions));
+  if (store.audit?.length) lines.push('', 'Device log', ...store.audit.map(l => l.at + ' ' + l.actor + ': ' + l.action + ' ' + (l.detail ?? '')));
   return lines.join('\n') + '\n';
+}
+// Section 12: results per test configuration. Each session keeps its own first-pass and final figure; the
+// first-pass range across sessions is the repeatability. Different products, labels or levels are never blended.
+function configResults(sessions) {
+  const groups = new Map();
+  for (const s of sessions) {
+    const runs = s.runs.filter(run => run.result);
+    if (!runs.length) continue;
+    const key = [s.product, s.label, s.placement, s.level, s.method, s.shielding].map(v => v || '—').join(' / ');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({s, runs});
+  }
+  if (!groups.size) return [];
+  const pct = r => r.percent == null ? '—' : r.percent + '%';
+  const figure = r => pct(r) + ' (' + r.matched.length + '/' + r.expected + ')';
+  const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
+  const lines = ['', 'Results by configuration (product / label / position / level / method / shielding)'];
+  for (const [key, entries] of groups) {
+    const firsts = entries.map(e => e.runs[0].result.percent).filter(p => p != null);
+    const low = Math.min(...firsts), high = Math.max(...firsts);
+    lines.push(key + ': ' + plural(entries.length, 'session') + ', ' + plural(entries.reduce((n, e) => n + e.runs.length, 0), 'run') +
+      (firsts.length ? ', first pass ' + (low === high ? low + '%' : low + '% to ' + high + '%') : ''));
+    for (const {s, runs} of entries) lines.push('  ' + s.testId + ': first pass ' + figure(runs[0].result) + ', final ' +
+      figure(runs.at(-1).result) + ', ' + plural(runs.length, 'run'));
+  }
+  return lines;
 }
 
 // A run is compared against the manifest revision that was current when it started (section 8 data rule).

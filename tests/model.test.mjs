@@ -1,7 +1,59 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {parseManifest, compare, scanDelta, canContinue, permits, allocationTotal, canClose, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary, EXPORT_COLUMNS, SAMPLE,
-  parsePlan, planCoverage, closePlanErrors, manifestFor, lockPallet, lockTo, otherPallet, inManifest, manifestCsv} from '../app/src/main/assets/model.mjs';
+  parsePlan, planCoverage, closePlanErrors, manifestFor, lockPallet, lockTo, otherPallet, inManifest, manifestCsv,
+  missingSku, unexported, matchesQuery, skuBreakdown, statusLabel} from '../app/src/main/assets/model.mjs';
+
+// A finished carton run against the sample manifest; `seen` = how many of the 4 cartons were read.
+const sampleRun = (manifest, seen, at, extra = []) => {
+  const epcs = [...manifest.cartons.slice(0, seen).map(c => c.epc), ...extra];
+  return {id:'r' + at, state:'Finished', startedAt:at, endedAt:at, operator:'Op', observations:Object.fromEntries(epcs.map(e => [e,{count:1}])),
+    result:compare(manifest, epcs)};
+};
+
+test('session search needs every term somewhere in test, pallet, SKU, location, level, people, date or status (FR-33)', () => {
+  const manifest = {...parseManifest(SAMPLE), revision:1};
+  const s = {testId:'KP-TEST-07', location:'Dock 3', level:'Level 1', creator:'Lead A', createdAt:'2026-11-24T09:00:00.000Z',
+    manifest, runs:[{operator:'Operator C'}], logs:[]};
+  for (const q of ['', 'kp-test-07', 'pomegranate', 'KP-DEMO-01', 'dock level 1', 'operator c', '2026-11-24', 'hold']) {
+    assert.equal(matchesQuery(s, q, 'Hold, rescan'), true, q);
+  }
+  for (const q of ['ginger dock 9', 'KP-TEST-08', '2026-11-25']) assert.equal(matchesQuery(s, q, 'Hold, rescan'), false, q);
+});
+
+test('result breaks down by SKU so a mixed pallet can be read per product (AT-02)', () => {
+  const manifest = {...parseManifest(SAMPLE.replace(',Pomegranate juice', ',')), revision:1};
+  assert.deepEqual(skuBreakdown(manifest, compare(manifest, manifest.cartons.slice(0, 2).map(c => c.epc))), [
+    {sku:'Ginger', expected:2, matched:2, missing:0},
+    {sku:'Essential oil', expected:1, matched:0, missing:1},
+    {sku:'No SKU', expected:1, matched:0, missing:1}]);
+});
+
+test('Hold names its reason; other states keep their label (section 9.3)', () => {
+  assert.equal(statusLabel('Hold'), 'Hold: unexpected reads');
+  assert.equal(statusLabel('Incomplete'), 'Incomplete');
+  assert.equal(statusLabel('Interrupted'), 'Interrupted');
+});
+
+test('summary groups results by configuration without blending runs, and lists the device log (section 12, FR-35)', () => {
+  const manifest = {...parseManifest(SAMPLE), revision:1};
+  const setup = {product:'Ginger', label:'Paper 90x30', placement:'Upper right', level:'Ground', method:'Walk around', shielding:'None', manifest, logs:[]};
+  const sessions = [
+    {...setup, testId:'KP-1', runs:[sampleRun(manifest, 3, '1'), sampleRun(manifest, 4, '2')]},
+    {...setup, testId:'KP-2', runs:[sampleRun(manifest, 4, '3')]},
+    {...setup, testId:'KP-3', level:'Level 2', runs:[sampleRun(manifest, 2, '4')]},
+    {...setup, testId:'KP-4', runs:[]}];
+  const audit = [{at:'2026-11-24T08:00:00.000Z', actor:'Lead A', action:'Reader power changed', detail:'30 to 25 dBm (home screen)'}];
+  const summary = evidenceSummary({sessions, audit});
+  assert.match(summary, /Results by configuration/);
+  assert.match(summary, /Ginger \/ Paper 90x30 \/ Upper right \/ Ground \/ Walk around \/ None: 2 sessions, 3 runs, first pass 75% to 100%/);
+  assert.match(summary, /KP-1: first pass 75% \(3\/4\), final 100% \(4\/4\), 2 runs/);
+  assert.match(summary, /KP-2: first pass 100% \(4\/4\), final 100% \(4\/4\), 1 run/);
+  assert.match(summary, /Level 2 \/ Walk around \/ None: 1 session, 1 run, first pass 50%/);
+  assert.doesNotMatch(summary, /KP-4: first pass/);
+  assert.match(summary, /Device log\n2026-11-24T08:00:00.000Z Lead A: Reader power changed 30 to 25 dBm \(home screen\)/);
+  assert.match(evidenceCsv({sessions:[], audit}), /"Device log","","","","","2026-11-24T08:00:00.000Z","Lead A",.*"Reader power changed: 30 to 25 dBm \(home screen\)"/);
+});
 
 test('sample validates and pallet EPC is not a carton', () => {
   const manifest = parseManifest(SAMPLE);
@@ -224,3 +276,28 @@ test('manifest built from a scan: chosen pallet tag, the rest become numbered ca
   assert.throws(() => manifestCsv('PAL', 'AA01', ['CC01'], '@SUM(1)'), /start with/);
 });
 
+
+test('cartons without a SKU are listed before scanning, per locked pallet or across a multi-pallet file (FR-04)', () => {
+  assert.deepEqual(missingSku(parseManifest(SAMPLE)), []);
+  assert.deepEqual(missingSku(parseManifest(SAMPLE.replace(',Pomegranate juice', ','))), ['Carton 04']);
+  const multi = parseManifest('pallet_ref,pallet_epc,carton_ref,carton_epc,sku\nP1,AA01,C1,CC01,\nP1,AA01,C2,CC02,Ginger\nP2,AA02,C3,CC03,\n');
+  assert.deepEqual(missingSku(multi), ['P1 / C1', 'P2 / C3']);
+  assert.deepEqual(missingSku(lockTo(multi, multi.pallets[1])), ['C3']);
+  assert.deepEqual(missingSku(undefined), []);
+});
+
+test('a session counts as unexported until an export follows its last logged change (section 13 recovery)', () => {
+  const s = {logs:[{at:'2026-11-24T10:00:00.000Z'}]};
+  assert.equal(unexported(s), true);
+  assert.equal(unexported({...s, exportedAt:'2026-11-24T10:05:00.000Z'}), false);
+  assert.equal(unexported({logs:[...s.logs, {at:'2026-11-24T10:06:00.000Z'}], exportedAt:'2026-11-24T10:05:00.000Z'}), true);
+});
+
+test('each export row carries the reader profile version of its run (section 9.1)', () => {
+  const manifest = {...parseManifest(SAMPLE), revision:1};
+  const run = {id:'r1',state:'Finished',observations:{},profile:{region:'ETSI',powerDbm:30,version:'C72-ETSI-1'},result:compare(manifest,[])};
+  const [header,row] = specEvidenceCsv({sessions:[{id:'s',testId:'T',manifest,runs:[run],logs:[]}]}).replace(/^﻿/,'').trim().split('\r\n')
+    .map(line => line.split('","').map(cell => cell.replace(/^"|"$/g,'')));
+  assert.equal(header.at(-1), 'ProfileVersion');
+  assert.equal(row[header.indexOf('ProfileVersion')], 'C72-ETSI-1');
+});

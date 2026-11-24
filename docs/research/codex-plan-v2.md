@@ -1,5 +1,7 @@
 # Keypharm offline APK architecture and implementation plan
 
+> **Planning input, historical (20 November 2026).** Fed the Kotlin plan that was not adopted. Current state: [context.md](../../context.md), scope: [prd-poc.md](../prd-poc.md).
+
 **Recommendation:** Build one Android app with a small, testable domain core. Make each scan run an independent evidence record. Treat online exchange as a future input and output path; comparison stays on C72.
 
 Basis: [functional design](</C:/Users/joep van loosbroek/Downloads/keypharm-PoC/keypaharm_functional_design.md>), C72 demo [reader lifecycle](</C:/Users/joep van loosbroek/Downloads/EE-Collection/EE-Collection-Developer-Handover/EE-Collection-Developer-Handover/Demo-uhf_as/uhf-uart-demo/app/src/main/java/com/example/uhf/activity/BaseTabFragmentActivity.java>), [inventory](</C:/Users/joep van loosbroek/Downloads/EE-Collection/EE-Collection-Developer-Handover/EE-Collection-Developer-Handover/Demo-uhf_as/uhf-uart-demo/app/src/main/java/com/example/uhf/fragment/UHFReadTagFragment.java>), and [RF settings](</C:/Users/joep van loosbroek/Downloads/EE-Collection/EE-Collection-Developer-Handover/EE-Collection-Developer-Handover/Demo-uhf_as/uhf-uart-demo/app/src/main/java/com/example/uhf/fragment/UHFSetFragment.java>). Demo proves API usage, not production behavior or firmware compatibility.
