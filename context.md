@@ -1,6 +1,6 @@
 # Keypharm RFID POC handoff
 
-Updated 23 November 2026. Work continues on `Naveen-Dev`, which carries GitHub `main` up to `7bba824` (PRs #2 to #5 merged). The Android build is 0.8.1 (versionCode 15). The C72 has **Keypharm RFID POC Reset** (`be.keypharm.rfid.poc.reset`) installed alongside the existing Dev app (`be.keypharm.rfid.poc.dev`). The older `be.keypharm.rfid.poc` install and its local records were removed on 23 November 2026 at the user's request. [HANDOVER.md](HANDOVER.md) has Harshit's earlier handover notes. Planning documents sit in [docs/prd-poc.md](docs/prd-poc.md) and [docs/architecture.md](docs/architecture.md).
+Updated 24 November 2026. Work continues on `Naveen-Dev`, which carries GitHub `main` up to `7bba824` (PRs #2 to #5 merged). The Android build is 0.8.2 (versionCode 16). 0.8.2 merges the separate **Keypharm RFID POC Reset** app (`be.keypharm.rfid.poc.reset`, built by Codex on 23 November 2026) back into the single Dev app (`be.keypharm.rfid.poc.dev`): the Dev app now has **Reset all local data**, and the Reset package is retired, so the C72 should carry only the Dev app. The older `be.keypharm.rfid.poc` install and its local records were removed on 23 November 2026 at the user's request. [HANDOVER.md](HANDOVER.md) has Harshit's earlier handover notes. Planning documents sit in [docs/prd-poc.md](docs/prd-poc.md) and [docs/architecture.md](docs/architecture.md).
 
 ## Requirements and decisions
 
@@ -51,7 +51,7 @@ The converter uses workbook order, with up to 14 tags per pallet by default. It 
 
 Follow the [README](README.md) for the demo walkthrough, SDK dependency and build commands. Use JDK 17, Android SDK 34 and the Chainway `DeviceAPI_ver20251103_release.aar`. Put the AAR in `app/libs`. The repository does not carry a copy of the vendor AAR, the generated APK, or the signing key. The Windows SDK build script produces a signed debug APK at `build/keypharm-poc-<versionName>-debug.apk`. Keep the same local signing key when updating the installed package `be.keypharm.rfid.poc` so Android can preserve its data. For a build that installs next to it, pass `-Package be.keypharm.rfid.poc.dev -Label "Keypharm RFID POC Dev"` (output `build/keypharm-poc-<versionName>-dev-debug.apk`).
 
-To rebuild the separate Reset app, pass `-Package be.keypharm.rfid.poc.reset -Label "Keypharm RFID POC Reset"` to `tools/build-android.ps1`. The 0.8.1 output is `build/keypharm-poc-0.8.1-reset-debug.apk`.
+Build only the Dev package (`-Package be.keypharm.rfid.poc.dev`) from `Downloads/KeyPharm-repo`: its `build/debug.keystore` signed the Dev app installed on the C72, and a different key makes `adb install -r` fail. The separate Reset package (0.8.1) is retired since 0.8.2; do not rebuild it.
 
 On the C72, open **Keypharm RFID POC → Sessions → Evidence → Share web dashboard**. Copy the link and open it in a browser on the same Wi-Fi. Keep the handheld app running. Simulation mode supplies a matching pallet and selectable missing, extra, clean and interrupted carton scenarios.
 
