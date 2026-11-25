@@ -31,6 +31,7 @@ let section = 'overview';
 let selected;
 let previousBody;
 let inFlight = false;
+let stockOverview;
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]);
 const count = new Intl.NumberFormat();
@@ -56,7 +57,9 @@ function updateOverview() {
     key + '">' + displayCount(data.rows[key].length) + '</strong>' +
     (key === 'sessions' && previousBody !== undefined ?
       '<small>' + count.format(data.rows.sessions.length - data.closed) + ' open / ' + count.format(data.closed) + ' closed</small>' : '') +
-    '</a>').join('');
+    '</a>').join('') + (stockOverview ? [['inventory','Cartons on hand'],['inbound','Open receipts'],['counts','Counts to review']]
+      .map(([key,label]) => '<a class="dashboard-total" href="#' + key + '"><span>' + label + '</span><strong data-total="' + key +
+        '">' + count.format(stockOverview[key]) + '</strong></a>').join('') : '');
   const scans = data.rows.scans.length;
   find('#outcomes').innerHTML = Object.entries(data.results).map(([state,total]) =>
     '<div class="outcome-row" data-state="' + state.toLowerCase() + '"><div class="row spread"><strong>' + state +
@@ -190,7 +193,7 @@ function navigate(focusTitle = false) {
   const [requested, sessionId] = window.location.hash.slice(1).split('/');
   if (requested === 'content') return;
   const workspace = find('#workspace-panel');
-  const workspaceSection = workspace && ['inventory','manage'].includes(requested);
+  const workspaceSection = workspace && [...nav.querySelectorAll('[data-workspace-title]')].find(link => link.hash === '#' + requested);
   const next = workspaceSection || Object.hasOwn(sections,requested) ? requested : 'overview';
   if (section !== next) { selected = undefined; search.value = ''; }
   section = next;
@@ -202,7 +205,7 @@ function navigate(focusTitle = false) {
     if (link.hash === '#' + section) link.setAttribute('aria-current','page');
     else link.removeAttribute('aria-current');
   }
-  find('#page-title').textContent = workspaceSection ? (section === 'inventory' ? 'Inventory' : 'Session controls') :
+  find('#page-title').textContent = workspaceSection ? workspaceSection.dataset.workspaceTitle :
     sections[section]?.title ?? 'Overview';
   find('#page-heading').dataset.overview = String(section === 'overview');
   find('#section-description').textContent = sections[section]?.description ?? '';
@@ -264,6 +267,7 @@ nav.addEventListener('click',event => {
 window.addEventListener('hashchange',() => navigate(true));
 refresh.addEventListener('click',fetchRecords);
 window.addEventListener('workspace-updated',fetchRecords);
+window.addEventListener('stock-overview',event => { stockOverview = event.detail; updateOverview(); });
 updateOverview();
 navigate();
 fetchRecords();

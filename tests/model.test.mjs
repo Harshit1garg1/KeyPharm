@@ -15,14 +15,14 @@ test('session search needs every term somewhere in test, pallet, SKU, location, 
   const manifest = {...parseManifest(SAMPLE), revision:1};
   const s = {testId:'KP-TEST-07', location:'Dock 3', level:'Level 1', creator:'Lead A', createdAt:'2026-11-24T09:00:00.000Z',
     manifest, runs:[{operator:'Operator C'}], logs:[]};
-  for (const q of ['', 'kp-test-07', 'pomegranate', 'KP-DEMO-01', 'dock level 1', 'operator c', '2026-11-24', 'hold']) {
+  for (const q of ['', 'kp-test-07', 'physalis', 'KP-DEMO-01', 'dock level 1', 'operator c', '2026-11-24', 'hold']) {
     assert.equal(matchesQuery(s, q, 'Hold, rescan'), true, q);
   }
   for (const q of ['ginger dock 9', 'KP-TEST-08', '2026-11-25']) assert.equal(matchesQuery(s, q, 'Hold, rescan'), false, q);
 });
 
 test('result breaks down by SKU so a mixed pallet can be read per product (AT-02)', () => {
-  const manifest = {...parseManifest(SAMPLE.replace(',Pomegranate juice', ',')), revision:1};
+  const manifest = {...parseManifest(SAMPLE.replace(',Physalis', ',')), revision:1};
   assert.deepEqual(skuBreakdown(manifest, compare(manifest, manifest.cartons.slice(0, 2).map(c => c.epc))), [
     {sku:'Ginger', expected:2, matched:2, missing:0},
     {sku:'Essential oil', expected:1, matched:0, missing:1},
@@ -76,7 +76,7 @@ test('manifest import lists every bad row at once', () => {
 });
 
 test('manifest import accepts Excel semicolons, header case and blank SKU', () => {
-  const excel = SAMPLE.replaceAll(',', ';').replace('pallet_ref', 'Pallet_Ref').replace(';Pomegranate juice', ';') + ';;;;\n';
+  const excel = SAMPLE.replaceAll(',', ';').replace('pallet_ref', 'Pallet_Ref').replace(';Physalis', ';') + ';;;;\n';
   const manifest = parseManifest(excel);
   assert.equal(manifest.cartons.length, 4);
   assert.equal(manifest.cartons[3].sku, '');
@@ -281,7 +281,7 @@ test('manifest built from a scan: chosen pallet tag, the rest become numbered ca
 
 test('cartons without a SKU are listed before scanning, per locked pallet or across a multi-pallet file (FR-04)', () => {
   assert.deepEqual(missingSku(parseManifest(SAMPLE)), []);
-  assert.deepEqual(missingSku(parseManifest(SAMPLE.replace(',Pomegranate juice', ','))), ['Carton 04']);
+  assert.deepEqual(missingSku(parseManifest(SAMPLE.replace(',Physalis', ','))), ['Carton 04']);
   const multi = parseManifest('pallet_ref,pallet_epc,carton_ref,carton_epc,sku\nP1,AA01,C1,CC01,\nP1,AA01,C2,CC02,Ginger\nP2,AA02,C3,CC03,\n');
   assert.deepEqual(missingSku(multi), ['P1 / C1', 'P2 / C3']);
   assert.deepEqual(missingSku(lockTo(multi, multi.pallets[1])), ['C3']);

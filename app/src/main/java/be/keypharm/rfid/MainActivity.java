@@ -12,6 +12,8 @@ import android.os.Looper;
 import android.view.KeyEvent;
 import android.webkit.*;
 import org.json.JSONObject;
+import com.rscja.barcode.BarcodeDecoder;
+import com.rscja.barcode.BarcodeFactory;
 import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -26,6 +28,7 @@ public final class MainActivity extends Activity {
     private static final Set<Integer> SCAN_KEYS = Set.of(139, 280, 291, 293, 294, 311, 312, 313, 315, 591, 593, 594, 596);
     private static final int PICK_MANIFEST = 10;
     private static final int SAVE_TEMPLATE = 11;
+    private static final int CAMERA_BARCODE = 12;
     private static final Set<String> ASSETS = Set.of(
             "/handheld.html", "/handheld.mjs", "/model.mjs", "/workspace-client.mjs", "/qrcode-generator.mjs", "/style.css",
             "/keypharm-logo.png", "/keypharm-logo-hd.png");
@@ -36,6 +39,10 @@ public final class MainActivity extends Activity {
     private C72Reader reader;
     private int activeKey = -1;
     private String hardwareRun;
+    private BarcodeDecoder barcodeDecoder;
+    private String barcodeRequest;
+    private boolean cameraBarcode;
+    private int powerBeforeStockScan = -1;
     private DashboardServer dashboard;
     private volatile String snapshot = "{\"sessions\":[]}";
     private boolean destroyed;
@@ -137,8 +144,20 @@ public final class MainActivity extends Activity {
         hardwareRun = null;
         main.removeCallbacks(tick);
         boolean stopped = reader.stop();
-        event("ended", C72Reader.json("id", id, "reads", reader.drain(),
+        org.json.JSONArray reads = reader.drain();
+        restoreStockPower();
+        event("ended", C72Reader.json("id", id, "reads", reads,
                 "interrupted", interrupted || !stopped, "message", stopped ? reason : "Reader did not confirm a complete capture"));
+    }
+
+    private void restoreStockPower() {
+        if (powerBeforeStockScan < 0) return;
+        int previous = powerBeforeStockScan;
+        powerBeforeStockScan = -1;
+        JSONObject result = reader.setPower(previous);
+        if (!result.optBoolean("ok")) {
+            event("reader", C72Reader.json("ready", false, "message", "Check reader power before scanning again"));
+        }
     }
 
     @Override public void onWindowFocusChanged(boolean focused) {
@@ -153,6 +172,7 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onPause() {
+        if (barcodeRequest != null && !cameraBarcode) endBarcode(barcodeRequest, "", "Barcode scan cancelled.");
         foreground = false;
         activeKey = -1;
         event("cancel", new JSONObject());
@@ -174,7 +194,77 @@ public final class MainActivity extends Activity {
         super.onDestroy();
     }
 
+    private void scanBarcode(String id) {
+        if (!foreground || barcodeRequest != null) return;
+        barcodeRequest = id;
+        hardware.execute(() -> {
+            try {
+                barcodeDecoder = BarcodeFactory.getInstance().getBarcodeDecoder();
+                if (hardwareRun != null || barcodeDecoder == null || !barcodeDecoder.open(this)) {
+                    main.post(() -> useBarcodeCamera(id));
+                    return;
+                }
+                barcodeDecoder.setDecodeCallback(result -> main.post(() -> {
+                    if (!id.equals(barcodeRequest) || cameraBarcode) return;
+                    String value = result == null ? null : result.getBarcodeData();
+                    if (result != null && result.getResultCode() == BarcodeDecoder.DECODE_SUCCESS && value != null && !value.isBlank()) {
+                        endBarcode(id, value, "");
+                    } else useBarcodeCamera(id);
+                }));
+                if (!barcodeDecoder.startScan()) main.post(() -> useBarcodeCamera(id));
+            } catch (RuntimeException | LinkageError error) {
+                main.post(() -> useBarcodeCamera(id));
+            }
+        });
+        main.postDelayed(() -> useBarcodeCamera(id), 5000);
+    }
+
+    private void closeBarcodeDecoder() {
+        BarcodeDecoder decoder = barcodeDecoder;
+        barcodeDecoder = null;
+        if (decoder == null) return;
+        try { decoder.stopScan(); }
+        catch (RuntimeException | LinkageError ignored) { }
+        try { decoder.close(); }
+        catch (RuntimeException | LinkageError ignored) { }
+    }
+
+    private void useBarcodeCamera(String id) {
+        if (!foreground || !id.equals(barcodeRequest) || cameraBarcode) return;
+        cameraBarcode = true;
+        hardware.execute(() -> {
+            closeBarcodeDecoder();
+            main.post(() -> {
+                if (!id.equals(barcodeRequest)) return;
+                if (!foreground) {
+                    endBarcode(id, "", "Barcode scan cancelled.");
+                    return;
+                }
+                try {
+                    startActivityForResult(new Intent(this, CameraBarcodeActivity.class), CAMERA_BARCODE);
+                } catch (RuntimeException error) {
+                    endBarcode(id, "", "Camera barcode scanning is unavailable.");
+                }
+            });
+        });
+    }
+
+    private void endBarcode(String id, String value, String message) {
+        if (!id.equals(barcodeRequest)) return;
+        barcodeRequest = null;
+        cameraBarcode = false;
+        hardware.execute(this::closeBarcodeDecoder);
+        event("receipt-barcode", C72Reader.json("id", id, "value", value, "message", message));
+    }
+
     private final class Bridge {
+        @JavascriptInterface public void scanReceiptBarcode(String id) { main.post(() -> scanBarcode(id)); }
+        @JavascriptInterface public void cancelReceiptBarcode(String id) {
+            main.post(() -> endBarcode(id, "", "Barcode scan cancelled."));
+        }
+        @JavascriptInterface public void useReceiptBarcodeCamera(String id) {
+            main.post(() -> useBarcodeCamera(id));
+        }
         @JavascriptInterface public void closeApp() { main.post(MainActivity.this::finish); }
 
         @JavascriptInterface public void connectReader() {
@@ -194,11 +284,26 @@ public final class MainActivity extends Activity {
             });
         }
 
-        @JavascriptInterface public void startReader(String id) {
+        @JavascriptInterface public void startReader(String id) { startScan(id, null); }
+
+        @JavascriptInterface public void startStockReader(String id, int power) { startScan(id, power); }
+
+        private void startScan(String id, Integer stockPower) {
             hardware.execute(() -> {
                 boolean allowed = foreground && hardwareRun == null;
+                if (allowed && stockPower != null) {
+                    JSONObject result = reader.setPower(stockPower);
+                    powerBeforeStockScan = result.optInt("previousPower", -1);
+                    if (!result.optBoolean("ok")) {
+                        restoreStockPower();
+                        event("ended", C72Reader.json("id", id, "interrupted", true,
+                                "message", result.optString("message")));
+                        return;
+                    }
+                }
                 JSONObject settings = allowed ? reader.start() : null;
                 if (settings == null) {
+                    if (allowed) restoreStockPower();
                     event("ended", C72Reader.json("id", id, "interrupted", true,
                             "message", allowed ? reader.failure : "UHF inventory did not start"));
                     return;
@@ -246,7 +351,7 @@ public final class MainActivity extends Activity {
         }
 
         @JavascriptInterface public void workspaceRequest(String id, String path, String authorization, String body) {
-            if (!Set.of("login", "workspace", "sample", "physical-sample", "sync", "settings", "reset").contains(path)) return;
+            if (!Set.of("login", "workspace", "sample", "physical-sample", "sync", "settings", "reset", "stock-action").contains(path)) return;
             workspaceNetwork.execute(() -> {
                 HttpURLConnection connection = null;
                 try {
@@ -255,6 +360,10 @@ public final class MainActivity extends Activity {
                     connection.setReadTimeout(4000);
                     connection.setInstanceFollowRedirects(false);
                     connection.setRequestProperty("Authorization", authorization);
+                    if ("workspace".equals(path)) {
+                        String deviceId = reader.deviceId();
+                        if (deviceId != null) connection.setRequestProperty("X-KeyPharm-Device-Id", deviceId);
+                    }
                     if (body != null) {
                         connection.setDoOutput(true);
                         connection.setRequestMethod("POST");
@@ -348,6 +457,16 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == CAMERA_BARCODE) {
+            String id = barcodeRequest;
+            if (id != null) {
+                String value = data == null ? null : data.getStringExtra("barcode");
+                String message = data == null ? null : data.getStringExtra("message");
+                endBarcode(id, result == RESULT_OK ? value : "", message == null && result != RESULT_OK ?
+                        "Camera scan cancelled." : message == null ? "" : message);
+            }
+            return;
+        }
         if (result != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
         try {

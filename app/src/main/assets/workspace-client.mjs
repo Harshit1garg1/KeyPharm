@@ -14,13 +14,18 @@ export function workspaceClient(bridge) {
   if (!bridge?.workspaceRequest) return null;
   const pending = new Map();
   const client = {auth:read('-auth',null), samples:read('-samples',{}), stock:read('-stock',[]), state:'Unsynced'};
-  const demoRoles = {admin:'Test lead',operator:'Operator',supervisor:'Supervisor',reviewer:'Reviewer'};
+  client.stockTasks = [];
+  const demoRoles = {admin:'Administrator',operator:'Operator',supervisor:'Supervisor',reviewer:'Reviewer'};
+  if (client.auth?.user.canSwitch && Object.hasOwn(demoRoles,client.auth.user.role)) {
+    client.auth.user.name = demoRoles[client.auth.user.role];
+  }
+  let selectedRole = client.auth?.user.role ?? read('-role','operator');
   client.controls = read('-controls',{revision:0,plan:[],power:null});
   let base = read('-base',{});
   let queue = read('-queue',{});
   let controlsChange = read('-controls-change',null);
   let generation = read('-generation',0);
-  let busy = false;
+  let busy = false, refreshing;
   function adoptGeneration(next,clearRecords) {
     if (next === generation) return;
     clearRecords();
@@ -28,6 +33,7 @@ export function workspaceClient(bridge) {
     queue = {};
     controlsChange = null;
     client.stock = [];
+    client.stockTasks = [];
     client.controls = {revision:0,plan:[],power:null};
     write('-base',base);
     write('-queue',queue);
@@ -63,13 +69,23 @@ export function workspaceClient(bridge) {
   };
   const changes = list => list.filter(s => fingerprint(s) !== base[s.id] || queue[s.id]);
   client.hasPending = list => changes(list).length > 0 || Boolean(controlsChange);
+  client.stockPower = () => controlsChange?.stockPower ?? client.controls.stockPower ?? 10;
+  client.sessionPowerOverride = id => {
+    const pending = controlsChange?.sessionPowers;
+    return pending && Object.hasOwn(pending,id) ? pending[id] : client.controls.sessionPowers?.[id];
+  };
   client.updateControls = patch => {
     if (client.auth?.user.role !== 'admin') return;
+    const priorPowers = controlsChange?.sessionPowers;
     controlsChange = {...controlsChange,...patch,revision:client.controls.revision,operationId:crypto.randomUUID()};
+    if (patch.sessionPowers) controlsChange.sessionPowers = {...priorPowers,...patch.sessionPowers};
     write('-controls-change',controlsChange);
   };
   client.signIn = async (username,password) => {
     const result = await request('login',{},'Basic ' + btoa(username.trim() + ':' + password));
+    if (result.user.canSwitch && Object.hasOwn(demoRoles,selectedRole)) {
+      result.user = {...result.user,role:selectedRole,name:demoRoles[selectedRole]};
+    }
     write('-auth',result);
     client.auth = result;
     return result.user;
@@ -84,6 +100,8 @@ export function workspaceClient(bridge) {
     if (!client.auth?.user.canSwitch || !Object.hasOwn(demoRoles,role) || role === client.auth.user.role) return client.auth?.user;
     if (busy || client.hasPending(list)) throw new Error('Sync local changes before switching accounts.');
     const user = {...client.auth.user,role,name:demoRoles[role]};
+    selectedRole = role;
+    write('-role',role);
     client.auth = {...client.auth,user};
     write('-auth',client.auth);
     client.state = 'Unsynced';
@@ -99,13 +117,25 @@ export function workspaceClient(bridge) {
       client.state = 'Unsynced';
     } finally { busy = false; }
   };
+  client.stockAction = async (task,change) => {
+    if (refreshing) await refreshing;
+    if (busy) throw new Error('Wait for sync to finish before scanning.');
+    busy = true;
+    try {
+      const result = await request('stock-action',{id:task.id,revision:task.revision,generation,operationId:crypto.randomUUID(),...change});
+      client.stockTasks = client.stockTasks.map(item => item.id === result.id ? result : item);
+      return result;
+    } finally { busy = false; }
+  };
   client.refresh = async (list,apply,safe,notify,clearRecords) => {
     if (!client.auth || busy || !safe()) return;
     busy = true;
+    let finishRefresh;
+    refreshing = new Promise(resolve => { finishRefresh = resolve; });
     client.state = 'Syncing';
     client.message = '';
-    notify();
     try {
+      notify();
       let workspace = await request('workspace');
       if (!safe()) return;
       adoptGeneration(workspace.generation,clearRecords);
@@ -116,7 +146,10 @@ export function workspaceClient(bridge) {
         const entry = queue[current.id] ?? {
           operationId:crypto.randomUUID(),revision:current.workspaceRevision ?? 0,session:structuredClone(current),by:actorKey()
         };
-        if (entry.by !== actorKey()) throw Object.assign(new Error('Switch to the role that recorded these changes to sync them.'),{status:409});
+        const formerDemoAccount = client.auth.user.id === 'testing' && entry.by === 'handheld/' + client.auth.user.role;
+        if (entry.by !== actorKey() && !formerDemoAccount) {
+          throw Object.assign(new Error('Switch to the role that recorded these changes to sync them.'),{status:409});
+        }
         queue[current.id] = entry;
         write('-queue',queue);
         const server = await request('sync',{...entry,generation});
@@ -132,7 +165,9 @@ export function workspaceClient(bridge) {
       }
       if (controlsChange && client.auth.user.role === 'admin') {
         const sent = controlsChange;
-        client.controls = await request('settings',{...sent,generation});
+        const powerOnly = (sent.sessionPowers || sent.stockPower !== undefined) && sent.plan === undefined && sent.applied === undefined;
+        const revision = powerOnly ? workspace.controls.revision : sent.revision;
+        client.controls = await request('settings',{...sent,revision,generation});
         uploaded = true;
         if (controlsChange === sent) controlsChange = null;
         else controlsChange.revision = client.controls.revision;
@@ -145,10 +180,11 @@ export function workspaceClient(bridge) {
       write('-controls',client.controls);
       client.stock = workspace.inventory;
       write('-stock',client.stock);
+      client.stockTasks = workspace.stockTasks ?? [];
       if (safe()) for (const server of workspace.sessions) {
         const local = list().find(s => s.id === server.id);
         if (local && (fingerprint(local) !== base[local.id] || queue[local.id])) continue;
-        if (!local || local.workspaceRevision !== server.workspaceRevision) apply(server);
+        if (!local || local.workspaceRevision !== server.workspaceRevision || fingerprint(local) !== fingerprint(server)) apply(server);
         base[server.id] = fingerprint(server);
       }
       write('-base',base);
@@ -162,6 +198,7 @@ export function workspaceClient(bridge) {
       client.message = '';
     } catch (error) {
       if (error.status === 401) {
+        write('-role',selectedRole);
         write('-auth',null);
         client.auth = null;
       }
@@ -171,6 +208,8 @@ export function workspaceClient(bridge) {
     } finally {
       if (client.state === 'Syncing') client.state = 'Unsynced';
       busy = false;
+      refreshing = undefined;
+      finishRefresh();
       notify();
     }
   };

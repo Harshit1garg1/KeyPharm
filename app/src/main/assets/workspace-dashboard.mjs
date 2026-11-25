@@ -1,9 +1,28 @@
+import {movementControls,stockPage} from './stock-dashboard.mjs';
+
 const escape = value => String(value ?? '').replace(/[&<>"']/g, ch =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]);
 const nav = document.querySelector('#dashboard-nav');
-for (const [target,label,icon] of [['inventory','Inventory','nav-inventory'],['manage','Session controls','nav-manage']]) {
+const workspaceSections = [
+  ['inbound','Inbound','nav-inventory'],['inventory','Inventory','nav-inventory'],['counts','Stock counts','nav-scans'],
+  ['manage','Session controls','nav-manage'],['devices','Devices','nav-pallets'],['reports','Reports','nav-sessions']
+];
+const section = () => location.hash.slice(1);
+const isWorkspace = () => workspaceSections.some(([key]) => key === section());
+const roleNames = {admin:'Administrator',operator:'Operator',supervisor:'Supervisor',reviewer:'Reviewer'};
+const roleKey = 'keypharm-dashboard-role';
+let role = sessionStorage.getItem(roleKey);
+if (!Object.hasOwn(roleNames,role)) role = 'operator';
+const rolePicker = document.createElement('select');
+rolePicker.id = 'dashboard-role';
+rolePicker.setAttribute('aria-label','Role');
+for (const [value,label] of Object.entries(roleNames)) rolePicker.add(new Option(label,value));
+rolePicker.value = role;
+document.querySelector('.dashboard-toolbar-actions').prepend(rolePicker);
+for (const [target,label,icon] of workspaceSections) {
   const link = document.createElement('a');
   link.href = '#' + target;
+  link.dataset.workspaceTitle = label;
   const mark = document.createElement('span');
   mark.className = 'nav-icon ' + icon;
   mark.setAttribute('aria-hidden','true');
@@ -15,13 +34,17 @@ panel.id = 'workspace-panel';
 panel.className = 'panel workspace-panel';
 panel.hidden = true;
 document.querySelector('#catalog').after(panel);
-let data, product = 'Juice', openClosed = '';
+let data, stockData, product = 'Physalis';
+let stockSelection = '', inventoryLocation = '', history, historyRequest = 0;
+let receiptPreview, receiptCsv;
 const selectedSessions = new Set();
 let dispatchState = 'idle';
 let loadVersion = 0;
 let mutating = false;
 const readApi = async (path, body) => {
-  const response = await fetch(path,{cache:'no-store',...(body ? {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)} : {})});
+  const headers = {'X-KeyPharm-Role':role};
+  if (body) headers['Content-Type'] = 'application/json';
+  const response = await fetch(path,{cache:'no-store',headers,...(body ? {method:'POST',body:JSON.stringify(body)} : {})});
   const result = await response.json();
   if (!response.ok) throw new Error(result.message ?? 'Request failed.');
   return result;
@@ -38,16 +61,14 @@ function stage(s) {
 }
 const statusBadge = status => '<span class="dashboard-badge" data-state="' + escape(status.toLowerCase()) + '">' + escape(status) + '</span>';
 const actionButton = (key,label) => '<button type="button" data-action="' + key + '">' + label + '</button>';
-const canOpenClosed = s => s.closedAt && !s.dispatchedAt && (data.user.role === 'admin' || data.approvable.includes(s.id));
-const approveButton = s => data.approvable.includes(s.id) ? actionButton('approve','Approve dispatch') : '';
 const controls = (s, user) => {
-  if (s.dispatchedAt) return '';
-  if (s.closedAt) return canOpenClosed(s) ? '<button type="button" data-action="open-closed" aria-expanded="' +
-    (openClosed === s.id) + '" aria-controls="closed-' + escape(s.id) + '">' +
-    (openClosed === s.id ? 'Hide session actions' : 'Open closed session') + '</button>' : '';
-  if (user.role === 'admin' && !s.confirmedAt && !s.acceptedAt) return actionButton('manifest',s.manifest ? 'Change CSV' : 'Load CSV');
-  if (user.role === 'supervisor' && s.manifest && !s.verifiedAt) return actionButton('physical','Record physical check');
-  return approveButton(s);
+  const power = user.role === 'admin' && s.source === 'C72 hardware' ? actionButton('power','Change recommended power') : '';
+  if (s.dispatchedAt) return power;
+  const approval = user.role === 'admin' && data.approvable.includes(s.id) ? actionButton('approve','Approve dispatch') : '';
+  if (s.closedAt) return user.role === 'admin' ?
+    actionButton('reopen','Reopen session') + actionButton('manifest','Change CSV') + approval + power : '';
+  return approval + power + (user.role === 'admin' && !s.confirmedAt && !s.acceptedAt ? actionButton('manifest',s.manifest ? 'Change CSV' : 'Load CSV') : '') +
+    (['admin','supervisor'].includes(user.role) && s.manifest && !s.verifiedAt ? actionButton('physical','Record physical check') : '');
 };
 const csvPicker = id => '<label class="workspace-upload" data-csv-drop>' +
   '<input class="workspace-file-input" name="csv" type="file" accept=".csv,text/csv" aria-label="Choose a CSV" aria-describedby="' + id + '">' +
@@ -75,8 +96,8 @@ function validateCsvSelection(input) {
 }
 
 function inventory() {
-  const stock = data.inventory;
-  const products = ['Juice','Tiger Balm','Biotona'];
+  const stock = inventoryLocation ? data.inventory.filter(c => c.location === inventoryLocation) : data.inventory;
+  const products = ['Physalis','Tiger Balm','Biotona'];
   const rows = products.map(sku => {
     const set = stock.filter(c => c.sku === sku);
     const dispatched = set.filter(c => c.state === 'dispatched').length;
@@ -87,60 +108,87 @@ function inventory() {
       ' cartons"></button></td><th scope="row">' + escape(sku) + '</th><td>' + (set.length - dispatched) + '</td><td>' + dispatched +
       '</td></tr>';
   }).join('');
-  return '<div class="workspace-inventory"><div class="workspace-table"><table><caption>Carton stock</caption><thead><tr>' +
+  return '<label class="stock-filter">Location<select id="inventory-location"><option value="">All locations</option>' +
+    (stockData?.locations ?? []).map(location => '<option' + (location === inventoryLocation ? ' selected' : '') + '>' + escape(location) + '</option>').join('') +
+    '</select></label><div class="workspace-inventory"><div class="workspace-table"><table><caption>Carton stock</caption><thead><tr>' +
     '<th scope="col" aria-label="Carton details" class="workspace-stock-expand"></th><th scope="col">Product</th>' +
     '<th scope="col">On hand</th><th scope="col">Dispatched</th></tr></thead><tbody>' + rows +
     '</tbody></table></div><section id="inventory-cartons" aria-labelledby="inventory-cartons-title"' +
     (product ? '>' + cartonDetails(product,stock.filter(c => c.sku === product)) : ' hidden>') + '</section></div>';
 }
 function cartonDetails(sku,cartons) {
-  return '<h2 id="inventory-cartons-title">' + escape(sku) + ' cartons</h2><div class="workspace-table"><table>' +
-    '<thead><tr><th scope="col">Carton</th><th scope="col">EPC</th><th scope="col">Tag source</th><th scope="col">Stock status</th></tr></thead><tbody>' +
-    cartons.map(c => '<tr><th scope="row">' + escape(c.carton) + '</th><td><code>' + escape(c.epc) + '</code></td><td>' +
-      (c.physical ? 'Physical test tag' : 'Synthetic') + '</td><td>' + statusBadge(c.state === 'dispatched' ? 'Dispatched' : 'On hand') +
+  const active = history && cartons.find(c => c.epc === history.epc);
+  const events = active ? '<div class="dashboard-fold-body"><h3>' + escape(active.carton) + ' history</h3>' +
+    (history.entries.length ? '<ul class="log">' + history.entries.map(entry => '<li><strong>' + escape(entry.action) + '</strong> · ' +
+      escape(entry.ref) + ' · ' + escape(entry.actor) + ' · ' + escape(new Date(entry.at).toLocaleString()) +
+      (entry.reason ? '<br>' + escape(entry.reason) : '') + '</li>').join('') + '</ul>' : '<p>No movements recorded.</p>') +
+    movementControls(active,data.user.role,stockData.locations) + '</div>' : '';
+  return '<h2 id="inventory-cartons-title">' + escape(sku) + ' cartons</h2>' + events + '<div class="workspace-table"><table>' +
+    '<thead><tr><th scope="col">Carton</th><th scope="col">EPC</th><th scope="col">Location</th><th scope="col">Tag source</th><th scope="col">Stock status</th></tr></thead><tbody>' +
+    cartons.map(c => '<tr><th scope="row"><button type="button" data-carton="' + escape(c.epc) + '">' + escape(c.carton) +
+      '</button></th><td><code>' + escape(c.epc) + '</code></td><td>' + escape(c.location) + '</td><td>' +
+      (c.physical ? 'Physical test tag' : c.registered ? 'Registered tag' : 'Synthetic') + '</td><td>' +
+      statusBadge(c.state === 'dispatched' ? 'Dispatched' : c.state === 'held' ? 'Held' : 'On hand') +
       '</td></tr>').join('') + '</tbody></table></div>';
 }
+function sourceLabel(session) {
+  if (session.source !== 'C72 hardware') return session.source;
+  const scans = [...(session.palletAttempts ?? []), ...session.runs];
+  const latest = scans.filter(scan => scan.profile?.deviceId).sort((a,b) =>
+    (b.startedAt ?? '').localeCompare(a.startedAt ?? ''))[0];
+  return latest?.profile.deviceId ?? 'Device ID unavailable';
+}
+
 function outboundTable() {
   const canConfirmDispatch = ['admin','supervisor'].includes(data.user.role);
+  const stockByEpc = new Map(data.inventory.map(carton => [carton.epc,carton.state]));
   const rows = data.sessions.map(s => {
-    const closed = canOpenClosed(s);
-    const expanded = closed && openClosed === s.id;
+    const eligible = data.dispatchable.includes(s.id);
+    const blocked = !s.dispatchedAt && (s.dispatchApproval || s.confirmedAt) ?
+      (s.manifest?.cartons ?? []).filter(carton => stockByEpc.get(carton.epc) !== 'available') : [];
+    const stockReason = blocked.length ? blocked.length + (blocked.length === 1 ? ' carton ' : ' cartons ') +
+      (blocked.every(carton => stockByEpc.get(carton.epc) === 'dispatched') ? 'already dispatched' : 'unavailable') : '';
+    const actions = controls(s,data.user);
+    const menuId = 'session-actions-' + escape(s.id);
     const checkbox = canConfirmDispatch ? '<td class="dispatch-select"><input type="checkbox" data-select-session aria-label="Select ' +
-      escape(s.testId) + ' for dispatch"' + (data.dispatchable.includes(s.id) ? '' : ' disabled') + '></td>' : '';
+      escape(s.testId) + ' for dispatch"' + (eligible ? '' : ' disabled') + '></td>' : '';
+    const dispatchButton = canConfirmDispatch && !s.dispatchedAt ? '<button type="button" data-action="dispatch"' +
+      (eligible ? '' : ' disabled') + '>Dispatch</button>' : data.approvable.includes(s.id) ? actionButton('approve','Approve dispatch') : '';
+    const more = actions ? '<button type="button" class="session-more" popovertarget="' + menuId + '">More actions</button>' +
+      '<div popover id="' + menuId + '" class="session-actions" role="group" aria-label="Actions for ' + escape(s.testId) + '">' + actions + '</div>' : '';
     return '<tr data-session="' + escape(s.id) + '">' + checkbox + '<th scope="row"><a href="#sessions/' + encodeURIComponent(s.id) + '">' +
-      escape(s.testId) + '</a></th><td>' + escape(s.location) + '</td><td>' + escape(s.source) + '</td><td>' + statusBadge(stage(s)) +
-      '</td><td><div class="row">' + controls(s,data.user) + '</div></td></tr>' + (closed ?
-        '<tr class="workspace-carton-details" id="closed-' + escape(s.id) + '" data-session="' + escape(s.id) + '"' +
-        (expanded ? '><td colspan="' + (canConfirmDispatch ? 6 : 5) + '"><div class="row">' + approveButton(s) +
-          (data.user.role === 'admin' ? actionButton('reopen','Reopen session') + actionButton('manifest','Change CSV') : '') +
-          '</div></td>' : ' hidden>') + '</tr>' : '');
+      escape(s.testId) + '</a></th><td>' + escape(s.location) + '</td><td>' + escape(sourceLabel(s)) +
+      (s.source === 'C72 hardware' ? '<small class="dispatch-block-reason">Recommended: ' +
+        (data.controls.sessionPowers?.[s.id] ?? data.controls.power?.requested ?? 30) + ' dBm</small>' : '') + '</td><td>' +
+      (stockReason ? statusBadge('Stock blocked') + '<small class="dispatch-block-reason">' + stockReason + '</small>' : statusBadge(stage(s))) +
+      '</td><td>' + dispatchButton + '</td><td>' + more + '</td></tr>';
   }).join('');
   return '<div class="row spread line"><h2>Outbound sessions</h2><div class="row">' +
-    (canConfirmDispatch ? '<button type="button" class="primary-button dispatch-button" data-action="dispatch" disabled>' +
+    (canConfirmDispatch ? '<button type="button" class="primary-button dispatch-button" data-action="dispatch" data-dispatch-batch disabled>' +
       '<span class="dispatch-indicator" aria-hidden="true"></span><span class="dispatch-label">Confirm dispatch</span></button>' : '') +
     (rows ? '<a href="api/evidence.csv" download>Export evidence CSV</a>' : '') + '</div></div>' +
     (rows ? '<div class="workspace-table"><table><thead><tr>' + (canConfirmDispatch ?
       '<th scope="col" class="dispatch-select"><input type="checkbox" data-select-all aria-label="Select all dispatchable sessions"></th>' : '') +
-      '<th scope="col">Test ID</th><th scope="col">Location</th><th scope="col">Source</th><th scope="col">Status</th><th scope="col">Actions</th>' +
+      '<th scope="col">Test ID</th><th scope="col">Location</th><th scope="col">Source</th><th scope="col">Status</th>' +
+      '<th scope="col">Actions</th><th scope="col" aria-label="More actions"></th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table></div>' : '<p class="muted">No sessions yet.</p>');
 }
 function manage() {
   const setting = data.controls;
   const controlsForm = '<details id="workspace-lead-settings" class="dashboard-fold"' +
-    (panel.querySelector('#workspace-lead-settings[open]') ? ' open' : '') + '><summary><span>Test lead settings</span></summary>' +
+    (panel.querySelector('#workspace-lead-settings[open]') ? ' open' : '') + '><summary><span>Administrator settings</span></summary>' +
     '<div class="dashboard-fold-body"><form id="workspace-settings">' +
     '<div class="workspace-fields"><label>Test plan<textarea name="plan" rows="3" placeholder="Test ID and description">' +
     escape(setting.plan.map(item => [item.id,item.title].filter(Boolean).join(' ')).join('\n')) + '</textarea></label>' +
-    '<label>Requested C72 power (dBm)<input type="number" min="5" max="30" step="1" name="power" value="' +
-    escape(setting.power?.requested ?? '') + '"></label></div><p class="muted">' +
-    escape(setting.power?.appliedAt ? 'C72 reported ' + setting.power.applied + ' dBm.' :
-      setting.power ? 'Waiting for the Test lead to apply this setting on the C72.' :
-      'Reader power is applied and checked on the C72.') + '</p>' +
+    '<label>Requested Power (dBm)<input type="number" min="5" max="30" step="1" name="power" placeholder="30" value="' +
+    escape(setting.power?.requested ?? '') + '"></label>' +
+    '<label>Stock Task Power (dBm)<input name="stockPower" type="number" min="5" max="30" step="1" required value="' +
+    (setting.stockPower ?? 10) + '"></label></div>' +
     '<div class="row workspace-actions"><button class="primary-button">Save test settings</button></div></form>' +
     '<div class="line"><button type="button" data-action="reset">Reset demo data</button></div></div></details>';
   return (data.user.role === 'admin' ? '<form id="workspace-create"><h2>New session</h2><div class="workspace-fields">' +
     '<label>Test ID<input name="testId" maxlength="80" required></label><label>Location<input name="location" maxlength="100" value="Staging" required></label>' +
-    '<label>Reader source<select name="source"><option>Simulation</option><option>C72 hardware</option></select></label></div>' +
+    '<label>Reader source<select name="source"><option>Simulation</option><option value="C72 hardware">RFID handheld</option></select></label></div>' +
     '<div class="workspace-create-actions"><div class="workspace-csv-choice">' + csvPicker('create-csv-status') +
     '<span class="workspace-csv-divider" aria-hidden="true">&#92;</span>' +
     '<button type="button" data-action="sample" aria-pressed="false">Use Sample CSV</button></div>' +
@@ -153,6 +201,10 @@ const milestones = {
   approve:['Dispatch approved','The session can now be selected for dispatch.'],
   dispatch:['Dispatch recorded','The dispatched cartons were deducted from on-hand stock.'],
   reopen:['Session reopened','The session is ready for a new physical check.'],
+  receive:['Receipt confirmed','Inventory is updated.'],
+  review:['Count reviewed','Scan evidence is saved.'],
+  'cancel-count':['Count cancelled','You can open a fresh count for this location.'],
+  outbound:['Pallet prepared','Open it in Session controls.'],
   reset:['Demo data reset','Starting inventory restored.']
 };
 const confirmation = document.createElement('dialog');
@@ -164,7 +216,7 @@ panel.after(confirmation);
 const render = () => {
   if (!data) { panel.textContent = message || 'Loading workspace…'; return; }
   panel.innerHTML = '<p id="workspace-message" role="status">' + escape(message) + '</p>' +
-    (location.hash === '#inventory' ? inventory() : manage()) +
+    (section() === 'inventory' ? inventory() : section() === 'manage' ? manage() : stockPage(section(),data,stockData,stockSelection,receiptPreview)) +
     '<dialog id="workspace-dialog" aria-labelledby="workspace-dialog-title"><form method="dialog" id="workspace-dialog-form">' +
     '<h2 id="workspace-dialog-title"></h2><p></p><div class="workspace-dialog-fields"></div>' +
     '<div class="row workspace-actions"><button value="cancel" formnovalidate>Cancel</button>' +
@@ -172,7 +224,7 @@ const render = () => {
   updateSelection();
 };
 function updateSelection() {
-  const button = panel.querySelector('[data-action="dispatch"]');
+  const button = panel.querySelector('[data-dispatch-batch]');
   if (!button) return;
   const eligible = data.dispatchable;
   for (const id of selectedSessions) if (!eligible.includes(id)) selectedSessions.delete(id);
@@ -192,8 +244,8 @@ function updateSelection() {
   button.querySelector('.dispatch-label').textContent = label;
 }
 function canRefreshInBackground() {
-  return !mutating && ['#inventory','#manage'].includes(location.hash) && !panel.contains(document.activeElement) &&
-    !confirmation.open && !panel.querySelector('dialog[open]') && !panel.querySelector('input[type=file]')?.files.length &&
+  return !mutating && (isWorkspace() || ['','overview'].includes(section())) && !panel.contains(document.activeElement) &&
+    !confirmation.open && !panel.querySelector('dialog[open], :popover-open') && !panel.querySelector('input[type=file]')?.files.length &&
     !panel.querySelector('[data-csv-drop][data-dragging], [data-csv-drop][data-error]') &&
     ![...panel.querySelectorAll('input:not([type=file]),textarea')].some(input => input.value !== input.defaultValue) &&
     !panel.querySelector('[data-action="sample"][aria-pressed="true"]');
@@ -202,9 +254,15 @@ async function load(background = false) {
   const version = ++loadVersion;
   const canRender = () => version === loadVersion && (!background || canRefreshInBackground());
   try {
-    const updated = await readApi('api/workspace');
+    const [updated,ops] = await Promise.all([readApi('api/workspace'),readApi('api/stock-workflows')]);
     if (!canRender()) return;
     data = updated;
+    stockData = ops;
+    window.dispatchEvent(new CustomEvent('stock-overview',{detail:{
+      inventory:data.inventory.filter(c => c.state !== 'dispatched').length,
+      inbound:stockData.tasks.filter(t => t.type === 'receipt' && t.status !== 'Completed').length,
+      counts:stockData.tasks.filter(t => t.type === 'count' && t.status === 'In progress').length
+    }}));
   } catch (error) {
     if (!canRender()) return;
     message = error.message;
@@ -214,6 +272,7 @@ async function load(background = false) {
 async function mutate(path, payload) {
   if (mutating) return;
   mutating = true;
+  rolePicker.disabled = true;
   const dispatching = payload.action === 'dispatch';
   if (dispatching) {
     dispatchState = 'pending';
@@ -221,8 +280,24 @@ async function mutate(path, payload) {
   }
   message = '';
   let result;
-  try { result = await readApi(path,{...payload,generation:data.generation}); message = 'Saved.'; window.dispatchEvent(new Event('workspace-updated')); }
-  catch (error) { message = error.message; }
+  try {
+    result = await readApi(path,{...payload,generation:data.generation});
+    if (['count','receipt'].includes(payload.action) && result.id) stockSelection = result.id;
+    if (payload.action === 'receipt') { receiptPreview = receiptCsv = undefined; }
+    if (['transfer','hold','release'].includes(payload.action) && history?.epc === payload.epc) {
+      history.entries = await readApi('api/carton-history?epc=' + encodeURIComponent(payload.epc));
+    }
+    message = 'Saved.';
+    window.dispatchEvent(new Event('workspace-updated'));
+  }
+  catch (error) {
+    message = error.message;
+    if (path === 'api/session' && section() === 'manage') {
+      panel.querySelector('#workspace-message').textContent = message;
+      mutating = rolePicker.disabled = false;
+      return;
+    }
+  }
   if (dispatching) {
     dispatchState = result ? 'done' : 'idle';
     updateSelection();
@@ -232,6 +307,7 @@ async function mutate(path, payload) {
     await new Promise(resolve => setTimeout(resolve,420));
   }
   mutating = false;
+  rolePicker.disabled = false;
   const milestone = result && milestones[payload.action];
   if (milestone) {
     confirmation.querySelector('h2').textContent = milestone[0];
@@ -244,12 +320,53 @@ async function mutate(path, payload) {
   }
 }
 panel.addEventListener('submit', async event => {
+  if (event.target.dataset.stockAction) {
+    event.preventDefault();
+    const values = new FormData(event.target);
+    const requestedAction = event.target.dataset.stockAction;
+    const action = requestedAction === 'transfer' && values.get('location') === 'Hold' ? 'hold' : requestedAction;
+    const record = event.target.closest('[data-stock-record]');
+    const dialog = panel.querySelector('dialog');
+    const change = {...Object.fromEntries(values),action,operationId:crypto.randomUUID(),
+      id:record?.dataset.stockRecord,revision:Number(record?.dataset.revision)};
+    if (action === 'preview') {
+      try {
+        const file = values.get('csv');
+        if (!file?.size || file.size > 512000) throw new Error('Choose a CSV up to 512 KB.');
+        receiptCsv = await file.text();
+        receiptPreview = await readApi('api/stock-action',{action,csv:receiptCsv,generation:data.generation});
+        message = '';
+        render();
+      } catch (error) {
+        receiptPreview = receiptCsv = undefined;
+        panel.querySelector('#workspace-message').textContent = error.message;
+      }
+      return;
+    }
+    if (action === 'receipt') change.csv = receiptCsv;
+    if (values.has('epcs')) change.epcs = values.get('epcs').trim().split(/[\s,;]+/).filter(Boolean);
+    if (['count','scan','receipt'].includes(action)) { await mutate('api/stock-action',change); return; }
+    dialog.returnValue = 'cancel';
+    dialog.querySelector('h2').textContent = action === 'hold' ? 'Place on hold' :
+    action === 'cancel-count' ? 'Cancel count?' : event.submitter.textContent;
+    dialog.querySelector('p').textContent = action === 'untag' ? 'Remove this EPC from the receipt and return the carton to outstanding.' :
+    action === 'cancel-count' ? 'Remove this count from the list and keep its scan history. Inventory stays the same.' : '';
+    dialog.querySelector('.workspace-dialog-fields').replaceChildren();
+    dialog.addEventListener('close',() => {
+      if (dialog.returnValue === 'confirm') void mutate('api/stock-action',change);
+    },{once:true});
+    dialog.showModal();
+    return;
+  }
   if (event.target.id === 'workspace-settings') {
     event.preventDefault();
     const values = new FormData(event.target);
     const power = values.get('power');
     const change = {revision:data.controls.revision,operationId:crypto.randomUUID(),plan:values.get('plan')};
-    if (power !== '' && Number(power) !== data.controls.power?.requested) change.power = Number(power);
+    const requested = power === '' ? null : Number(power);
+    if (requested !== (data.controls.power?.requested ?? null)) change.power = requested;
+    const stockPower = Number(values.get('stockPower'));
+    if (stockPower !== (data.controls.stockPower ?? 10)) change.stockPower = stockPower;
     await mutate('api/settings',change);
     return;
   }
@@ -265,7 +382,23 @@ panel.addEventListener('submit', async event => {
   await mutate('api/session',{testId:form.get('testId'),location:form.get('location'),source:form.get('source'),
     csv:sample ? '' : await file.text(), sample});
 });
-panel.addEventListener('click', event => {
+panel.addEventListener('click', async event => {
+  const task = event.target.closest('[data-stock-open]');
+  if (task) {
+    stockSelection = task.dataset.stockOpen;
+    render();
+    return;
+  }
+  const carton = event.target.closest('[data-carton]');
+  if (carton) {
+    const epc = carton.dataset.carton;
+    const version = ++historyRequest;
+    try {
+      const entries = await readApi('api/carton-history?epc=' + encodeURIComponent(epc));
+      if (version === historyRequest && section() === 'inventory') { history = {epc,entries}; render(); }
+    } catch (error) { panel.querySelector('#workspace-message').textContent = error.message; }
+    return;
+  }
   const stockRow = event.target.closest('.workspace-stock-row');
   if (stockRow) {
     const sku = stockRow.dataset.product;
@@ -290,26 +423,24 @@ panel.addEventListener('click', event => {
   const row = button?.closest('[data-session]');
   if (!action || (!row && !['reset','dispatch'].includes(action))) return;
   const record = row && data.sessions.find(s => s.id === row.dataset.session);
-  if (action === 'open-closed') {
-    openClosed = openClosed === record.id ? '' : record.id;
-    render();
-    panel.querySelector('[data-session="' + CSS.escape(record.id) + '"] [data-action="open-closed"]')?.focus();
-    return;
-  }
-  const dispatch = action === 'dispatch' ? data.sessions.filter(s => selectedSessions.has(s.id)) : [];
+  button.closest(':popover-open')?.hidePopover();
+  const dispatch = action === 'dispatch' ? (record ? [record] : data.sessions.filter(s => selectedSessions.has(s.id))) : [];
   const dialog = panel.querySelector('dialog');
   dialog.returnValue = 'cancel';
-  dialog.querySelector('h2').textContent = button.textContent;
+  dialog.querySelector('h2').textContent = action === 'dispatch' ? 'Confirm dispatch' : action === 'approve' ? 'Approve dispatch' : button.textContent;
   dialog.querySelector('p').textContent = action === 'physical' ? 'Confirm you checked the actual pallet and its label assignments.' :
     action === 'approve' ? 'Confirm dispatch approval for ' + record.testId + ' after reviewing the physical check and clean scan.' :
-    action === 'dispatch' ? 'Confirm dispatch for the selected sessions. Their cartons will be deducted from on-hand stock.' :
+    action === 'dispatch' ? (dispatch.some(s => !s.dispatchApproval) ?
+      'This records approval and deducts the selected cartons from on-hand stock.' : 'This deducts the selected cartons from on-hand stock.') :
     action === 'manifest' && record.closedAt ? 'Changing the CSV reopens the session and requires a new physical check.' :
     action === 'manifest' && record.manifest ? 'Changing the CSV requires a new physical check.' :
     action === 'reopen' ? 'Keep the current CSV and start a new verification. Previous scans stay in the session history.' :
-    action === 'reset' ? 'Clear sessions, scans and test settings from the shared workspace and the C72. Restore starting stock.' :
+    action === 'reset' ? 'Clear sessions, scans and test settings from the shared workspace and the handheld. Restore starting stock.' :
     'Session ' + record.testId;
   const fields = dialog.querySelector('.workspace-dialog-fields');
   fields.innerHTML = action === 'manifest' ? csvPicker('replace-csv-status') :
+    action === 'power' ? '<label>Recommended Power (dBm)<input name="power" type="number" min="5" max="30" step="1" placeholder="' +
+      (data.controls.power?.requested ?? 30) + '" value="' + escape(data.controls.sessionPowers?.[record.id] ?? '') + '"></label>' :
     action === 'physical' ? '<label>Check notes<input name="note" maxlength="320"></label>' :
     action === 'dispatch' ? '<ul>' + dispatch.map(s => '<li>' + escape(s.testId) + '</li>').join('') + '</ul>' :
     action === 'reset' ? '<label>Type RESET<input name="confirm" pattern="RESET" autocomplete="off" required></label>' : '';
@@ -324,6 +455,12 @@ panel.addEventListener('click', event => {
       await mutate('api/dispatch',{action,confirmed:true,sessions:dispatch.map(s => ({id:s.id,revision:s.workspaceRevision}))});
       return;
     }
+    if (action === 'power') {
+      const power = form.get('power');
+      await mutate('api/settings',{revision:data.controls.revision,operationId:crypto.randomUUID(),
+        sessionPowers:{[record.id]:power === '' ? null : Number(power)}});
+      return;
+    }
     const file = form.get('csv');
     if (action === 'manifest' && !file?.size) {
       panel.querySelector('#workspace-message').textContent = 'Choose a CSV to load.';
@@ -335,6 +472,12 @@ panel.addEventListener('click', event => {
   dialog.showModal();
 });
 panel.addEventListener('change',event => {
+  if (event.target.id === 'inventory-location') {
+    inventoryLocation = event.target.value;
+    render();
+    panel.querySelector('#inventory-location')?.focus();
+    return;
+  }
   if (event.target.matches('.workspace-file-input')) validateCsvSelection(event.target);
   if (event.target.matches('[data-select-all]')) {
     selectedSessions.clear();
@@ -374,8 +517,21 @@ panel.addEventListener('drop',event => {
   input.files = files;
   validateCsvSelection(input);
 });
-window.addEventListener('hashchange',() => { if (['#inventory','#manage'].includes(location.hash)) void load(); });
-document.querySelector('#refresh').addEventListener('click',() => { if (!panel.hidden) void load(); });
+window.addEventListener('hashchange',() => {
+  message = '';
+  if (isWorkspace() || ['', 'overview'].includes(section())) void load();
+});
+rolePicker.addEventListener('change',() => {
+  role = rolePicker.value;
+  sessionStorage.setItem(roleKey,role);
+  selectedSessions.clear();
+  history = receiptPreview = receiptCsv = undefined;
+  message = '';
+  data = undefined;
+  render();
+  void load();
+});
+document.querySelector('#refresh').addEventListener('click',() => { if (!panel.hidden || ['', 'overview'].includes(section())) void load(); });
 setInterval(() => {
   if (canRefreshInBackground()) void load(true);
 },5000);

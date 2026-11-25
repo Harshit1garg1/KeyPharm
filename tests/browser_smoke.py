@@ -115,7 +115,7 @@ with sync_playwright() as playwright:
     by_sku = device.locator(".by-sku").last  # current run: a mixed pallet reads per SKU (AT-02)
     by_sku.locator("summary").click()
     expect(by_sku).to_contain_text("Ginger 2 of 2 matched")
-    expect(by_sku).to_contain_text("Pomegranate juice 0 of 1 matched / 1 missing")
+    expect(by_sku).to_contain_text("Physalis 0 of 1 matched / 1 missing")
 
     # Manifest revision after a scan: needs a reason, then verification and pallet identification again.
     as_person(device, "admin", "Lead A")
@@ -170,6 +170,7 @@ with sync_playwright() as playwright:
     device.screenshot(path="build/handheld-smoke.png", full_page=True)
     proceed.click()
     expect(device.get_by_text("Clean carton match confirmed.")).to_be_visible()
+    expect(device.get_by_label("Coverage and missing-test reason")).to_have_value("Successful Run")
     device.get_by_label("Coverage and missing-test reason").fill("Planned mixed pallet check executed")
     device.get_by_label("Results reviewed and signed off").check()
     device.get_by_role("button", name="Close test session").click()
@@ -178,6 +179,7 @@ with sync_playwright() as playwright:
     device.reload()  # reopens on the same session
     expect(device.get_by_role("heading", name="Session closed")).to_be_visible()
     snapshot = device.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1'))")
+    assert snapshot["sessions"][0]["closure"]["coverage"] == "Planned mixed pallet check executed"
     runs = snapshot["sessions"][0]["runs"]
     assert [run["result"]["status"] for run in runs] == ["Incomplete", "Hold", "Match"]
     assert len(runs[0]["result"]["missing"]) == 1 and len(runs[1]["result"]["extra"]) == 1
@@ -248,7 +250,7 @@ with sync_playwright() as playwright:
     assert device.evaluate("['keypharm-poc-v1', 'keypharm-poc-ui-v1'].map(key => localStorage.getItem(key))") == [None, None]
     assert device.evaluate("localStorage.getItem('unrelated-preference')") == "keep"
     device.reload()
-    expect(device.get_by_text("No tests yet.", exact=False)).to_be_visible()
+    expect(device.get_by_text("No sessions yet.", exact=True)).to_be_visible()
     expect(device.get_by_text("No planned tests.", exact=True)).to_be_visible()
     assert device.evaluate("localStorage.getItem('keypharm-poc-ui-v1')") is None
     device.get_by_label("Role and name").click()
@@ -490,7 +492,7 @@ with sync_playwright() as playwright:
         [("Reader power changed", "Lead A", "30 to 25 dBm (home screen)")], audit()  # FR-35: no session, so the device log
     expect(hardware.locator("summary", has_text="Device log (1)")).to_be_visible()
     pick_role(hardware, "operator")
-    expect(hardware.locator(".reader-card")).to_contain_text("The Test lead sets reader power.")
+    expect(hardware.locator(".reader-card")).to_contain_text("The Administrator sets reader power.")
     as_person(hardware, "operator", "Operator C")
     hardware.get_by_role("button", name="New test session").click()
     hardware.get_by_role("button", name="Create session").click()
@@ -629,7 +631,7 @@ with sync_playwright() as playwright:
     seeded.add_init_script("""localStorage.setItem('keypharm-poc-v1', JSON.stringify({people:[], sessions:[
       {id:'a', testId:'KP-GINGER', location:'Dock 1', level:'Ground', source:'Simulation', createdAt:'2026-11-24T09:00:00.000Z',
         creator:'Lead A', runs:[], logs:[], allocation:{}},
-      {id:'b', testId:'KP-JUICE', location:'Rack', level:'Level 2', source:'Simulation', createdAt:'2026-11-25T09:00:00.000Z',
+      {id:'b', testId:'KP-PHYSALIS', location:'Rack', level:'Level 2', source:'Simulation', createdAt:'2026-11-25T09:00:00.000Z',
         creator:'Lead A', runs:[], logs:[], allocation:{}}]}))""")
     seeded.goto("https://handheld.test/handheld.html")
     expect(seeded.locator(".mode-line")).to_have_count(0)
@@ -637,7 +639,7 @@ with sync_playwright() as playwright:
     search = seeded.get_by_label("Search sessions")
     search.fill("level 2")
     expect(records.filter(visible=True)).to_have_count(1)
-    expect(records.filter(visible=True)).to_contain_text("KP-JUICE")
+    expect(records.filter(visible=True)).to_contain_text("KP-PHYSALIS")
     search.fill("2026-11-24 load cartons")
     expect(records.filter(visible=True)).to_contain_text("KP-GINGER")
     search.fill("nothing like this")

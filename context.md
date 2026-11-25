@@ -2,12 +2,16 @@
 
 ## Current Harshit-Dev handoff
 
-Updated 25 November 2026. Android 0.9.5 (version code 26) was installed and launched on the C72. Start the PC-backed demo with `node tools/workspace-server.mjs` and follow the [connected demo guide](docs/connected-poc.md). The C72 cache holds records through outages and syncs with the local SQLite workspace after reconnecting. The connected demo uses a single handheld sign-in and a role selector between workflow steps.
+Local follow-up on 25 November 2026. The connected platform demo links receipt `KP-IN-40`, a Storage count, and outbound session `KP-RECEIVED-40`. The same carton EPCs carry through each step. The current Android build is 0.9.15 (version code 36). See the [platform brief review and acceptance evidence](docs/platform-poc-review.md) for scope and remaining decisions.
 
-- The Test lead prepares sessions and manifests. The Supervisor records the physical check. The Operator scans the pallet, then the cartons, and confirms a clean match. The Test lead or Reviewer approves dispatch from the dashboard. The Test lead or Supervisor selects approved sessions and confirms dispatch in one batch.
+Start the PC-backed demo with `node tools/workspace-server.mjs` and follow the [connected demo guide](docs/connected-poc.md). The C72 cache holds records through outages and syncs with the local SQLite workspace after reconnecting. The connected demo uses a single handheld sign-in and a role selector between workflow steps.
+
+- The Administrator prepares sessions and manifests. The Supervisor records the physical check. The Operator scans the pallet, then the cartons, and confirms a clean match. The Administrator or Reviewer approves dispatch from the dashboard. The Administrator or Supervisor selects approved sessions and confirms dispatch in one batch.
 - Simulation defaults to Clean match. Rescans record the previous run's missing or extra EPCs as the reason. The operator picks or types a reason when repeating a clean scan.
 - Inventory shows On hand and Dispatched. The stock table opens one product's cartons beside it on desktop. Closed sessions can be reopened or given a new CSV before dispatch. Both changes preserve scan history and start a new verification.
-- Reset demo data is available to the Test lead and restores the initial 70 cartons. The C72 discards older queued records when it detects the reset. The connected demo has a local database and dashboard. TransIP hosting and Pilot work are pending.
+- Reset demo data is available to the Administrator and restores the initial 70 cartons. The C72 discards older queued records when it detects the reset. The connected demo has a local database and dashboard. TransIP hosting and Pilot work are pending.
+- Inbound receipt tagging accepts new EPCs for an outstanding product. **Demo barcode** starts checked. Clear it to scan a receipt Product Identifier using the integrated barcode reader or camera fallback.
+- Open a count on the dashboard, scan physically from **Stock tasks** on the handheld, and review the result on the dashboard. The app also supports a simulated count for synthetic tags. Cancel an unfinished count to start fresh while keeping the scan history.
 - Node model and browser smoke checks cover the connected workflow. The physical RFID demonstration uses the optional local sample CSV. Keep the sample, database, account store, SDK and signing key outside Git.
 
 ## Historical standalone baseline

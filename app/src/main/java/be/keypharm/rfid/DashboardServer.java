@@ -14,7 +14,7 @@ final class DashboardServer implements AutoCloseable {
             "", "dashboard.html", "dashboard.mjs", "dashboard.mjs",
             "dashboard-model.mjs", "dashboard-model.mjs", "dashboard.css", "dashboard.css",
             "keypharm-logo-hd.png", "keypharm-logo-hd.png", "keypharm-logo.png", "keypharm-logo.png",
-            "InterVariable.woff2", "InterVariable.woff2");
+            "InterVariable.woff2", "InterVariable.woff2", "keypharm-favicon.svg", "keypharm-favicon.svg");
     private final AssetManager assets;
     private final Supplier<String> snapshot;
     private final String path = "/" + UUID.randomUUID() + "/";
@@ -81,7 +81,7 @@ final class DashboardServer implements AutoCloseable {
                     body = out.toByteArray();
                 }
                 status = "200 OK";
-                type = file.endsWith(".png") ? "image/png" : file.endsWith(".woff2") ? "font/woff2" :
+                type = file.endsWith(".png") ? "image/png" : file.endsWith(".svg") ? "image/svg+xml" : file.endsWith(".woff2") ? "font/woff2" :
                         (file.endsWith(".mjs") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "text/html") + "; charset=utf-8";
             }
         }

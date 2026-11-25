@@ -127,10 +127,13 @@ final class C72Reader {
         return null;
     }
 
-    private JSONObject settings(int region, int power) {
-        String device = android.provider.Settings.Secure.getString(context.getContentResolver(),
+    String deviceId() {
+        return android.provider.Settings.Secure.getString(context.getContentResolver(),
                 android.provider.Settings.Secure.ANDROID_ID);
-        return json("name", "C72 ETSI", "version", PROFILE_VERSION, "model", Build.MODEL, "build", Build.DISPLAY, "deviceId", device,
+    }
+
+    private JSONObject settings(int region, int power) {
+        return json("name", "C72 ETSI", "version", PROFILE_VERSION, "model", Build.MODEL, "build", Build.DISPLAY, "deviceId", deviceId(),
                 "firmware", sdk.getVersion(), "region", region == ETSI ? "ETSI" : "Unverified (" + region + ")",
                 "powerDbm", power > 0 ? power : JSONObject.NULL, "antenna", "Not reported");
     }

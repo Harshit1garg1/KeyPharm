@@ -3,20 +3,39 @@ export const SAMPLE = `pallet_ref,pallet_epc,carton_ref,carton_epc,sku
 KP-DEMO-01,A00000000000000000000001,Carton 01,C00000000000000000000001,Ginger
 KP-DEMO-01,A00000000000000000000001,Carton 02,C00000000000000000000002,Ginger
 KP-DEMO-01,A00000000000000000000001,Carton 03,C00000000000000000000003,Essential oil
-KP-DEMO-01,A00000000000000000000001,Carton 04,C00000000000000000000004,Pomegranate juice
+KP-DEMO-01,A00000000000000000000001,Carton 04,C00000000000000000000004,Physalis
 `;
 export const EXTRA_EPC = 'E00000000000000000000009';
 const columns = ['pallet_ref', 'pallet_epc', 'carton_ref', 'carton_epc', 'sku'];
 // Excel saves ';' instead of ',' in Dutch and Belgian locales; the header decides which one the file uses.
 const csvLine = sep => new RegExp('(?:^|' + sep + ')(?:"((?:[^"]|"")*)"|([^"' + sep + ']*))(?=' + sep + '|$)', 'g');
 export const normalizeEpc = value => String(value ?? '').trim().toUpperCase();
-const validEpc = value => /^(?:[0-9A-F]{2}){2,31}$/.test(value);
-function cells(line, row, sep) {
+export const productSku = value => value === 'Juice' ? 'Physalis' : value;
+
+export const demoSku = sku => ({Physalis:'DEMO-PHY','Tiger Balm':'DEMO-TB',Biotona:'DEMO-BIO'})[sku] ?? sku;
+
+export function receiptProducts(task) {
+  const quantities = task.quantities ?? Object.fromEntries([...new Set(task.expected.map(carton => carton.sku))]
+    .map(sku => [sku,task.expected.filter(carton => carton.sku === sku).length]));
+  const identifiers = task.identifiers ?? Object.entries(quantities).map(([sku]) => [sku,sku]);
+  return identifiers.map(([identifier,sku]) => ({identifier,sku,remaining:quantities[sku] - (task.receivedBySku?.[sku] ??
+    task.expected.filter(carton => carton.sku === sku && task.received.includes(carton.epc)).length)}));
+}
+export const validEpc = value => /^(?:[0-9A-F]{2}){2,31}$/.test(value);
+function cells(line, row, sep, size = columns.length) {
   const parts = [...line.matchAll(csvLine(sep))];
-  if (parts.map(p => p[0]).join('') !== line || parts.length !== columns.length) {
-    throw new Error('Row ' + row + ': expected five CSV fields.');
+  if (parts.map(p => p[0]).join('') !== line || parts.length !== size) {
+    throw new Error('Row ' + row + ': expected ' + (size === 5 ? 'five' : size) + ' CSV fields.');
   }
   return parts.map(p => (p[1]?.replaceAll('""', '"') ?? p[2]).trim());
+}
+
+export function parseCsvRows(text, headers) {
+  if (typeof text !== 'string') throw new Error('Choose a CSV.');
+  const [header,...rows] = text.replace(/^\uFEFF/,'').trim().split(/\r?\n/);
+  const sep = [',',';'].find(value => header.toLowerCase().split(value).map(col => col.trim()).join() === headers.join());
+  if (!sep || !rows.length) throw new Error('Use the template headers and at least one data row.');
+  return rows.map((line,index) => cells(line,index + 2,sep,headers.length));
 }
 
 // Manifest built on the handheld from one scan: the chosen pallet tag, every other kept EPC as a numbered carton.
@@ -64,7 +83,7 @@ export function parseManifest(text) {
       }
       epcs.add(epc);
       references.add(carton.toUpperCase());
-      entry.cartons.push({epc, carton, sku});
+      entry.cartons.push({epc, carton, sku:productSku(sku)});
     } catch (error) {
       errors.push(error.message);
     }
@@ -82,6 +101,23 @@ export function parseManifest(text) {
 }
 
 const palletsOf = m => m?.pallets?.length ? m.pallets : (m ? [m] : []);
+const manifestCartons = m => palletsOf(m).flatMap(pallet => pallet.cartons ?? []);
+export function outboundManifestConflict(manifest,inventory,sessions,currentId) {
+  const expected = new Set(manifestCartons(manifest).map(carton => carton.epc));
+  const shipped = new Set(inventory.filter(carton => carton.state === 'dispatched' && expected.has(carton.epc)).map(carton => carton.epc));
+  if (shipped.size) {
+    const refs = sessions.filter(session => session.dispatchedAt && session.manifest?.cartons?.some(carton => shipped.has(carton.epc)))
+      .map(session => session.testId);
+    return 'This manifest contains cartons already dispatched' + (refs.length ? ' under ' + refs.join(', ') : '') +
+      '. Change the CSV to use cartons currently on hand.';
+  }
+  const assigned = sessions.filter(session => session.id !== currentId && !session.dispatchedAt &&
+    (session.identified ? session.manifest?.cartons ?? [] : manifestCartons(session.manifest)).some(carton => expected.has(carton.epc)))
+    .map(session => session.testId);
+  if (assigned.length) return 'This manifest contains cartons assigned to ' + assigned.join(', ') +
+    '. Open or reopen the existing session to continue verification, or change the CSV if the assignment is a mistake.';
+  return '';
+}
 const tagsOf = p => [p.palletEpc, ...p.cartons.map(c => c.epc)];
 export const inManifest = (manifest, epc) => palletsOf(manifest).some(p => tagsOf(p).includes(epc));
 
@@ -156,7 +192,7 @@ export function canContinue(session, run) {
     isCurrentManifestRun(session,run) && run.state === 'Finished' && run.result?.status === 'Match');
 }
 
-export const roles = {admin:'Test lead', operator:'Operator', supervisor:'Supervisor', reviewer:'Reviewer'};
+export const roles = {admin:'Administrator', operator:'Operator', supervisor:'Supervisor', reviewer:'Reviewer'};
 const actions = {
   create: ['admin','operator'], manifest: ['admin'], 'reader-power': ['admin'], verify: ['supervisor'],
   scan: ['operator','admin'], confirm: ['operator','admin'], close: ['operator','admin','supervisor'],

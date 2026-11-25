@@ -3,6 +3,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import time
@@ -30,6 +31,9 @@ def hold(page):
     page.keyboard.up("Space")
 
 with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as directory:
+    accounts_file = Path(directory) / "accounts.json"
+    accounts_file.write_text(json.dumps({"lead":{"password":"testing123","secret":"retired"},
+        "handheld":{"password":"testing123","secret":"retired"}}),encoding="utf-8")
     env = dict(os.environ,KEYPHARM_LOCAL_DATA=directory,KEYPHARM_PORT="0")
     with subprocess.Popen(["node","tools/workspace-server.mjs"],cwd=root,env=env,
         stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True) as server:
@@ -37,18 +41,29 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
             line = server.stdout.readline().strip()
             assert line.startswith("KeyPharm workspace: "), "Local workspace failed to start"
             base = line.split(" ",2)[2]
-            accounts = json.loads((Path(directory) / "accounts.json").read_text(encoding="utf-8"))
+            accounts = json.loads(accounts_file.read_text(encoding="utf-8"))
+            assert list(accounts) == ["testing"]
+            password = accounts["testing"]["password"]
+            assert password == "testing123"
+            auth = "Basic " + base64.b64encode(("testing:" + password).encode()).decode()
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch()
-                def dashboard(account):
-                    return browser.new_page(viewport={"width":1280,"height":800},
-                        http_credentials={"username":account,"password":accounts[account]["password"]})
+                def dashboard(role):
+                    page = browser.new_page(viewport={"width":1280,"height":800},
+                        http_credentials={"username":"testing","password":password})
+                    page.goto(base)
+                    expect(page.get_by_label("Role",exact=True)).to_have_value("operator")
+                    page.get_by_label("Role",exact=True).select_option(role)
+                    return page
 
-                lead = dashboard("lead")
+                lead = dashboard("admin")
+                for retired in ("lead","operator","supervisor","viewer","handheld"):
+                    retired_auth = "Basic " + base64.b64encode((retired + ":" + password).encode()).decode()
+                    assert lead.request.get(base + "/api/workspace",headers={"Authorization":retired_auth}).status == 401
                 lead.goto(base + "/#inventory")
                 expect(lead.locator("#connection")).to_have_text("")
                 expect(lead.get_by_text("Test environment / Sample data",exact=False)).to_have_count(0)
-                expect(lead.get_by_role("row",name="Juice 20 0")).to_be_visible()
+                expect(lead.get_by_role("row",name="Physalis 20 0")).to_be_visible()
                 expect(lead.get_by_role("row",name="Tiger Balm 15 0")).to_be_visible()
                 expect(lead.get_by_role("row",name="Biotona 35 0")).to_be_visible()
                 expect(lead.get_by_role("columnheader",name="Reserved",exact=True)).to_have_count(0)
@@ -68,7 +83,7 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                     stock_row.get_by_role("rowheader",name="Biotona").bounding_box()["x"]
                 stock_row.get_by_role("cell",name="35",exact=True).first.click()
                 expect(lead.get_by_role("heading",name="Biotona cartons")).to_be_visible()
-                expect(lead.get_by_role("heading",name="Juice cartons")).to_have_count(0)
+                expect(lead.get_by_role("heading",name="Physalis cartons")).to_have_count(0)
                 stock_table = lead.locator(".workspace-inventory > .workspace-table").bounding_box()
                 details_pane = lead.locator("#inventory-cartons").bounding_box()
                 assert stock_table["width"] <= 352 and details_pane["x"] > stock_table["x"] + stock_table["width"]
@@ -98,9 +113,9 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 lead.get_by_role("button",name="Dark mode",exact=True).click()
                 assert zone.evaluate("(zone) => getComputedStyle(zone).borderTopStyle") == "dashed"
                 zone.screenshot(path=str(root / "build/csv-picker-dark.png"))
-                lead.get_by_text("Test lead settings",exact=True).click()
+                lead.get_by_text("Administrator settings",exact=True).click()
                 lead.get_by_label("Test plan").fill("KP-OUT-40 Outbound presentation")
-                lead.get_by_label("Requested C72 power (dBm)").fill("15")
+                lead.get_by_label("Requested Power (dBm)").fill("15")
                 lead.get_by_role("button",name="Save test settings").click()
                 expect(lead.locator("#workspace-message")).to_contain_text("Saved.")
                 lead.get_by_label("Test ID").fill("KP-OUT-40")
@@ -112,12 +127,13 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
 
                 supervisor = dashboard("supervisor")
                 supervisor.goto(base + "/#manage")
-                supervisor.get_by_role("button",name="Record physical check").click()
-                supervisor.get_by_label("Check notes").fill("Simulated pallet check for demonstration")
-                supervisor.get_by_role("dialog").get_by_role("button",name="Confirm").click()
-                expect(supervisor.get_by_role("cell",name="Ready to scan")).to_be_visible()
-                expect(supervisor.get_by_role("dialog",name="Physical check recorded")).to_be_visible()
-                supervisor.get_by_role("button",name="Done").click()
+                lead.get_by_role("row",name="KP-OUT-40",exact=False).get_by_role("button",name="More actions").click()
+                lead.get_by_role("button",name="Record physical check").click()
+                lead.get_by_label("Check notes").fill("Simulated pallet check for demonstration")
+                lead.get_by_role("dialog").get_by_role("button",name="Confirm").click()
+                expect(lead.get_by_role("cell",name="Ready to scan")).to_be_visible()
+                expect(lead.get_by_role("dialog",name="Physical check recorded")).to_be_visible()
+                lead.get_by_role("button",name="Done").click()
 
                 mobile = browser.new_page(viewport={"width":360,"height":740},has_touch=True)
                 mobile.route("https://handheld.test/**",serve_assets)
@@ -127,7 +143,7 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                         return {"status":0,"body":"{}"}
                     request = urllib.request.Request(base + "/api/" + path,
                         data=body.encode("utf-8") if body is not None else None,
-                        headers={"Authorization":authorization,"Content-Type":"application/json"})
+                        headers={"Authorization":authorization,"Content-Type":"application/json","X-KeyPharm-Device-Id":"a01234b56789cdef"})
                     try:
                         with urllib.request.urlopen(request,timeout=5) as response:
                             return {"status":response.status,"body":response.read().decode("utf-8")}
@@ -140,15 +156,40 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                       testTransport(path,authorization,body).then(reply =>
                         window.keypharmEvent('workspace-response',{id,...reply}));
                     },
-                    feedback(){}, publishSnapshot(){}, connectReader(){}, closeApp(){ window.closeCalls = (window.closeCalls ?? 0) + 1; }
+                    feedback(){}, publishSnapshot(){}, closeApp(){ window.closeCalls = (window.closeCalls ?? 0) + 1; },
+                    connectReader() {
+                      setTimeout(() => window.keypharmEvent('reader',{ready:true,profile:{region:'ETSI',powerDbm:20}}),0);
+                    },
+                    scanReceiptBarcode(id) { window.receiptBarcodeRequest = id; },
+                    useReceiptBarcodeCamera(id) {
+                      setTimeout(() => window.keypharmEvent('receipt-barcode',{id,value:'SUP-001'}),0);
+                    },
+                    cancelReceiptBarcode(){},
+                    startStockReader(id,powerDbm) {
+                      window.stockRead = {id,powerDbm};
+                      const reads = (window.testCountEpcs ?? [window.testStockEpc]).map(epc => ({epc}));
+                      setTimeout(() => window.keypharmEvent('reads',{id,reads}),0);
+                    },
+                    stopReader(id) {
+                      window.stockStop = id;
+                      setTimeout(() => window.keypharmEvent('ended',{id,reads:window.testCountEpcs ? [] : [{epc:'AB00FF'}]}),0);
+                    },
+                    setReaderPower(id,powerDbm) {
+                      window.appliedPowers = [...(window.appliedPowers ?? []),powerDbm];
+                      setTimeout(() => window.keypharmEvent('reader-power',{id,ok:true,profile:{region:'ETSI',powerDbm}}),0);
+                    }
                   };
                 """)
                 mobile.goto("https://handheld.test/handheld.html")
                 expect(mobile.get_by_text("Test environment / Sample data",exact=True)).to_have_count(0)
-                mobile.get_by_label("Username").fill("handheld")
-                mobile.get_by_label("Password").fill(accounts["handheld"]["password"])
+                expect(mobile.get_by_label("Username")).to_have_value("testing")
+                mobile.get_by_label("Password").fill(password)
                 mobile.get_by_role("button",name="Sign in").click()
                 expect(mobile.locator('#workspace-connection [role="status"]')).to_have_text("Synced")
+                lead.goto(base + "/#devices")
+                expect(lead.get_by_role("heading",name="RFID handheld a01234b56789cdef")).to_be_visible()
+                expect(lead.get_by_text("C72 reader",exact=False)).to_have_count(0)
+                lead.goto(base + "/#manage")
                 expect(mobile.locator(".workspace-bubble")).to_have_attribute("data-visible","false")
                 mobile.get_by_label("Role",exact=True).select_option("reviewer")
                 expect(mobile.locator('#workspace-connection [role="status"]')).to_have_text("Synced")
@@ -157,13 +198,25 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 mobile.get_by_label("Role",exact=True).select_option("operator")
                 expect(mobile.locator('#workspace-connection [role="status"]')).to_have_text("Synced")
                 expect(mobile.locator("#who")).to_have_text("Operator")
+                expect(mobile.locator("#operator-tools summary").first).to_have_text("More")
+                expect(mobile.get_by_role("heading",name="PoC test plan")).to_be_hidden()
                 heights = [mobile.locator(selector).bounding_box()["height"] for selector in
                     ["#workspace-role","[data-workspace=retry]","[data-workspace=logout]"]]
                 assert max(heights) == min(heights), heights
                 mobile.locator("#workspace-role").focus()
                 lead.get_by_label("Test ID").fill("KP-HANDOFF")
                 lead.get_by_role("button", name="Use Sample CSV").click()
-                csv = lead.evaluate("async () => (await (await fetch('api/sample')).json()).csv")
+                lead.get_by_role("button",name="Create session").click()
+                expect(lead.locator("#workspace-message")).to_contain_text("assigned to KP-OUT-40")
+                expect(lead.get_by_label("Test ID")).to_have_value("KP-HANDOFF")
+                expect(lead.get_by_role("link",name="KP-HANDOFF")).to_have_count(0)
+                csv = lead.evaluate("""async () => {
+                    const headers = {'X-KeyPharm-Role':'admin'};
+                    const { inventory, sessions } = await (await fetch('api/workspace',{headers})).json();
+                    const assigned = new Set(sessions.find(s => s.testId === 'KP-OUT-40').manifest.cartons.map(c => c.epc));
+                    const carton = inventory.find(c => c.state === 'available' && !assigned.has(c.epc));
+                    return 'pallet_ref,pallet_epc,carton_ref,carton_epc,sku\\nKP-HANDOFF,E0A1,Handoff carton,' + carton.epc + ',' + carton.sku;
+                }""")
                 with lead.expect_file_chooser() as file_chooser:
                     lead.get_by_label("Choose a CSV").click()
                 file_chooser.value.set_files({"name":"browser-manifest.csv","mimeType":"text/csv","buffer":csv.encode()})
@@ -171,7 +224,9 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 expect(lead.get_by_role("button",name="Use Sample CSV")).to_have_attribute("aria-pressed","false")
                 lead.get_by_role("button", name="Create session").click()
                 expect(mobile.get_by_role("button",name="KP-HANDOFF",exact=False)).to_be_visible(timeout=12000)
-                lead.get_by_role("row",name="KP-HANDOFF",exact=False).get_by_role("button",name="Change CSV").click()
+                handoff_row = lead.get_by_role("row",name="KP-HANDOFF",exact=False)
+                handoff_row.get_by_role("button",name="More actions").click()
+                handoff_row.get_by_role("button",name="Change CSV").click()
                 drop = lead.get_by_role("dialog").locator("[data-csv-drop]")
                 drop.evaluate("""(zone) => {
                     const transfer = new DataTransfer();
@@ -208,6 +263,13 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 hold(mobile)
                 expect(mobile.locator("#scan-results")).to_contain_text("Hold")
                 expect(mobile.get_by_role("button",name="Continue",exact=True)).to_be_disabled()
+                mobile.get_by_role("button",name="Scan results").click()
+                expect(mobile.get_by_role("heading",name="Scan attempts")).to_be_visible()
+                expect(mobile.get_by_role("list",name="Test progress")).to_be_visible()
+                expect(mobile.locator(".steps li")).to_have_count(4)
+                expect(mobile.get_by_text("Test setup",exact=True)).to_have_count(0)
+                expect(mobile.get_by_role("button",name="Export this test")).to_be_visible()
+                expect(mobile.get_by_text("Session log",exact=False).first).to_be_visible()
                 mobile.reload()
                 mobile.get_by_role("button",name="Open carton scanner").click()
                 expect(mobile.get_by_label("Demo reads")).to_have_value("Clean match")
@@ -239,19 +301,35 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 lead.get_by_role("button",name="Refresh records").click()
                 closed_row = lead.get_by_role("row",name="KP-OUT-40",exact=False)
                 expect(closed_row.get_by_role("cell", name="Closed",exact=True)).to_be_visible()
+                lead.get_by_label("Role",exact=True).select_option("supervisor")
+                expect(closed_row.get_by_role("button",name="Dispatch",exact=True)).to_be_disabled()
+                lead.get_by_label("Role",exact=True).select_option("admin")
+                expect(closed_row.get_by_role("button",name="Dispatch",exact=True)).to_be_enabled()
                 expect(lead.get_by_role("button",name="Reopen session")).to_have_count(0)
-                closed_row.get_by_role("button",name="Open closed session").click()
+                more = closed_row.get_by_role("button",name="More actions")
+                more.click()
+                floating = closed_row.get_by_role("group",name="Actions for KP-OUT-40")
+                expect(floating).to_be_visible()
+                expect(floating.get_by_role("button",name="Approve dispatch")).to_be_visible()
+                assert closed_row.evaluate("row => row.cells.length") == 7
+                more.press("Escape")
+                expect(floating).to_be_hidden()
+                more.click()
                 expect(lead.get_by_role("button",name="Reopen session")).to_be_visible()
                 lead.get_by_role("button",name="Reopen session").click()
                 lead.get_by_role("dialog",name="Reopen session").get_by_role("button",name="Cancel").click()
-                closed_row.get_by_role("button",name="Hide session actions").click()
+                expect(floating).to_be_hidden()
                 dispatch = lead.get_by_role("button",name="Confirm dispatch")
                 expect(dispatch).to_be_disabled()
-                expect(lead.get_by_role("checkbox",name="Select KP-OUT-40 for dispatch")).to_be_disabled()
-                viewer = dashboard("viewer")
+                expect(closed_row.get_by_role("button",name="Dispatch",exact=True)).to_be_enabled()
+                closed_row.get_by_role("button",name="Dispatch",exact=True).click()
+                direct = lead.get_by_role("dialog",name="Confirm dispatch")
+                expect(direct).to_contain_text("This records approval")
+                direct.get_by_role("button",name="Cancel").click()
+                expect(lead.get_by_role("checkbox",name="Select KP-OUT-40 for dispatch")).to_be_enabled()
+                viewer = dashboard("reviewer")
                 viewer.goto(base + "/#manage")
-                viewer.get_by_role("button",name="Open closed session").click()
-                viewer.get_by_role("button",name="Approve dispatch").click()
+                viewer.get_by_role("row",name="KP-OUT-40",exact=False).get_by_role("button",name="Approve dispatch",exact=True).click()
                 viewer.get_by_role("dialog",name="Approve dispatch").get_by_role("button",name="Confirm").click()
                 expect(viewer.get_by_role("dialog",name="Dispatch approved")).to_be_visible()
                 viewer.get_by_role("button",name="Done").click()
@@ -260,23 +338,26 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 lead.get_by_role("checkbox",name="Select all dispatchable sessions").check()
                 expect(lead.get_by_role("checkbox",name="Select KP-OUT-40 for dispatch")).to_be_checked()
                 dispatch.click()
+                lead.get_by_role("dialog",name="Confirm dispatch").get_by_role("button",name="Cancel").click()
+                closed_row.get_by_role("button",name="Dispatch",exact=True).click()
+                expect(lead.get_by_role("dialog",name="Confirm dispatch").get_by_role("listitem")).to_have_text("KP-OUT-40")
                 with lead.expect_request("**/api/dispatch"):
                     lead.get_by_role("dialog").get_by_role("button",name="Confirm").click()
                 expect(lead.get_by_role("dialog",name="Dispatch recorded")).to_be_visible()
                 lead.get_by_role("button",name="Done").click()
                 expect(lead.get_by_role("cell",name="Dispatched")).to_be_visible()
                 supervisor.get_by_role("link",name="Inventory").click()
-                expect(supervisor.get_by_role("row",name="Juice 6 14")).to_be_visible()
+                expect(supervisor.get_by_role("row",name="Physalis 6 14")).to_be_visible()
                 expect(supervisor.get_by_role("row",name="Tiger Balm 5 10")).to_be_visible()
                 expect(supervisor.get_by_role("row",name="Biotona 19 16")).to_be_visible()
                 viewer.reload()
                 expect(viewer.get_by_role("cell",name="Dispatched")).to_be_visible()
                 expect(viewer.get_by_role("button",name="Create session")).to_have_count(0)
-                viewer_auth = base64.b64encode(("viewer:" + accounts["viewer"]["password"]).encode()).decode()
+                reviewer_headers = {"Authorization":auth,"X-KeyPharm-Role":"reviewer"}
                 assert viewer.request.post(base + "/api/session",data={"testId":"Forbidden"},
-                    headers={"Authorization":"Basic " + viewer_auth}).status == 403
+                    headers=reviewer_headers).status == 403
                 assert viewer.request.post(base + "/api/reset",data={"confirm":"RESET","generation":0},
-                    headers={"Authorization":"Basic " + viewer_auth}).status == 403
+                    headers=reviewer_headers).status == 403
                 expect(viewer.get_by_role("button",name="Reset demo data")).to_have_count(0)
 
                 mobile.evaluate("window.keypharmEvent('back',{})")
@@ -295,17 +376,16 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 expect(mobile.get_by_role("dialog",name="Demo data reset")).to_be_visible()
                 mobile.get_by_role("button",name="Done").click()
                 expect(mobile.get_by_role("button",name="KP-HANDOFF",exact=False)).to_have_count(0)
-                expect(mobile.locator("#who")).to_have_text("Test lead")
+                expect(mobile.locator("#who")).to_have_text("Administrator")
                 assert mobile.evaluate("window.closeCalls ?? 0") == 0
                 mobile.evaluate("window.keypharmEvent('back',{})")
                 assert mobile.evaluate("window.closeCalls") == 1
                 supervisor.get_by_role("button",name="Refresh records").click()
-                expect(supervisor.get_by_role("row",name="Juice 20 0")).to_be_visible()
+                expect(supervisor.get_by_role("row",name="Physalis 20 0")).to_be_visible()
                 expect(supervisor.get_by_role("row",name="Tiger Balm 15 0")).to_be_visible()
                 expect(supervisor.get_by_role("row",name="Biotona 35 0")).to_be_visible()
-                lead_auth = base64.b64encode(("lead:" + accounts["lead"]["password"]).encode()).decode()
                 assert lead.request.post(base + "/api/sync",data={"generation":0},
-                    headers={"Authorization":"Basic " + lead_auth}).status == 409
+                    headers={"Authorization":auth,"X-KeyPharm-Role":"admin"}).status == 409
                 lead.reload()
                 expect(lead.get_by_text("No sessions yet.")).to_be_visible()
                 settings = lead.locator("#workspace-lead-settings")
@@ -341,8 +421,192 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 mobile.get_by_role("button",name="Sync now").click()
                 expect(mobile.get_by_role("button",name="KP-UNSYNCED-OLD",exact=False)).to_have_count(0,timeout=15000)
                 expect(lead.get_by_text("No sessions yet.")).to_be_visible()
+                lead.get_by_role("button",name="Done").click()
+
+                receiving = dashboard("operator")
+                receiving.goto(base + "/#inbound")
+                expect(receiving.get_by_role("heading",name="KP-IN-40")).to_be_visible()
+                expect(receiving.get_by_role("button",name="Run simulation")).to_have_count(0)
+                generation = receiving.evaluate("async () => (await (await fetch('/api/workspace')).json()).generation")
+                assert receiving.request.post(base + "/api/stock-action",data={"action":"scan","scenario":"partial","generation":generation},
+                    headers={"Authorization":auth,"X-KeyPharm-Role":"operator"}).status == 403
+                mobile.get_by_label("Role",exact=True).select_option("operator")
+                mobile.get_by_role("button",name="Stock tasks").click(timeout=15000)
+                expect(mobile.get_by_role("heading",name="Select product")).to_be_visible()
+                for received in range(1,41):
+                    mobile.get_by_role("button",name="Scan barcode").click()
+                    mobile.get_by_role("button",name="Simulate EPC").click()
+                    mobile.get_by_role("button",name="Confirm",exact=True).click()
+                    tagged = mobile.get_by_role("dialog",name="Carton tagged")
+                    expect(tagged.get_by_role("heading",name="Tagged cartons")).to_be_visible()
+                    if received == 40:
+                        expect(tagged.get_by_text("Receipt complete.")).to_be_visible()
+                    tagged.get_by_role("button",name="Done").click()
+                    expect(mobile.get_by_text(f"{received} received · {40-received} outstanding",exact=True)).to_be_visible()
+                receiving.get_by_role("button",name="Refresh records").click()
+                expect(receiving.get_by_text("Storage · Completed",exact=False)).to_be_visible()
+                expect(receiving.get_by_role("button",name="Confirm 40 cartons")).to_have_count(0)
+                receiving.get_by_role("link",name="Stock counts").click()
+                receiving.get_by_label("Location").select_option("Storage")
+                receiving.get_by_role("button",name="Open count").click()
+                expect(receiving.get_by_role("heading",name="Count Storage")).to_be_visible()
+                expect(receiving.get_by_role("button",name="Run simulation")).to_have_count(0)
+                mobile.get_by_role("button",name="Sync now").click()
+                expect(mobile.get_by_role("option",name="Count Storage")).to_have_count(1)
+                mobile.get_by_label("Task").select_option(label="Count Storage")
+                count_epcs = [f"D5{index:022X}" for index in range(1,41)]
+                mobile.evaluate("(epcs) => { window.testCountEpcs = [...epcs,epcs[0]]; }",count_epcs)
+                mobile.get_by_role("button",name="Start count scan").click()
+                transport["online"] = False
+                mobile.get_by_role("button",name="Stop count scan").click()
+                retry_count = mobile.get_by_role("button",name="Retry count upload")
+                expect(retry_count).to_be_visible()
+                transport["online"] = True
+                retry_count.click()
+                expect(mobile.get_by_text("40 matched · 0 missing · 0 extra")).to_be_visible()
+                count_run = receiving.evaluate("""async () => (await (await fetch('/api/stock-workflows')).json())
+                    .tasks.find(task => task.type === 'count').runs.at(-1)""")
+                assert count_run["source"] == "C72 hardware" and count_run["observations"][count_epcs[0]] == 2
+                mobile.evaluate("delete window.testCountEpcs")
+                receiving.get_by_role("button",name="Refresh records").click()
+                expect(receiving.get_by_text("40 expected · 40 observed · 40 matched",exact=True)).to_have_count(1)
+                mobile.evaluate("window.keypharmEvent('back',{})")
+
+                supervisor.goto(base + "/#counts")
+                supervisor.get_by_role("button",name="Confirm count review").click()
+                supervisor.get_by_role("dialog").get_by_role("button",name="Confirm",exact=True).click()
+                expect(supervisor.get_by_role("dialog",name="Count reviewed")).to_be_visible()
+                supervisor.get_by_role("button",name="Done").click()
+                lead.goto(base + "/#inbound")
+                lead.get_by_role("button",name="Prepare outbound pallet").click()
+                lead.get_by_role("dialog").get_by_role("button",name="Confirm",exact=True).click()
+                expect(lead.get_by_role("dialog",name="Pallet prepared")).to_be_visible()
+                lead.get_by_role("button",name="Done").click()
+                expect(mobile.get_by_role("button",name="KP-RECEIVED-40",exact=False)).to_be_visible(timeout=15000)
+                lead.get_by_role("link",name="Inventory",exact=True).click()
+                lead.locator("#inventory-location").select_option("Storage")
+                expect(lead.get_by_role("row",name="Physalis 14 0")).to_be_visible()
+                received_carton = lead.locator('[data-carton="D50000000000000000000001"]')
+                expect(received_carton).to_have_text(re.compile(r"^Physalis-(XS|S|M|L)-\d+$"))
+                carton_label = received_carton.inner_text()
+                received_carton.click()
+                expect(lead.get_by_role("heading",name=f"{carton_label} history")).to_be_visible()
+                expect(lead.get_by_text("Received",exact=True)).to_be_visible()
+                expect(lead.get_by_label("Destination").locator("option")).to_have_text(["Receiving","Storage (current)","Staging","Hold"])
+                expect(lead.get_by_label("Destination").locator('option[value="Storage"][disabled]')).to_have_count(1)
+                expect(lead.get_by_role("button",name="Place on hold")).to_have_count(0)
+                lead.get_by_label("Destination").select_option("Hold")
+                lead.get_by_label("Reason").fill("Check carton label")
+                lead.get_by_role("button",name="Move carton").click()
+                lead.get_by_role("dialog",name="Place on hold").get_by_role("button",name="Confirm",exact=True).click()
+                expect(received_carton).to_have_count(0)
+                lead.locator("#inventory-location").select_option("Hold")
+                expect(lead.get_by_role("row",name=re.compile(rf"{re.escape(carton_label)}.*Held"))).to_be_visible()
+                lead.goto(base + "/#manage")
+                lead.get_by_text("Administrator settings",exact=True).click()
+                lead.get_by_label("Requested Power (dBm)").fill("17")
+                lead.get_by_role("button",name="Save test settings").click()
+                expect(lead.locator("#workspace-message")).to_contain_text("Saved.")
+                lead_headers = {"Authorization":auth,"X-KeyPharm-Role":"admin"}
+                workspace = lead.request.get(base + "/api/workspace",headers=lead_headers).json()
+                response = lead.request.post(base + "/api/session",headers=lead_headers,data={
+                    "generation":workspace["generation"],"testId":"KP-POWER","location":"Staging","source":"C72 hardware"
+                })
+                assert response.status == 201, response.text()
+                mobile.get_by_label("Role",exact=True).select_option("reviewer")
+                mobile.get_by_role("button",name="KP-POWER",exact=False).click(timeout=15000)
+                expect(mobile.get_by_text("Recommended: 17 dBm",exact=True)).to_be_visible()
+                mobile.wait_for_function("() => window.appliedPowers?.at(-1) === 17")
+                lead.get_by_label("Requested Power (dBm)").fill("")
+                lead.get_by_role("button",name="Save test settings").click()
+                expect(lead.locator("#workspace-message")).to_contain_text("Saved.")
+                expect(mobile.get_by_text("Recommended: 30 dBm",exact=True)).to_be_visible(timeout=15000)
+                mobile.wait_for_function("() => window.appliedPowers?.at(-1) === 30")
+                lead.get_by_role("button",name="Refresh records").click()
+                power_row = lead.get_by_role("row",name="KP-POWER",exact=False)
+                power_row.get_by_role("button",name="More actions").click()
+                lead.get_by_role("button",name="Change recommended power").click()
+                power_dialog = lead.get_by_role("dialog",name="Change recommended power")
+                power_dialog.get_by_label("Recommended Power (dBm)").fill("21")
+                power_dialog.get_by_role("button",name="Confirm").click()
+                expect(power_row).to_contain_text("Recommended: 21 dBm")
+                expect(mobile.get_by_text("Recommended: 21 dBm",exact=True)).to_be_visible(timeout=15000)
+                mobile.wait_for_function("() => window.appliedPowers?.at(-1) === 21")
+                expect(mobile.get_by_role("button",name="Save power")).to_have_count(0)
+                mobile.get_by_label("Role",exact=True).select_option("admin")
+                transport["online"] = False
+                mobile.get_by_label("Recommended Power (dBm)").fill("23")
+                mobile.get_by_role("button",name="Save power").click()
+                mobile.wait_for_function("() => window.appliedPowers?.at(-1) === 23")
+                transport["online"] = True
+                expect(mobile.locator('#workspace-connection [role="status"]')).to_have_text("Synced",timeout=15000)
+                lead.get_by_role("button",name="Refresh records").click()
+                expect(power_row).to_contain_text("Recommended: 23 dBm")
+                lead.goto(base + "/#inbound")
+                lead.get_by_text("Import receipt",exact=True).click()
+                lead.get_by_label("Receipt CSV").set_input_files({
+                    "name":"supplier-receipt.csv","mimeType":"text/csv",
+                    "buffer":(b"receipt_ref,source_ref,destination_location,sku,expected_cartons,carton_id,epc,product_identifier\n"
+                              b"KP-IN-SKU,Supplier,Receiving,Physalis,2,,,SUP-001\n"),
+                })
+                lead.get_by_role("button",name="Preview receipt").click()
+                expect(lead.get_by_text("SUP-001 · Physalis · 2",exact=True)).to_be_visible()
+                lead.get_by_role("button",name="Create receipt").click()
+                expect(lead.get_by_role("heading",name="KP-IN-SKU")).to_be_visible()
+                mobile.evaluate("window.keypharmEvent('back',{})")
+                mobile.get_by_label("Role",exact=True).select_option("operator")
+                mobile.get_by_role("button",name="Stock tasks").click(timeout=15000)
+                expect(mobile.get_by_role("option",name="KP-IN-SKU")).to_have_count(1,timeout=15000)
+                mobile.get_by_label("Task").select_option(label="KP-IN-SKU")
+                expect(mobile.get_by_label("Product Identifier")).to_have_value("SUP-001")
+                expect(mobile.get_by_label("Demo barcode")).to_be_checked()
+                mobile.get_by_label("Demo barcode").uncheck()
+                mobile.get_by_role("button",name="Scan barcode").click()
+                expect(mobile.get_by_role("button",name="Scanning barcode…")).to_be_disabled()
+                mobile.get_by_role("button",name="Use camera").click()
+                mobile.evaluate("window.testStockEpc = 'AB0001'")
+                mobile.get_by_role("button",name="Scan EPC",exact=True).click()
+                assert mobile.evaluate("window.stockRead.powerDbm") == 10
+                expect(mobile.get_by_text("AB0001",exact=True)).to_be_visible()
+                assert mobile.evaluate("window.stockStop === window.stockRead.id")
+                expect(mobile.get_by_text("AB00FF",exact=True)).to_have_count(0)
+                pending_inventory = lead.request.get(base + "/api/workspace",headers=lead_headers).json()["inventory"]
+                assert all(carton["epc"] != "AB0001" for carton in pending_inventory)
+                mobile.get_by_role("button",name="Remove scanned tag").click()
+                expect(mobile.get_by_text("AB0001",exact=True)).to_have_count(0)
+                expect(mobile.get_by_role("button",name="Confirm",exact=True)).to_have_count(0)
+                mobile.get_by_role("button",name="Scan EPC",exact=True).click()
+                mobile.get_by_role("button",name="Confirm",exact=True).click()
+                tagged = mobile.get_by_role("dialog",name="Carton tagged")
+                expect(tagged.get_by_text("AB0001",exact=True)).to_be_visible()
+                saved_inventory = lead.request.get(base + "/api/workspace",headers=lead_headers).json()["inventory"]
+                assert any(carton["epc"] == "AB0001" and carton["sku"] == "Physalis" for carton in saved_inventory)
+                tagged.get_by_role("button",name="Done").click()
+                mobile.get_by_label("Demo barcode").check()
+                mobile.get_by_role("button",name="Scan barcode").click()
+                mobile.get_by_role("button",name="Scan EPC",exact=True).click()
+                expect(mobile.locator("#notice")).to_have_text("This EPC is already tagged to Physalis in this task.")
+                mobile.get_by_label("Role",exact=True).select_option("admin")
+                expect(mobile.get_by_label("Stock Task Power (dBm)")).to_have_value("10")
+                mobile.get_by_label("Stock Task Power (dBm)").fill("12")
+                mobile.get_by_role("button",name="Save power").click()
+                expect(mobile.locator('#workspace-connection [role="status"]')).to_have_text("Synced",timeout=15000)
+                mobile.get_by_role("button",name="Untag carton",exact=True).click()
+                mobile.get_by_role("dialog",name="Untag carton").get_by_label("Reason").fill("Wrong carton")
+                mobile.get_by_role("button",name="Confirm untag").click()
+                expect(mobile.get_by_role("dialog",name="Carton untagged")).to_be_visible()
+                mobile.get_by_role("button",name="Done").click()
+                expect(mobile.get_by_text("AB0001",exact=True)).to_have_count(0)
+                expect(mobile.locator('#workspace-connection [role="status"]')).to_have_text("Synced",timeout=15000)
+                mobile.get_by_label("Role",exact=True).select_option("operator")
+                expect(mobile.locator("#who")).to_have_text("Operator")
+                mobile.get_by_role("button",name="Scan barcode").click()
+                mobile.get_by_role("button",name="Scan EPC",exact=True).click()
+                assert mobile.evaluate("window.stockRead.powerDbm") == 12
+                mobile.get_by_role("button",name="Confirm",exact=True).click()
+                expect(mobile.get_by_role("dialog",name="Carton tagged")).to_be_visible()
                 browser.close()
-                print("Connected browser flow passed: role handoff, offline scan, manifest replacement, dispatch, stock, and reset.")
+                print("Connected browser flow passed: offline outbound, reset, paired receiving, count review, carton history and C72 handoff.")
         finally:
             server.terminate()
             server.wait(timeout=10)

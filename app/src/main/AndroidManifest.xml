@@ -1,6 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
     <application android:label="Keypharm RFID POC" android:icon="@drawable/ic_launcher"
         android:roundIcon="@drawable/ic_launcher" android:allowBackup="false" android:theme="@style/Theme.Keypharm"
         android:networkSecurityConfig="@xml/workspace_network" android:enableOnBackInvokedCallback="false">
@@ -10,6 +12,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name="be.keypharm.rfid.CameraBarcodeActivity" android:exported="false" android:screenOrientation="portrait" />
         <provider android:name=".EvidenceProvider" android:authorities="${applicationId}.evidence"
             android:exported="false" android:grantUriPermissions="true" />
     </application>
