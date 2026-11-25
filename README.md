@@ -1,8 +1,12 @@
 # Keypharm RFID POC
 
-Offline C72 handheld workflow with a read-only web dashboard. Current version 0.8.6 (versionCode 20); state, decisions and file map are in [context.md](context.md). Use Simulation to demonstrate the workflow with sample data, or C72 hardware to read physical tags from a matching manifest.
+KeyPharm RFID PoC for the C72 and a local PC dashboard. The Android app is version 0.9.4 (version code 25). Use Simulation to rehearse with sample data or C72 hardware to scan physical tags from a matching manifest. See [context.md](context.md) for the latest handoff.
 
-## Run the demo
+## Run the connected demo
+
+Run `node tools/workspace-server.mjs` with Node 24 and open the dashboard at `http://127.0.0.1:8790`. The [connected demo guide](docs/connected-poc.md) covers accounts, setup, C72 sync, session approval, batch dispatch, inventory, and reset.
+
+## Run the standalone handheld demo
 
 1. Open **Keypharm RFID POC** on the C72. Create a test session and choose **Simulation**.
 2. As **Test lead**, enter the day's planned tests under **PoC test plan** (one per line: Test ID, then description). New sessions pre-fill the first test not yet run. Tap the name chip at the top right and enter **Your name** (it signs every record and is remembered for next time); the same menu switches the role. Each session screen shows a four-step strip (Cartons, Verify, Scan, Close) and one card for the step due now; when that step belongs to another role, the card offers **Switch to …**. Load the sample manifest as **Test lead**, record physical verification as **Supervisor**, then scan as **Operator**. Everything else (setup, carton list, reader, log, export) sits folded under **Details**.

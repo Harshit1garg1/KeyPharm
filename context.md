@@ -1,5 +1,16 @@
 # Keypharm RFID POC handoff
 
+## Current Harshit-Dev handoff
+
+Updated 25 November 2026. Android 0.9.4 (version code 25) was installed and launched on the C72. Start the PC-backed demo with `node tools/workspace-server.mjs` and follow the [connected demo guide](docs/connected-poc.md). The C72 cache holds records through outages and syncs with the local SQLite workspace after reconnecting. The connected demo uses a single handheld sign-in and a role selector between workflow steps.
+
+- The Test lead prepares sessions and manifests. The Supervisor records the physical check. The Operator scans the pallet, then the cartons, and confirms a clean match. The Test lead or Reviewer approves dispatch from the dashboard. The Test lead or Supervisor selects approved sessions and confirms dispatch in one batch.
+- Inventory shows On hand and Dispatched. The stock table opens one product's cartons beside it on desktop. Closed sessions can be reopened or given a new CSV before dispatch. Both changes preserve scan history and start a new verification.
+- Reset demo data is available to the Test lead and restores the initial 70 cartons. The C72 discards older queued records when it detects the reset. The connected demo has a local database and dashboard. TransIP hosting and Pilot work are pending.
+- Node model and browser smoke checks cover the connected workflow. The physical RFID demonstration uses the optional local sample CSV. Keep the sample, database, account store, SDK and signing key outside Git.
+
+## Historical standalone baseline
+
 Updated 24 November 2026. Work continues on `Naveen-Dev`, which carries GitHub `main` up to `de89561` (PRs #1 to #6 merged, tag `v0.8.2`). The Android build is 0.8.6 (versionCode 20): 0.8.5 is Harshit's dark records dashboard (PR #8), 0.8.6 adds the 0.8.4 design-gap fixes on top. 0.8.2 merged the separate **Keypharm RFID POC Reset** app (`be.keypharm.rfid.poc.reset`, built by Codex on 23 November 2026) back into the single Dev app (`be.keypharm.rfid.poc.dev`): the Dev app now has **Reset all local data**, and the Reset package is retired. On 24 November 2026 0.8.2 was installed over the Dev app on the C72 (existing sessions kept, reader ready at ETSI / 30 dBm) and the Reset app was uninstalled, so the C72 carries only the Dev app. The older `be.keypharm.rfid.poc` install and its local records were removed on 23 November 2026 at the user's request. [HANDOVER.md](HANDOVER.md) has Harshit's earlier handover notes. Docs were brought up to date on 24 November 2026: [docs/prd-poc.md](docs/prd-poc.md) holds scope, built status per requirement and milestones; [docs/questionaire.md](docs/questionaire.md) the open questions; README the demo and build steps. `docs/architecture.md`, the Kotlin plan and the research notes are marked as not adopted or historical.
 
 ## Requirements and decisions

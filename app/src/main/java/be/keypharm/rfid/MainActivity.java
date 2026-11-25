@@ -13,6 +13,8 @@ import android.view.KeyEvent;
 import android.webkit.*;
 import org.json.JSONObject;
 import java.io.*;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Set;
@@ -25,9 +27,11 @@ public final class MainActivity extends Activity {
     private static final int PICK_MANIFEST = 10;
     private static final int SAVE_TEMPLATE = 11;
     private static final Set<String> ASSETS = Set.of(
-            "/handheld.html", "/handheld.mjs", "/model.mjs", "/qrcode-generator.mjs", "/style.css", "/keypharm-logo.png", "/keypharm-logo-hd.png");
+            "/handheld.html", "/handheld.mjs", "/model.mjs", "/workspace-client.mjs", "/qrcode-generator.mjs", "/style.css",
+            "/keypharm-logo.png", "/keypharm-logo-hd.png");
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService hardware = Executors.newSingleThreadExecutor();
+    private final ExecutorService workspaceNetwork = Executors.newSingleThreadExecutor();
     private WebView web;
     private C72Reader reader;
     private int activeKey = -1;
@@ -102,6 +106,10 @@ public final class MainActivity extends Activity {
         return true;
     }
 
+    @Override public void onBackPressed() {
+        event("back", new JSONObject());
+    }
+
     private void event(String type, JSONObject payload) {
         main.post(() -> {
             if (!destroyed) web.evaluateJavascript("window.keypharmEvent?.(" + JSONObject.quote(type) + "," + payload + ")", null);
@@ -161,11 +169,14 @@ public final class MainActivity extends Activity {
         main.removeCallbacksAndMessages(null);
         hardware.execute(reader::disconnect);
         hardware.shutdown();
+        workspaceNetwork.shutdownNow();
         web.destroy();
         super.onDestroy();
     }
 
     private final class Bridge {
+        @JavascriptInterface public void closeApp() { main.post(MainActivity.this::finish); }
+
         @JavascriptInterface public void connectReader() {
             hardware.execute(() -> {
                 if (hardwareRun == null) event("reader", reader.connect());
@@ -230,6 +241,46 @@ public final class MainActivity extends Activity {
                     event("dashboard", C72Reader.json("url", dashboard == null ? "" : dashboard.url()));
                 } catch (IOException error) {
                     event("dashboard", C72Reader.json("message", "Dashboard could not start: " + error.getMessage()));
+                }
+            });
+        }
+
+        @JavascriptInterface public void workspaceRequest(String id, String path, String authorization, String body) {
+            if (!Set.of("login", "workspace", "sample", "physical-sample", "sync", "settings", "reset").contains(path)) return;
+            workspaceNetwork.execute(() -> {
+                HttpURLConnection connection = null;
+                try {
+                    connection = (HttpURLConnection) new URL("http://127.0.0.1:8790/api/" + path).openConnection();
+                    connection.setConnectTimeout(2500);
+                    connection.setReadTimeout(4000);
+                    connection.setInstanceFollowRedirects(false);
+                    connection.setRequestProperty("Authorization", authorization);
+                    if (body != null) {
+                        connection.setDoOutput(true);
+                        connection.setRequestMethod("POST");
+                        connection.setRequestProperty("Content-Type", "application/json");
+                        try (OutputStream output = connection.getOutputStream()) {
+                            output.write(body.getBytes(StandardCharsets.UTF_8));
+                        }
+                    }
+                    int status = connection.getResponseCode();
+                    InputStream response = status < 400 ? connection.getInputStream() : connection.getErrorStream();
+                    String content = "{}";
+                    if (response != null) {
+                        try (InputStream input = response; ByteArrayOutputStream result = new ByteArrayOutputStream()) {
+                            byte[] buffer = new byte[4096];
+                            for (int count; (count = input.read(buffer)) >= 0;) {
+                                if (result.size() + count > 4_000_000) throw new IOException("Workspace response too large");
+                                result.write(buffer, 0, count);
+                            }
+                            content = result.toString(StandardCharsets.UTF_8.name());
+                        }
+                    }
+                    event("workspace-response", C72Reader.json("id", id, "status", status, "body", content));
+                } catch (IOException error) {
+                    event("workspace-response", C72Reader.json("id", id, "status", 0, "body", "{}"));
+                } finally {
+                    if (connection != null) connection.disconnect();
                 }
             });
         }

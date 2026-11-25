@@ -1,16 +1,27 @@
-import {SAMPLE, EXTRA_EPC, normalizeEpc, parseManifest, compare, scanDelta, canContinue, canClose,
+import {SAMPLE, EXTRA_EPC, normalizeEpc, parseManifest, compare, scanDelta, canContinue, canClose, isCurrentManifestRun,
   roles, permits, allocationTotal, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary,
   parsePlan, planCoverage, closePlanErrors, lockPallet, lockTo, otherPallet, inManifest, manifestCsv, missingSku, unexported,
   matchesQuery, skuBreakdown, statusLabel, manifestFor} from './model.mjs';
 import qrcode from './qrcode-generator.mjs';
+import {workspaceClient} from './workspace-client.mjs';
 
 const root = document.querySelector('#app');
 const who = document.querySelector('#who');
 const notice = document.querySelector('#notice');
 const bridge = window.KeypharmAndroid;
+const connected = workspaceClient(bridge);
+const connectionPanel = document.querySelector('#workspace-connection');
+const workflowDialog = document.querySelector('#workflow-confirmation');
+document.querySelector('#workflow-dismiss').addEventListener('click',() => workflowDialog.close());
+function confirmWorkflow(title, detail) {
+  if (!connected || workflowDialog.open) return;
+  workflowDialog.querySelector('h2').textContent = title;
+  workflowDialog.querySelector('p').textContent = detail;
+  workflowDialog.showModal();
+}
 const liveSample = bridge?.liveSampleManifest?.() ?? '';
 const liveSampleName = 'KP-LIVE-SORTED-01.csv';
-const key = 'keypharm-poc-v1';
+const key = connected ? 'keypharm-connected-records-v1' : 'keypharm-poc-v1';
 const metadata = {
   testId:'Test ID', location:'Location', level:'Storage level', product:'Product mix', palletType:'Pallet type',
   label:'Label type and size', placement:'Label position and orientation', wrapping:'Wrapping',
@@ -24,6 +35,10 @@ const defaults = {
 const now = () => new Date().toISOString();
 // The person holding the device signs every record (operator, verifier, sign-off); roles stay local and unauthenticated.
 const actor = () => {
+  if (connected) {
+    if (!connected.auth) throw new Error('Sign in to record a result.');
+    return connected.auth.user.name;
+  }
   if (!store.person) {
     document.querySelector('#who-menu')?.setAttribute('open','');
     throw new Error('Enter your name in the menu at the top right before recording anything.');
@@ -57,7 +72,18 @@ try {
 } catch {
   storageError = true;
 }
-let role = 'operator';
+let role = connected?.auth?.user.role ?? 'operator';
+const canCreate = () => connected ? role === 'admin' : permits(role,'create');
+let refreshConnected = () => {};
+const resetDialog = document.createElement('dialog');
+resetDialog.className = 'workflow-dialog';
+resetDialog.setAttribute('aria-labelledby','reset-demo-title');
+resetDialog.innerHTML = '<form method="dialog" class="stack"><h2 id="reset-demo-title">Reset demo data</h2>' +
+  '<p>Clear sessions, scans and test settings on the C72 and dashboard. Restore starting stock.</p>' +
+  field('confirm','Type RESET','','required pattern="RESET" autocomplete="off"') +
+  '<div class="row"><button value="cancel" class="secondary" formnovalidate>Cancel</button>' +
+  '<button value="reset">Reset demo data</button></div></form>';
+if (connected) document.body.append(resetDialog);
 let selected;
 let view = 'sessions';
 let pendingImport;
@@ -74,7 +100,7 @@ let simulatedKeys = false;
 let query = ''; // session search on the home screen (FR-33)
 let builder; // manifest generator: {tags:{epc:{count,rssi}}, capture, palletRef, sku}
 // The open screen and half-typed form fields survive re-renders and restarts (records stay in `key`).
-const uiKey = 'keypharm-poc-ui-v1';
+const uiKey = connected ? 'keypharm-connected-ui-v1' : 'keypharm-poc-ui-v1';
 let ui = {drafts:{}};
 try { ui = {drafts:{}, ...JSON.parse(localStorage.getItem(uiKey) ?? '{}')}; } catch {}
 function saveUi() {
@@ -93,6 +119,7 @@ function clearDrafts(prefix) {
 
 const session = () => store.sessions.find(entry => entry.id === selected);
 const latest = s => s?.runs.at(-1);
+const latestCurrentRun = s => s?.runs.findLast(run => isCurrentManifestRun(s,run));
 function feedback(message, error = false) {
   notice.textContent = message;
   notice.toggleAttribute('data-error',error);
@@ -107,6 +134,7 @@ function save() {
   if (storageError) throw new Error('Local records are unavailable. Reopen the app before making changes.');
   localStorage.setItem(key,JSON.stringify(store));
   publish();
+  if (connected) queueMicrotask(refreshConnected);
 }
 function commit(change) {
   const previous = structuredClone(store);
@@ -140,6 +168,7 @@ try {
 
 // The name in the header signs every record (see actor()); roles stay local.
 function identityMenu(open) {
+  if (connected) return connected.auth ? '<span class="mode">' + escape(connected.auth.user.name) + '</span>' : '';
   const locked = active || powerRequest ? 'disabled' : '';
   const name = store.person;
   return '<details class="who" id="who-menu"' + (open ? ' open' : '') + '><summary aria-label="Role and name">' +
@@ -164,7 +193,7 @@ const STEPS = [['manifest','Cartons'],['verify','Verify'],['scan','Scan'],['clos
 const STEP_ROLE = {manifest:['admin','manifest'], verify:['supervisor','verify'], scan:['operator','scan'], close:['operator','close']};
 const stepOf = s => s.closedAt ? 'done' : !s.manifest ? 'manifest' : !s.verifiedBy ? 'verify' : !s.confirmedAt ? 'scan' : 'close';
 function nextLabel(s) {
-  const step = stepOf(s), run = latest(s);
+  const step = stepOf(s), run = latestCurrentRun(s);
   if (step === 'done') return 'Closed';
   if (step === 'manifest') return 'Load cartons';
   if (step === 'verify') return 'Check by hand';
@@ -173,6 +202,10 @@ function nextLabel(s) {
   return run?.state === 'Finished' && run.result.status !== 'Match' ? run.result.status + ', rescan' : 'Scan cartons';
 }
 function render() {
+  root.hidden = Boolean(connected && !connected.auth);
+  const scanner = view === 'scan' || Boolean(builder?.capture);
+  who.hidden = scanner;
+  connectionPanel.hidden = !connected || scanner;
   // Keep the menu open across re-renders, e.g. right after a role change.
   who.innerHTML = storageError ? '' : identityMenu(document.querySelector('#who-menu')?.open);
   if (storageError) {
@@ -191,6 +224,27 @@ function render() {
   saveUi();
   if (active) updateScan();
 }
+function goBack() {
+  if (workflowDialog.open) { workflowDialog.close(); return; }
+  if (resetDialog.open) { resetDialog.close('cancel'); return; }
+  if (active) { end(true); return; }
+  if (builder?.capture) { buildToggle(); return; }
+  if (powerRequest) return;
+  const menu = document.querySelector('#who-menu[open]');
+  if (menu) { menu.open = false; return; }
+  if (view === 'sessions' || (connected && !connected.auth)) { bridge?.closeApp?.(); return; }
+  if (view === 'scan' || view === 'build') {
+    builder = undefined;
+    view = 'session';
+  } else {
+    view = 'sessions';
+    selected = undefined;
+    pendingImport = undefined;
+  }
+  feedback('');
+  render();
+  window.scrollTo(0,0);
+}
 function history() {
   const total = store.sessions.reduce((sum,s) => sum + allocationTotal(s.allocation),0);
   const records = store.sessions.slice().reverse().map(s => '<button class="record" data-open="' + escape(s.id) + '"' +
@@ -200,34 +254,32 @@ function history() {
     '</span></button>').join('');
   // Reader status first (checked before any scan), then the sessions as one list; the main action sits in the thumb zone.
   return (bridge ? readerCard() : '') +
-    // Section 6 home: the mode, the device and whether a network is present (the PoC never needs one).
-    '<p class="muted mode-line">PoC Test mode' + (reader.profile?.model ? ' / ' + escape(reader.profile.model) : '') + ' / ' +
-      (navigator.onLine ? 'Network connected, not required' : 'Offline') + '</p>' +
     '<section class="home"><div class="row spread section-head"><h1>Sessions</h1><small>' + total + ' of 500 labels used</small></div>' +
     (store.sessions.length > 1 ? '<input type="search" id="search" class="search" aria-label="Search sessions" maxlength="80" ' +
       'placeholder="Search test, pallet, SKU, place, date, status" value="' + escape(query) + '">' : '') +
     (records ? '<div class="group records">' + records + '</div>' + '<p class="muted" id="no-match"' +
       (store.sessions.some(s => matchesQuery(s,query,nextLabel(s))) ? ' hidden' : '') + '>No session matches the search.</p>' :
       '<p class="empty">No tests yet. Start one, load its cartons, then scan the pallet.</p>') +
-    (permits(role,'create') ? '' : '<p class="muted">Switch to Operator or Test lead to start a test.</p>') + '</section>' +
+    (canCreate() ? '' : '<p class="muted">' + (connected ? 'The Test lead prepares new sessions.' :
+      'Switch to Operator or Test lead to start a test.') + '</p>') + '</section>' +
     planPanel() +
     (permits(role,'export') ? '<h2 class="section-title">Evidence</h2><section class="panel">' + exportState() + '<div class="row">' +
       button('export','Export CSV and summary','class="secondary" ' + (!store.sessions.length ? 'disabled' : '')) +
-      (bridge ? button('dashboard',dashboardUrl ? 'Stop dashboard sharing' : 'Share web dashboard',
+      (bridge && !connected ? button('dashboard',dashboardUrl ? 'Stop dashboard sharing' : 'Share web dashboard',
         'class="secondary" ' + (dashboardResetPending ? 'disabled' : '')) : '') +
-      '</div>' + (bridge && role === 'admin' && !dashboardUrl ?
+      '</div>' + (bridge && !connected && role === 'admin' && !dashboardUrl ?
         '<label class="check"><input id="share-all" type="checkbox" checked>Include hardware and imported records</label>' : '') +
       (dashboardUrl ? '<div class="line dashboard-share"><div class="dashboard-qr" role="img" aria-label="Dashboard QR code">' +
       dashboardQr + '</div><div><p>Scan the QR code or open the private link on the same Wi-Fi network. ' +
       (includeOtherRecords ? 'All local sessions are shared.' : 'Sample simulation sessions are shared.') + '</p><p><code>' + escape(dashboardUrl) +
       '</code></p>' + button('copy','Copy dashboard link','class="secondary"') + '</div></div>' : '') +
-      (role === 'admin' ? '<div class="line">' + button('reset','Reset all local data',
+      (role === 'admin' ? '<div class="line">' + button('reset',connected ? 'Reset demo data' : 'Reset all local data',
         'class="secondary" ' + (powerRequest ? 'disabled' : '')) + '</div>' : '') +
       (store.audit?.length ? '<details class="line"><summary>Device log (' + store.audit.length + ')</summary><ul class="log">' +
         store.audit.slice().reverse().map(e => '<li><strong>' + escape(e.action) + '</strong><br>' + escape(e.detail) +
           '<br><small>' + escape(e.actor) + ' / ' + escape(time(e.at)) + '</small></li>').join('') + '</ul></details>' : '') +
       '</section>' : '') +
-    (permits(role,'create') ? '<div class="actionbar">' + button('new','New test session','class="scan-cta"') + '</div>' : '');
+    (canCreate() ? '<div class="actionbar">' + button('new','New test session','class="scan-cta"') + '</div>' : '');
 }
 // Section 13 recovery: say which sessions changed since their last export, so nothing is cleared unexported.
 function exportState() {
@@ -245,7 +297,7 @@ function planPanel() {
   html += tests.length ? '<ul class="log">' + tests.map(t => '<li><strong>' + escape(t.id) + '</strong> ' + escape(t.title) +
       '<br><small>' + escape(t.status) + (plan.closure?.skipped?.[t.id] ? ' / not run: ' + escape(plan.closure.skipped[t.id]) : '') +
       '</small></li>').join('') + '</ul>' + (unplanned.length ? '<p class="muted">Not in plan: ' + escape(unplanned.join(', ')) + '</p>' : '')
-    : '<p class="muted">No planned tests yet.' + (permits(role,'manifest') ? '' : ' Switch to Test lead in the menu at the top right to enter them.') + '</p>';
+    : '<p class="muted">No planned tests.</p>';
   if (plan?.closedAt) return html + '<p class="status match">PoC day closed by ' + escape(plan.closure.actor) + ' on ' +
     escape(time(plan.closedAt)) + '.</p></section>';
   if (permits(role,'manifest')) html += '<details' + (tests.length ? '' : ' open') + '><summary>Edit planned tests</summary>' +
@@ -288,11 +340,11 @@ function nextCard(s, step) {
     escape(s.closure.coverage) + '</p><p class="muted">Signed by ' + escape(s.closure.actor) + ' on ' + escape(time(s.closedAt)) + '.</p></section>';
   const [needRole, needAction] = STEP_ROLE[step];
   const title = {manifest:'Load the expected cartons', verify:'Check the pallet by hand', close:'Review and close the test',
-    scan:!s.identified ? 'Scan the pallet' : latest(s)?.result ? 'Rescan the cartons' : 'Scan the cartons'}[step];
+    scan:!s.identified ? 'Scan the pallet' : latestCurrentRun(s)?.result ? 'Rescan the cartons' : 'Scan the cartons'}[step];
   let body = step === 'verify' ? '<p><strong>' + escape(manifestSummary(s.manifest)) + '</strong></p>' + skuNote(s.manifest) : '';
   if (!permits(role,needAction)) {
     body += '<p>The ' + escape(roles[needRole]) + ' does this step.</p>' +
-      button('as-role','Switch to ' + escape(roles[needRole]),'class="scan-cta" data-role="' + needRole + '"');
+      (connected ? '' : button('as-role','Switch to ' + escape(roles[needRole]),'class="scan-cta" data-role="' + needRole + '"'));
   } else if (step === 'manifest') {
     body = manifestControls(s,null);
   } else if (step === 'verify') {
@@ -353,10 +405,12 @@ function manifestControls(s,m) {
   const hardware = s.source === 'C72 hardware';
   let result = (s.runs.length ? '<p class="muted">A revision needs a reason, a new check by hand and a new pallet scan. ' +
       'Earlier runs stay on the revision they were scanned against.</p>' : '') +
-    '<p class="muted">One CSV row per carton. Several pallets in one file are fine.</p><div class="row">' +
+    '<p class="muted">One CSV row per carton. Several pallets in one file are fine.</p><div class="row manifest-options">' +
+    (connected ? button('csv','Choose a CSV','class="secondary"') +
+      button('sample','Use Sample CSV','class="secondary" ' + (connected.samples[s.source] ? '' : 'disabled')) :
     (hardware ? (liveSample ? button('sample','Use live sample','class="secondary"') : '') :
       button('sample','Use sample manifest','class="secondary"')) + button('csv','Choose CSV','class="secondary"') + button('build-open','Build from scan','class="secondary"') +
-    button('template',hardware && liveSample ? 'Save live sample CSV' : 'Save CSV template','class="secondary"') + '</div>';
+    button('template',hardware && liveSample ? 'Save live sample CSV' : 'Save CSV template','class="secondary"')) + '</div>';
   if (!bridge) result += '<label class="line">CSV file<input id="csv-file" type="file" accept=".csv,text/csv"></label>';
   if (pendingImport) result += '<form class="line stack" id="manifest"><p>' + escape(pendingImport.name) + ' / ' +
     pendingImport.data.pallets.length + ' pallet(s) / ' + pendingImport.data.pallets.reduce((n,p) => n + p.cartons.length,0) +
@@ -437,9 +491,12 @@ function readerStatus() {
 function readerControls(closed) {
   if (closed || !bridge?.setReaderPower) return '';
   if (!permits(role,'reader-power')) return '<p class="muted">The Test lead sets reader power.</p>' +
-    button('as-role','Switch to Test lead','class="secondary" data-role="admin"');
+    (connected ? '' : button('as-role','Switch to Test lead','class="secondary" data-role="admin"'));
   if (!reader.ready) return button('reconnect','Check reader','class="secondary"');
-  return '<form id="reader-power" class="row">' + field('power','Output power (dBm)',reader.profile?.powerDbm,
+  const request = connected?.controls.power;
+  const requested = request && !request.appliedAt ? request.requested : undefined;
+  return (requested == null ? '' : '<p class="muted">Dashboard requested ' + escape(requested) + ' dBm. Check the reader before applying.</p>') +
+    '<form id="reader-power" class="row">' + field('power','Output power (dBm)',requested ?? reader.profile?.powerDbm,
       'type="number" min="5" max="30" step="1" required ' + (powerRequest ? 'disabled' : '')) +
     '<button ' + (powerRequest ? 'disabled' : '') + '>' + (powerRequest ? 'Setting power…' : 'Set power') + '</button></form>' +
     '<p class="muted">5 to 30 dBm. Each scan records the power it used.</p>';
@@ -457,7 +514,7 @@ function readerSettings(s) {
     readerControls(s.closedAt) + '</details>';
 }
 function scanPanel(s) {
-  const run = latest(s);
+  const run = latestCurrentRun(s);
   const isHardware = s.source === 'C72 hardware';
   const ready = !isHardware || reader.ready;
   return '<section class="scan-workspace"><div class="row spread scan-nav">' +
@@ -476,7 +533,7 @@ function scanPanel(s) {
       button('reconnect','Check reader','class="secondary"') : '') +
     '<p id="scan-clock" class="scan-clock" hidden></p><div id="scan-results" class="scan-results">' + scanSummary(s) + '</div>' +
     (!isHardware && s.identified ? '<label>Demo reads<select id="scenario">' +
-      ['Missing one','Unexpected extra','Clean match','Interrupted'].map(item => '<option ' + (scenario === item ? 'selected' : '') +
+      ['Missing one','Unexpected extra',...(connected ? ['Missing and unexpected'] : []),'Clean match','Interrupted'].map(item => '<option ' + (scenario === item ? 'selected' : '') +
         '>' + item + '</option>').join('') + '</select></label>' : '') +
     // FR-19: pick one of the design's reasons or type another.
     (s.identified && run ? '<label>Rescan reason<input id="rescan" list="rescan-reasons" maxlength="160" value="' + escape(rescanReason) +
@@ -494,12 +551,12 @@ function scanPanel(s) {
 }
 function scanResult(s) {
   if (!s.identified) return null;
-  const run = latest(s);
+  const run = latestCurrentRun(s);
   return active ? compare(s.manifest,Object.keys(run?.observations ?? {})) :
     (run?.result ?? compare(s.manifest,[]));
 }
 function scanSummary(s,r = scanResult(s)) {
-  const run = latest(s);
+  const run = latestCurrentRun(s);
   const status = active ? (active.ending ? 'Finishing' : 'Reading') :
     run ? (run.state === 'Finished' ? run.result.status : run.state) : 'Ready to scan';
   return '<p role="status" class="status ' + status.toLowerCase().replaceAll(' ','-') + '">' + statusLabel(status) + '</p>' +
@@ -507,7 +564,7 @@ function scanSummary(s,r = scanResult(s)) {
 }
 function tagRows(s,r = scanResult(s)) {
   const matched = new Set(r.matched);
-  const pending = active || !latest(s)?.result;
+  const pending = active || !latestCurrentRun(s)?.result;
   const row = (epc,title,state,label) => '<li class="tag-row" data-tag-status="' + state + '"><div><strong>' +
     escape(title) + '</strong><code>' + escape(epc) + '</code></div><span class="tag-badge">' + label + '</span></li>';
   return r.extra.map(epc => {
@@ -572,14 +629,15 @@ function begin() {
   const hardware = s.source === 'C72 hardware';
   if (hardware && !reader.ready) { feedback(reader.message,true); return; }
   const kind = s.identified ? 'cartons' : 'pallet';
-  const reason = document.querySelector('#rescan')?.value.trim() ?? rescanReason;
-  if (kind === 'cartons' && s.runs.length && !reason) { feedback('Enter a rescan reason before holding the trigger.',true); return; }
+  const retry = kind === 'cartons' && Boolean(latestCurrentRun(s));
+  const reason = retry ? (document.querySelector('#rescan')?.value.trim() ?? rescanReason.trim()) : '';
+  if (retry && !reason) { feedback('Enter a rescan reason before starting another carton scan.',true); return; }
   const startedAt = now();
   const capture = {id:id(),kind,hardware,startedAt,scenario,observations:{},ending:false};
   commit(() => {
     if (kind === 'cartons') s.runs.push({
       id:capture.id, startedAt, state:'Reading', source:s.source, operator:actor(), method:s.method,
-      reason:s.runs.length ? reason : '', profile:hardware ? reader.profile : {name:'Simulator',region:'Simulated'},
+      reason, profile:hardware ? reader.profile : {name:'Simulator',region:'Simulated'},
       manifestRevision:s.manifest.revision, observations:{}
     });
     else s.palletPending = {id:capture.id,startedAt,observations:capture.observations,actor:actor(),
@@ -594,8 +652,12 @@ function begin() {
 function simReads(s, capture) {
   if (capture.kind === 'pallet') return [{epc:(s.manifest.pallets?.[0] ?? s.manifest).palletEpc}];
   const expected = s.manifest.cartons.map(c => c.epc);
-  const epcs = capture.scenario === 'Missing one' || capture.scenario === 'Interrupted' ? expected.slice(0,-1) : expected;
-  if (capture.scenario === 'Unexpected extra') epcs.push(EXTRA_EPC);
+  const missing = ['Missing one','Missing and unexpected','Interrupted'].includes(capture.scenario);
+  const epcs = missing ? expected.slice(0,-1) : expected;
+  if (['Unexpected extra','Missing and unexpected'].includes(capture.scenario)) {
+    const neighbour = connected?.stock.find(c => !c.physical && c.state === 'available' && !expected.includes(c.epc));
+    epcs.push(neighbour?.epc ?? EXTRA_EPC);
+  }
   return [...epcs, ...epcs.slice(0,1)].map(epc => ({epc}));
 }
 function collect(reads) {
@@ -729,6 +791,7 @@ function action(fn) {
   try { fn(); } catch (error) { feedback(error?.message ?? 'Action could not be completed.',true); }
 }
 window.keypharmEvent = (name,data) => action(() => {
+  if (name === 'back') { goBack(); return; }
   if (builder?.capture && data?.id === builder.capture.id) {
     if (name === 'reads' || name === 'ended') buildCollect(data.reads);
     if (name === 'ended') {
@@ -755,6 +818,10 @@ window.keypharmEvent = (name,data) => action(() => {
       const detail = data.previousPower + ' to ' + data.profile.powerDbm + ' dBm';
       commit(() => target ? log(target,'Reader power changed',detail) :
         (store.audit ??= []).push({at:now(), actor:changedBy, action:'Reader power changed', detail:detail + ' (home screen)'}));
+    }
+    if (data.ok && connected?.controls.power?.requested === data.profile?.powerDbm) {
+      connected.updateControls({applied:data.profile.powerDbm});
+      void refreshConnected();
     }
     feedback(data.message,!data.ok);
     render();
@@ -857,7 +924,7 @@ document.addEventListener('click', event => action(() => {
     view = 'session';
     rescanReason = '';
   }
-  if (command === 'new' && permits(role,'create')) view = 'new';
+  if (command === 'new' && canCreate()) view = 'new';
   if (command === 'build-open' && s && permits(role,'manifest') && !s.closedAt && !s.confirmedAt) { builder = {tags:{}}; view = 'build'; }
   if (command === 'build-toggle' && view === 'build' && builder) { buildToggle(); return; }
   if (command === 'build-close' && !builder?.capture) { builder = undefined; view = 'session'; }
@@ -866,8 +933,8 @@ document.addEventListener('click', event => action(() => {
     if (bridge) bridge.saveTemplate(csv,filename); else download(filename,csv);
     return;
   }
-  if (command === 'as-role' && roles[control.dataset.role]) { role = control.dataset.role; pendingImport = undefined; }
-  if (command === 'back') { view = 'sessions'; pendingImport = undefined; }
+  if (command === 'as-role' && !connected && roles[control.dataset.role]) { role = control.dataset.role; pendingImport = undefined; }
+  if (command === 'back') { goBack(); return; }
   if (command === 'open-scan' && s?.manifest && s.verifiedBy && permits(role,'scan') && !s.closedAt && !s.confirmedAt) {
     view = 'scan';
     feedback('');
@@ -877,6 +944,10 @@ document.addEventListener('click', event => action(() => {
   }
   if (command === 'scan-details') { view = 'session'; window.scrollTo(0,0); }
   if (command === 'sample') {
+    if (connected) {
+      if (connected.samples[s?.source]) chooseManifest(connected.samples[s.source],'Sample CSV',s.source === 'Simulation');
+      return;
+    }
     if (s?.source === 'C72 hardware') {
       if (liveSample) chooseManifest(liveSample,liveSampleName);
     } else chooseManifest(SAMPLE,'Demo sample CSV',true);
@@ -892,6 +963,12 @@ document.addEventListener('click', event => action(() => {
   }
   if (command === 'reconnect') { bridge?.connectReader(); return; }
   if (command === 'reset' && view === 'sessions' && role === 'admin' && !builder?.capture) {
+    if (connected) {
+      resetDialog.querySelector('form').reset();
+      resetDialog.returnValue = 'cancel';
+      resetDialog.showModal();
+      return;
+    }
     if (!window.confirm('Permanently delete all sessions, loaded manifests, scans, the PoC test plan, saved names, and form drafts on this device? ' +
       'This also stops dashboard sharing. Export evidence first if you need to keep it.')) return;
     localStorage.removeItem(uiKey);
@@ -935,6 +1012,7 @@ document.addEventListener('click', event => action(() => {
   if (command === 'continue' && view === 'scan' && permits(role,'confirm') && !s.confirmedAt && canContinue(s,latest(s))) {
     commit(() => { s.confirmedAt = now(); log(s,'Clean match confirmed','Carton set matched',latest(s).id); });
     view = 'session';
+    confirmWorkflow('Pallet match recorded','The result is saved on this C72. Supervisor sign-off follows after sync.');
     window.scrollTo(0,0);
   }
   if (command || control.dataset.open) { feedback(''); render(); }
@@ -960,7 +1038,7 @@ root.addEventListener('submit', event => action(() => {
     view = 'session';
     chooseManifest(csv,'Built from scan ' + new Date().toLocaleString());
   }
-  if (form.id === 'create' && permits(role,'create')) {
+  if (form.id === 'create' && canCreate()) {
     if (Object.keys(metadata).some(k => k !== 'notes' && !data[k]?.trim())) throw new Error('Fill in the test setup fields.');
     const record = {...data,id:id(),creator:actor(),createdAt:now(),mode:'POC',runs:[],logs:[],allocation:{}};
     commit(() => { log(record,'Session created',record.planned); store.sessions.push(record); });
@@ -988,6 +1066,7 @@ root.addEventListener('submit', event => action(() => {
   }
   if (form.id === 'verify' && s?.manifest && !s.verifiedBy && !s.closedAt && data.checked && permits(role,'verify')) {
     commit(() => { s.verifiedBy = actor(); s.verifiedAt = now(); log(s,'Physical verification','Pallet contents and unique label assignment confirmed'); });
+    confirmWorkflow('Physical check recorded','The confirmation is saved on this C72 and will sync to the dashboard.');
   }
   if (form.id === 'investigate' && s && !s.closedAt && permits(role,'investigate') && latest(s)?.result?.extra.includes(data.epc)) {
     if (!data.note.trim()) throw new Error('Enter the investigation note.');
@@ -999,6 +1078,7 @@ root.addEventListener('submit', event => action(() => {
   }
   if (form.id === 'plan' && permits(role,'manifest') && !store.plan?.closedAt) {
     const tests = parsePlan(data.tests);
+    connected?.updateControls({plan:data.tests});
     commit(() => { store.plan = {tests}; });
   }
   if (form.id === 'close-plan' && permits(role,'close') && store.plan && !store.plan.closedAt) {
@@ -1008,8 +1088,10 @@ root.addEventListener('submit', event => action(() => {
     if (errors.length) throw new Error(errors.join('\n'));
     commit(() => { store.plan.closedAt = now(); store.plan.closure = {actor:actor(), skipped}; });
   }
-  if (form.id === 'close' && canClose(s,data,role)) {
-    commit(() => { s.closedAt = now(); s.closure = {coverage:data.coverage.trim(),actor:actor()}; log(s,'Session closed',s.closure.coverage); });
+  if (form.id === 'close') {
+    if (!canClose(s,data,role)) throw new Error('Review the scans and enter the coverage before closing.');
+    commit(() => { s.closedAt = now(); s.closure = {coverage:data.coverage.trim(),actor:actor(),reviewed:true}; log(s,'Session closed',s.closure.coverage); });
+    confirmWorkflow('Test session closed','The scan evidence remains available in the session.');
   }
   clearDrafts(drafts);
   feedback(''); render();
@@ -1060,3 +1142,131 @@ if (ui.selected && store.sessions.some(s => s.id === ui.selected)) {
 } else if (ui.view === 'new') view = 'new';
 render();
 bridge?.connectReader();
+if (connected) {
+  const nativeEvent = window.keypharmEvent;
+  window.keypharmEvent = (name,data) => {
+    if (name === 'workspace-response') connected.receive(data);
+    else nativeEvent(name,data);
+  };
+  connectionPanel.hidden = false;
+  let manualSync = false;
+  const showConnection = () => {
+    if (!connected.auth) {
+      root.hidden = true;
+      who.textContent = '';
+      if (!connectionPanel.querySelector('form')) {
+        connectionPanel.innerHTML = '<section class="panel"><h1>Sign in</h1>' +
+          '<form class="stack"><label>Username<input name="username" value="handheld" autocomplete="username" required></label>' +
+          '<label>Password<input name="password" type="password" autocomplete="current-password" required></label>' +
+          '<button>Sign in</button></form><p class="info-bubble" role="status"></p></section>';
+      }
+    } else if (!connectionPanel.querySelector('[data-workspace="retry"]')) {
+      connectionPanel.innerHTML = '<div class="row spread workspace-strip"><p class="info-bubble workspace-bubble" role="status"></p>' +
+        (connected.auth.user.canSwitch ? '<select id="workspace-role" aria-label="Role">' +
+          Object.entries(roles).map(([key,label]) => '<option value="' + key + '"' +
+            (role === key ? ' selected' : '') + '>' + escape(label) + '</option>').join('') + '</select>' : '') +
+        '<div class="workspace-strip-actions"><button type="button" class="secondary" data-workspace="retry">Sync now</button>' +
+        '<button type="button" class="secondary" data-workspace="logout">Sign out</button></div></div>';
+    }
+    const picker = connectionPanel.querySelector('#workspace-role');
+    if (picker) picker.value = role;
+    const status = connectionPanel.querySelector('[role="status"]');
+    status.textContent = connected.message || (connected.auth ? connected.state : '');
+    if (connected.auth) {
+      status.dataset.visible = String(connected.state === 'Needs review' ||
+        (connected.state === 'Syncing' && (manualSync || connected.hasPending(store.sessions))) ||
+        (connected.state === 'Unsynced' && connected.hasPending(store.sessions)));
+      if (connected.state !== 'Syncing') manualSync = false;
+    }
+  };
+  const safe = () => !active && !builder?.capture && !powerRequest && !pendingImport && !resetDialog.open;
+  const clearConnectedRecords = () => {
+    localStorage.removeItem(uiKey);
+    localStorage.removeItem(key);
+    store = {sessions:[],people:[]};
+    ui = {drafts:{}};
+    view = 'sessions';
+    selected = builder = pendingImport = undefined;
+    query = rescanReason = '';
+    scenario = 'Missing one';
+    pendingRecordRender = true;
+    publish();
+  };
+  let pendingRecordRender = false;
+  const renderReceivedRecord = () => {
+    const focus = document.activeElement;
+    if (!pendingRecordRender || !safe() || (root.contains(focus) && focus.matches('input, textarea, select'))) return;
+    pendingRecordRender = false;
+    render();
+  };
+  const applyRecord = updated => {
+    const index = store.sessions.findIndex(s => s.id === updated.id);
+    if (index < 0) store.sessions.push(updated);
+    else store.sessions[index] = updated;
+    localStorage.setItem(key,JSON.stringify(store));
+    if (view === 'sessions' || selected === updated.id) pendingRecordRender = true;
+    renderReceivedRecord();
+  };
+  let controlsRevision = connected.controls.revision;
+  refreshConnected = () => connected.refresh(() => store.sessions,applyRecord,safe,() => {
+    showConnection();
+    renderReceivedRecord();
+    if (safe() && connected.auth && controlsRevision !== connected.controls.revision && !connected.hasPending(store.sessions)) {
+      controlsRevision = connected.controls.revision;
+      if (!store.plan?.closedAt) store.plan = {tests:connected.controls.plan};
+      localStorage.setItem(key,JSON.stringify(store));
+      if (view === 'sessions' && !document.activeElement?.matches('input, textarea, select')) render();
+    }
+  },clearConnectedRecords);
+  resetDialog.addEventListener('close',async () => {
+    if (resetDialog.returnValue !== 'reset' || role !== 'admin') return;
+    try {
+      const confirm = new FormData(resetDialog.querySelector('form')).get('confirm');
+      await connected.reset(confirm,clearConnectedRecords);
+      await refreshConnected();
+      confirmWorkflow('Demo data reset','Starting inventory restored.');
+    } catch (error) { feedback(error.message,true); }
+  });
+  connectionPanel.addEventListener('submit',async event => {
+    event.preventDefault();
+    const fields = new FormData(event.target);
+    const button = event.target.querySelector('button');
+    button.disabled = true;
+    try {
+      const user = await connected.signIn(fields.get('username'),fields.get('password'));
+      role = user.role;
+      connected.message = '';
+      render();
+      await refreshConnected();
+    } catch (error) {
+      connected.message = error.message;
+      showConnection();
+      button.disabled = false;
+    }
+  });
+  connectionPanel.addEventListener('click',event => {
+    const command = event.target.closest('button')?.dataset.workspace;
+    if (command === 'retry') { manualSync = true; void refreshConnected(); }
+    if (command === 'logout' && safe()) {
+      try { connected.signOut(store.sessions); connected.message = ''; render(); }
+      catch (error) { connected.message = error.message; }
+      showConnection();
+    }
+  });
+  connectionPanel.addEventListener('change',event => {
+    if (event.target.id !== 'workspace-role') return;
+    try {
+      if (!safe()) throw new Error('Finish the current action before changing role.');
+      const user = connected.switchTo(event.target.value,store.sessions);
+      if (user) role = user.role;
+      pendingImport = undefined;
+      render();
+      void refreshConnected();
+    } catch (error) { connected.message = error.message; }
+    showConnection();
+  });
+  showConnection();
+  void refreshConnected();
+  setInterval(refreshConnected,5000);
+  window.addEventListener('online',refreshConnected);
+}

@@ -48,5 +48,16 @@ export function indexRecords(sessions) {
     }
   }
   for (const group of Object.values(rows)) group.sort((a,b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
-  return {rows, results, closed};
+  const exceptionGroups = new Map();
+  for (const item of rows.exceptions) {
+    const session = item.session;
+    if (!exceptionGroups.has(session.id)) {
+      exceptionGroups.set(session.id,{id:session.id,session,title:session.testId || 'Unnamed session',
+        description:[session.manifest?.pallet,session.location].filter(Boolean).join(' / '),at:item.at,exceptions:[]});
+    }
+    exceptionGroups.get(session.id).exceptions.push(item);
+  }
+  const exceptionSessions = [...exceptionGroups.values()].map(row => ({...row,
+    status:row.exceptions.length + (row.exceptions.length === 1 ? ' exception' : ' exceptions')}));
+  return {rows, results, closed, exceptionSessions};
 }

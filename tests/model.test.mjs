@@ -97,6 +97,8 @@ test('attempts remain independent and extras block even at full completeness', (
   const session = {verifiedBy: 'Supervisor', identified: true};
   const clean = compare(manifest, [a,b,c,d]);
   assert.equal(canContinue(session, {result: clean, state: 'Finished'}), true);
+  assert.equal(canContinue({...session, manifest:{revision:2}},
+    {result:clean,state:'Finished',manifestRevision:1}), false);
   for (const run of [{result: extra,state:'Finished'}, {result:clean,state:'Interrupted'}, {result:clean,state:'Reading'}]) {
     assert.equal(canContinue(session, run), false);
   }

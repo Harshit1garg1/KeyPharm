@@ -6,7 +6,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright, expect
 
 assets = Path(__file__).resolve().parents[1] / "app/src/main/assets"
-types = {".html":"text/html", ".mjs":"text/javascript", ".css":"text/css", ".png":"image/png"}
+types = {".html":"text/html", ".mjs":"text/javascript", ".css":"text/css", ".png":"image/png", ".woff2":"font/woff2"}
 
 
 # The APK serves only the files listed in MainActivity.ASSETS; a file the handheld loads but the list misses
@@ -95,6 +95,7 @@ with sync_playwright() as playwright:
     hold(device)
     expect(device.get_by_role("heading", name="Scan cartons")).to_be_visible()
     expect(device.get_by_text("Pallet verified by UHF EPC.")).to_be_visible()
+    expect(device.get_by_label("Rescan reason")).to_have_count(0)
     proceed = device.get_by_role("button", name="Continue", exact=True)
 
     hold(device)
@@ -128,9 +129,10 @@ with sync_playwright() as playwright:
     expect(device.get_by_role("heading", name="Scan cartons")).to_be_visible()
 
     device.get_by_label("Demo reads").select_option("Unexpected extra")
-    expect(device.locator("#rescan-reasons option")).to_have_count(5)  # FR-19: pick a reason or type one
-    device.get_by_label("Rescan reason").fill("Check neighboring tags")
+    expect(device.get_by_label("Rescan reason")).to_have_count(0)
+    expect(device.locator("#scan-results")).to_contain_text("Ready to scan")
     hold(device)
+    expect(device.locator("#rescan-reasons option")).to_have_count(5)  # FR-19: pick a reason or type one
     expect(proceed).to_be_disabled()
     expect(device.locator("#scan-results .status")).to_have_text("Hold: unexpected reads")
     expect(device.locator(".tag-row[data-tag-status=unexpected]")).to_contain_text("Unexpected")
@@ -241,7 +243,7 @@ with sync_playwright() as playwright:
     assert device.evaluate("localStorage.getItem('unrelated-preference')") == "keep"
     device.reload()
     expect(device.get_by_text("No tests yet.", exact=False)).to_be_visible()
-    expect(device.get_by_text("No planned tests yet.", exact=False)).to_be_visible()
+    expect(device.get_by_text("No planned tests.", exact=True)).to_be_visible()
     assert device.evaluate("localStorage.getItem('keypharm-poc-ui-v1')") is None
     device.get_by_label("Role and name").click()
     expect(device.locator("#role")).to_have_value("operator")
@@ -337,9 +339,18 @@ with sync_playwright() as playwright:
     dashboard.route("https://dashboard.test/records", records)
     dashboard.goto("https://dashboard.test/dashboard.html")
     assert dashboard.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth > 339")
-    assert dashboard.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => getComputedStyle(logo).filter === 'none'")
+    assert dashboard.locator(".dashboard-brand").evaluate("(logo) => getComputedStyle(logo).backgroundColor === 'rgb(8, 9, 10)'")
     assert dashboard.evaluate("getComputedStyle(document.documentElement).colorScheme") == "dark"
-    expect(dashboard.get_by_role("status")).to_contain_text("Handheld online")
+    dashboard.get_by_role("button", name="Light mode", exact=True).click()
+    assert dashboard.evaluate("getComputedStyle(document.documentElement).colorScheme") == "light"
+    assert dashboard.get_by_role("img", name="KeyPharm Laboratories").evaluate(
+        "(logo) => logo.naturalWidth > 339 && getComputedStyle(logo).filter === 'none'")
+    dashboard.reload()
+    expect(dashboard.get_by_role("button", name="Dark mode", exact=True)).to_be_visible()
+    assert dashboard.evaluate("getComputedStyle(document.documentElement).colorScheme") == "light"
+    dashboard.get_by_role("button", name="Dark mode", exact=True).click()
+    assert dashboard.evaluate("getComputedStyle(document.documentElement).colorScheme") == "dark"
+    expect(dashboard.locator("#connection")).to_have_text("")
     expect(dashboard.get_by_role("heading", name="Overview")).to_be_visible(timeout=3000)
     expect(dashboard.locator("[data-total=sessions]")).to_have_text("1")
     expect(dashboard.locator("[data-total=scans]")).to_have_text("3")
@@ -369,24 +380,69 @@ with sync_playwright() as playwright:
             "id": f"older-{i}", "testId": f"Earlier session {i:02}", "createdAt": f"2025-01-{i // 2 + 1:02}T{i % 2:02}:00:00Z",
             "runs": [], "logs": [{"action": f"Earlier event {i:02}", "at": f"2025-01-{i // 2 + 1:02}T{i % 2:02}:00:00Z"}]
         })
+    service["records"]["sessions"][-1]["runs"].append({
+        "id": "other-run", "state": "Finished", "endedAt": "2025-01-28T03:00:00Z",
+        "result": {"status": "Hold", "extra": ["E00000000000000000000019"], "missing": [], "matched": [], "expected": 1}
+    })
     dashboard.get_by_role("button", name="Refresh records").click()
     expect(dashboard.locator("[data-total=sessions]")).to_have_text("56")
     expect(dashboard.get_by_text("Showing 50 of 56 records.")).to_be_visible()
     expect(dashboard.locator("#records button[data-id]")).to_have_count(50)
     expect(dashboard.get_by_role("button", name="Earlier session 00",exact=False)).to_have_count(0)
+    rail = dashboard.locator(".dashboard-rail")
+    pane = dashboard.locator("#content")
+    bounds = rail.bounding_box()
+    assert bounds["height"] == 800
+    pane.evaluate("(pane) => pane.scrollTop = 650")
+    assert pane.evaluate("(pane) => pane.scrollTop") > 0
+    assert rail.bounding_box() == bounds
+    assert dashboard.evaluate("window.scrollY") == 0
     dashboard.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Exceptions").click()
     expect(dashboard.locator("#records button[data-id]")).to_have_count(2)
-    dashboard.get_by_role("button", name="Unexpected EPC", exact=False).click()
-    expect(dashboard.locator("#detail")).to_contain_text("E00000000000000000000009")
+    assert pane.evaluate("(pane) => pane.scrollTop") == 0
+    expect(dashboard.get_by_text("Showing 2 of 2 sessions with exceptions.")).to_be_visible()
+    dashboard.locator("#records").get_by_role("button", name="KP-RECONNECTED", exact=False).click()
+    group = dashboard.locator("#detail")
+    expect(group.get_by_role("heading", name="KP-RECONNECTED")).to_be_visible()
+    expect(group).not_to_contain_text("E00000000000000000000019")
+    expect(group.locator("details[data-exception] > summary [data-state=incomplete]")).to_have_text("Incomplete")
+    item = group.locator("details[data-exception]").filter(has_text="E00000000000000000000009")
+    trigger = item.locator(":scope > summary")
+    expect(trigger.locator("[data-state=hold]")).to_have_text("Hold")
+    evidence = item.locator(":scope > .exception-body .exception-subdetails > details").filter(has_text="Scan evidence")
+    expect(evidence).to_be_hidden()
+    trigger.press("Enter")
+    expect(evidence.get_by_text("Scan evidence",exact=True)).to_be_visible()
+    expect(evidence.locator(".exception-evidence-content")).to_be_hidden()
+    evidence.locator(":scope > summary").click()
+    expect(evidence.locator(".exception-evidence-content")).to_be_visible()
+    trigger.click()
+    expect(evidence).to_be_hidden()
+    dashboard.get_by_label("Search recent records").fill("E00000000000000000000019")
+    expect(dashboard.locator("#records button[data-id]")).to_have_count(1)
+    expect(group.get_by_role("heading", name="Earlier session 54")).to_be_visible()
+    expect(group).not_to_contain_text("E00000000000000000000009")
     dashboard.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Activity").click()
     expect(dashboard.locator("#records button[data-id]")).to_have_count(50)
     dashboard.set_viewport_size({"width":360, "height":700})
     assert dashboard.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    dashboard.get_by_role("button", name="Light mode", exact=True).click()
+    expect(dashboard.get_by_role("button", name="Dark mode", exact=True)).to_be_visible()
+    dashboard.get_by_role("button", name="Dark mode", exact=True).click()
     dashboard.get_by_role("button", name="Sections").click()
     dashboard.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Overview").click()
     expect(dashboard.get_by_role("heading", name="Overview")).to_be_visible()
     expect(dashboard.get_by_role("navigation", name="Dashboard sections")).to_be_hidden()
     dashboard.screenshot(path="build/dashboard-mobile.png")
+    dashboard.get_by_role("button", name="Sections").click()
+    dashboard.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Sessions").click()
+    expect(dashboard.get_by_role("heading", name="Sessions", exact=True)).to_be_visible()
+    expect(dashboard.get_by_role("navigation", name="Dashboard sections")).to_be_hidden()
+    bounds = rail.bounding_box()
+    pane.evaluate("(pane) => pane.scrollTop = 650")
+    assert pane.evaluate("(pane) => pane.scrollTop") > 0
+    assert rail.bounding_box() == bounds
+    assert dashboard.evaluate("window.scrollY") == 0
 
     hardware = browser.new_page(viewport={"width":360, "height":700})
     hardware.on("pageerror", lambda error: errors.append(str(error)))
@@ -570,7 +626,7 @@ with sync_playwright() as playwright:
       {id:'b', testId:'KP-JUICE', location:'Rack', level:'Level 2', source:'Simulation', createdAt:'2026-11-25T09:00:00.000Z',
         creator:'Lead A', runs:[], logs:[], allocation:{}}]}))""")
     seeded.goto("https://handheld.test/handheld.html")
-    expect(seeded.locator(".mode-line")).to_contain_text("PoC Test mode")
+    expect(seeded.locator(".mode-line")).to_have_count(0)
     records = seeded.locator(".record")
     search = seeded.get_by_label("Search sessions")
     search.fill("level 2")

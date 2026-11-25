@@ -9,10 +9,26 @@ const detail = find('#detail');
 const search = find('#search');
 const refresh = find('#refresh');
 const connection = find('#connection');
+const theme = find('#dashboard-theme');
+const themeKey = 'keypharm-dashboard-theme';
+function applyTheme(mode) {
+  document.documentElement.dataset.theme = mode;
+  const label = mode === 'dark' ? 'Light mode' : 'Dark mode';
+  theme.setAttribute('aria-label',label);
+  theme.title = label;
+}
+let savedTheme;
+try { savedTheme = localStorage.getItem(themeKey); } catch { /* Private storage may be unavailable. */ }
+applyTheme(savedTheme === 'light' ? 'light' : 'dark');
+theme.hidden = false;
+theme.addEventListener('click',() => {
+  const mode = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  applyTheme(mode);
+  try { localStorage.setItem(themeKey,mode); } catch { /* The current page still switches themes. */ }
+});
 let data = indexRecords([]);
 let section = 'overview';
 let selected;
-let refreshed;
 let previousBody;
 let inFlight = false;
 
@@ -26,7 +42,8 @@ const facts = (...pairs) => '<dl class="dashboard-facts">' + pairs.map(([name,va
 const list = (items, renderer) => items?.length ? '<ul class="log">' + items.map(item =>
   '<li>' + renderer(item) + '</li>').join('') + '</ul>' : '<p class="muted">None recorded.</p>';
 const badge = value => value ? '<span class="dashboard-badge" data-state="' + escape(value.toLowerCase()) + '">' + escape(value) + '</span>' : '';
-const fold = (label,body) => '<details class="dashboard-fold"><summary>' + escape(label) + '</summary>' + body + '</details>';
+const fold = (label,body,status) => '<details class="dashboard-fold"><summary><span>' + escape(label) + '</span>' +
+  badge(status) + '</summary><div class="dashboard-fold-body">' + body + '</div></details>';
 const joined = (...items) => items.filter(Boolean).join(' / ');
 const readerPower = p => joined(p?.region,p?.powerDbm == null ? '' : p.powerDbm + ' dBm');
 const logBody = log => '<strong>' + escape(log.action) + '</strong><br>' + escape(log.detail) +
@@ -86,8 +103,39 @@ function sessionEvidence(s) {
       pallets.map(p => '<h3>' + escape(p.pallet) + '</h3>' +
         list(p.cartons,c => escape(joined(c.carton,c.sku)) + '<br>' + code(c.epc))).join('')) +
     '<h3 class="line">Recent carton scans</h3>' + (scans.map(row =>
-      fold(row.title + ' / ' + row.status,runEvidence(row.run))).join('') || '<p class="muted">No recorded attempts.</p>') +
+      fold(row.title,runEvidence(row.run),row.status)).join('') || '<p class="muted">No recorded attempts.</p>') +
     '<h3 class="line">Recent activity</h3>' + list(logs,logBody);
+}
+
+function exceptionEvidence(row) {
+  const disposition = row.status === 'Unexpected' ? (row.session.logs ?? []).findLast(log =>
+    log.run === row.run.id && log.action?.startsWith('Unexpected EPC ') &&
+    String(log.detail).split(' / ')[0] === row.epc) : null;
+  return facts(['Scan',row.scan],['EPC',row.epc],
+    ['Operator',row.run.operator],['Recorded',time(row.at)],['Error',row.run.error]) +
+    '<div class="exception-subdetails">' + (disposition ? fold('Investigation',logBody(disposition)) : '') +
+    fold('Scan evidence','<div class="exception-evidence-content">' + runEvidence(row.run) + '</div>') + '</div>';
+}
+
+const exceptionCount = total => count.format(total) + (total === 1 ? ' exception' : ' exceptions');
+
+function sessionExceptions(row) {
+  const open = new Set([...detail.querySelectorAll('details[data-exception][open]')].map(item => item.dataset.exception));
+  const query = search.value.trim().toLowerCase();
+  const recent = row.exceptions.slice(0,RECENT_LIMIT);
+  const matchesSession = !query || matches(row,query);
+  const shown = matchesSession ? recent : recent.filter(item => matches(item,query));
+  return facts(['Pallet',row.session.manifest?.pallet],['Latest exception',time(row.at)]) +
+    (shown.length !== row.exceptions.length ? '<p class="muted">Showing ' + count.format(shown.length) + ' of ' +
+      exceptionCount(row.exceptions.length) + '.</p>' : '') +
+    shown.map(item => {
+      const status = item.run.state === 'Interrupted' ? 'Interrupted' : (item.run.result?.status || item.status);
+      return '<details class="exception-entry" data-exception="' + escape(item.id) + '"' +
+        (open.has(item.id) ? ' open' : '') + '><summary><span class="exception-chevron" aria-hidden="true"></span>' +
+        '<span class="exception-entry-copy"><strong>' + escape(item.title) + '</strong><small>' +
+        escape(joined(item.scan,item.epc)) + '</small></span>' + badge(status) + '</summary>' +
+        '<div class="exception-body">' + exceptionEvidence(item) + '</div></details>';
+    }).join('');
 }
 
 function renderDetail(row) {
@@ -105,14 +153,7 @@ function renderDetail(row) {
       .find(item => item && item.revision === row.run.manifestRevision) ?? row.session.manifest;
     evidence = facts(['Test',row.session.testId],['Pallet',manifest?.pallet]) + runEvidence(row.run);
   }
-  if (section === 'exceptions') {
-    const disposition = row.status === 'Unexpected' ? (row.session.logs ?? []).findLast(log =>
-      log.run === row.run.id && log.action?.startsWith('Unexpected EPC ') &&
-      String(log.detail).split(' / ')[0] === row.epc) : null;
-    evidence = facts(['Test',row.session.testId],['Scan',row.scan],['EPC',row.epc],
-      ['Result',row.run.result?.status],['Operator',row.run.operator],['Recorded',time(row.at)],['Error',row.run.error]) +
-      (disposition ? fold('Investigation',logBody(disposition)) : '') + fold('Scan evidence',runEvidence(row.run));
-  }
+  if (section === 'exceptions') evidence = sessionExceptions(row);
   if (section === 'activity') evidence = facts(['Test',row.session.testId],['Actor',row.log.actor],
     ['Time',time(row.at)],['Run ID',row.log.run],['Details',row.log.detail]);
   detail.innerHTML = '<div class="row spread dashboard-detail-heading"><h2>' + escape(row.title) + '</h2>' + badge(row.status) + '</div>' + evidence;
@@ -126,25 +167,31 @@ function matches(row, query) {
     .some(value => String(value ?? '').toLowerCase().includes(query));
 }
 function renderRecords() {
-  const all = data.rows[section];
+  const grouped = section === 'exceptions';
+  const all = grouped ? data.exceptionSessions : data.rows[section];
   const recent = all.slice(0,RECENT_LIMIT);
   const query = search.value.trim().toLowerCase();
-  const found = query ? recent.filter(row => matches(row,query)) : recent;
-  find('#record-count').textContent = query ? count.format(found.length) + ' matches in the latest ' + count.format(recent.length) + ' records.' :
-    'Showing ' + count.format(recent.length) + ' of ' + count.format(all.length) + ' records.';
+  const found = query ? recent.filter(row => matches(row,query) ||
+    row.exceptions?.slice(0,RECENT_LIMIT).some(item => matches(item,query))) : recent;
+  const unit = grouped ? ' sessions' : ' records';
+  find('#record-count').textContent = query ? count.format(found.length) + ' matches in the latest ' + count.format(recent.length) + unit + '.' :
+    'Showing ' + count.format(recent.length) + ' of ' + count.format(all.length) + unit + (grouped ? ' with exceptions.' : '.');
   if (!found.some(row => row.id === selected)) selected = found[0]?.id;
   records.innerHTML = found.map(row => '<li><button type="button" data-id="' + escape(row.id) +
     '" class="dashboard-record" aria-pressed="' + (row.id === selected) + '"><span><strong>' + escape(row.title) +
     '</strong><small>' + escape(row.description) + '</small><small>' + escape(time(row.at)) + '</small></span>' +
     badge(row.status) + '</button></li>').join('') ||
-    '<li class="muted">' + (query ? 'No recent records match your search.' : 'No records received in this section.') + '</li>';
+    '<li class="muted">' + (query ? 'No recent records match your search.' :
+      grouped ? 'No sessions with exceptions.' : 'No records received in this section.') + '</li>';
   renderDetail(found.find(row => row.id === selected));
 }
 
 function navigate(focusTitle = false) {
   const [requested, sessionId] = window.location.hash.slice(1).split('/');
   if (requested === 'content') return;
-  const next = Object.hasOwn(sections,requested) ? requested : 'overview';
+  const workspace = find('#workspace-panel');
+  const workspaceSection = workspace && ['inventory','manage'].includes(requested);
+  const next = workspaceSection || Object.hasOwn(sections,requested) ? requested : 'overview';
   if (section !== next) { selected = undefined; search.value = ''; }
   section = next;
   if (section === 'sessions' && sessionId) {
@@ -155,14 +202,19 @@ function navigate(focusTitle = false) {
     if (link.hash === '#' + section) link.setAttribute('aria-current','page');
     else link.removeAttribute('aria-current');
   }
-  find('#page-title').textContent = sections[section]?.title ?? 'Overview';
+  find('#page-title').textContent = workspaceSection ? (section === 'inventory' ? 'Inventory' : 'Session controls') :
+    sections[section]?.title ?? 'Overview';
   find('#page-heading').dataset.overview = String(section === 'overview');
-  find('#section-description').textContent = sections[section]?.description ?? 'Totals cover all records shared by the handheld.';
+  find('#section-description').textContent = sections[section]?.description ?? '';
   find('#overview').hidden = section !== 'overview';
-  catalog.hidden = section === 'overview';
+  catalog.hidden = section === 'overview' || Boolean(workspaceSection);
+  if (workspace) workspace.hidden = !workspaceSection;
   menu.setAttribute('aria-expanded','false');
   if (!catalog.hidden) renderRecords();
-  if (focusTitle) find('#page-title').focus();
+  if (focusTitle) {
+    find('#content').scrollTop = 0;
+    find('#page-title').focus({preventScroll:true});
+  }
 }
 
 async function fetchRecords() {
@@ -184,13 +236,12 @@ async function fetchRecords() {
         else renderRecords();
       }
     }
-    refreshed = new Date();
-    connection.className = 'status match';
-    connection.textContent = 'Handheld online. Refreshed ' + refreshed.toLocaleTimeString() + '.';
+    connection.textContent = '';
   } catch {
     connection.className = 'status hold';
-    connection.textContent = refreshed ? 'Handheld offline. Showing records fetched at ' + refreshed.toLocaleTimeString() + '.' :
-      'Handheld unreachable. Check sharing and the network, then refresh.';
+    const source = find('#workspace-panel') ? 'Workspace' : 'Handheld';
+    connection.textContent = previousBody !== undefined ? source + ' offline. Showing saved records.' :
+      source + ' unavailable. Check the connection and refresh.';
   } finally {
     inFlight = false;
     refresh.disabled = false;
@@ -212,6 +263,7 @@ nav.addEventListener('click',event => {
 });
 window.addEventListener('hashchange',() => navigate(true));
 refresh.addEventListener('click',fetchRecords);
+window.addEventListener('workspace-updated',fetchRecords);
 updateOverview();
 navigate();
 fetchRecords();

@@ -148,9 +148,12 @@ export function scanDelta(previous, current) {
   };
 }
 
+export const isCurrentManifestRun = (session, run) =>
+  Boolean(run && (run.manifestRevision ?? 1) === (session?.manifest?.revision ?? 1));
+
 export function canContinue(session, run) {
   return Boolean(session?.verifiedBy && session.identified && !session.closedAt &&
-    run?.state === 'Finished' && run.result?.status === 'Match');
+    isCurrentManifestRun(session,run) && run.state === 'Finished' && run.result?.status === 'Match');
 }
 
 export const roles = {admin:'Test lead', operator:'Operator', supervisor:'Supervisor', reviewer:'Reviewer'};

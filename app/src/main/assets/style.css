@@ -26,8 +26,9 @@ h3 {font-size:17px;margin:0 0 8px}
 p {margin:0 0 12px}
 small,.muted {color:var(--subtle)}
 #notice {white-space:pre-line}
-#notice:empty {display:none}
-#notice:not(:empty),.status {padding:8px 12px;background:var(--sky);border-radius:8px}
+.info-bubble:empty {display:none}
+.info-bubble,.status {padding:8px 12px;background:var(--sky);border-radius:8px}
+.info-bubble {border:1px solid var(--line);width:fit-content;max-width:100%}
 #notice[data-error],.status.hold,.status.interrupted,.status.incomplete {color:var(--hold);background:var(--clay)}
 .status.match {color:var(--match);background:var(--leaf)}
 .line {border-top:1px solid var(--line);padding-top:12px;margin-top:12px}
@@ -198,7 +199,28 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .pallet-pick input {width:22px;min-height:22px;accent-color:var(--action)}
 #build-form .secondary {width:100%}
 @media(max-width:420px) {.handheld .brand img {height:34px}}
-.mode-line {margin:12px 4px 0;font-size:14px}
 .home .search {margin-bottom:12px}
 .sku-gap {margin:8px 0}
 [hidden] {display:none !important}
+.workspace-strip {position:relative;display:grid;grid-template-columns:minmax(0,1.2fr) repeat(2,minmax(0,1fr));gap:8px;margin-bottom:12px}
+.workspace-strip:not(:has(select)) {grid-template-columns:repeat(2,minmax(0,1fr))}
+.workspace-bubble {
+  position:absolute;z-index:3;inset:calc(100% + 8px) 0 auto auto;max-width:min(240px,100%);margin:0;
+  padding:8px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);
+}
+.workspace-bubble[data-visible="false"] {
+  width:1px;height:1px;padding:0;border:0;overflow:clip;clip-path:inset(50%);
+}
+.workflow-dialog {width:min(calc(100% - 32px),400px);border:1px solid var(--line);border-radius:16px;padding:24px;background:var(--paper);color:var(--ink)}
+.workflow-dialog h2 {margin:12px 0 8px}
+.workflow-dialog button {width:100%;margin-top:16px}
+.workflow-tick {display:grid;place-items:center;width:52px;height:52px;border-radius:50%;background:var(--leaf);color:var(--match)}
+.workflow-tick::after {content:"";width:20px;height:11px;border:solid currentColor;border-width:0 0 3px 3px;transform:rotate(-45deg) translateY(-2px)}
+.workflow-dialog[open] .workflow-tick {animation:workflow-tick-in 220ms ease-out both}
+@keyframes workflow-tick-in {from {opacity:0;transform:scale(.72)} to {opacity:1;transform:scale(1)}}
+@media (prefers-reduced-motion:reduce) {.workflow-dialog[open] .workflow-tick {animation:none}}
+.workspace-strip-actions {display:contents}
+.workspace-strip :is(select,button) {height:48px;min-height:48px;min-width:0;margin:0}
+.workspace-strip-actions button {padding-inline:8px}
+.manifest-options:has(> button:nth-child(2):last-child) {display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+.manifest-options > button {min-height:48px}
