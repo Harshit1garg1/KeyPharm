@@ -1,18 +1,33 @@
-# Keypharm RFID POC handoff
+# KeyPharm RFID PoC handover
 
-## Current Harshit-Dev handoff
+## Connected PoC on Harshit-Dev
 
-Local follow-up on 25 November 2026. The connected platform demo links receipt `KP-IN-40`, a Storage count, and outbound session `KP-RECEIVED-40`. The same carton EPCs carry through each step. The current Android build is 0.9.15 (version code 36). See the [platform brief review and acceptance evidence](docs/platform-poc-review.md) for scope and remaining decisions.
+Updated 25 November 2026. Android version **0.9.15**, version code **36**. The demo links receipt `KP-IN-40`, a Storage count, and outbound session `KP-RECEIVED-40` using the same carton EPCs. The PC runs the dashboard and SQLite database. The C72 runs the handheld workflow and caches outbound records for sync after a reconnect.
 
-Start the PC-backed demo with `node tools/workspace-server.mjs` and follow the [connected demo guide](docs/connected-poc.md). The C72 cache holds records through outages and syncs with the local SQLite workspace after reconnecting. The connected demo uses a single handheld sign-in and a role selector between workflow steps.
+### Start the demo
 
-- The Administrator prepares sessions and manifests. The Supervisor records the physical check. The Operator scans the pallet, then the cartons, and confirms a clean match. The Administrator or Reviewer approves dispatch from the dashboard. The Administrator or Supervisor selects approved sessions and confirms dispatch in one batch.
-- Simulation defaults to Clean match. Rescans record the previous run's missing or extra EPCs as the reason. The operator picks or types a reason when repeating a clean scan.
-- Inventory shows On hand and Dispatched. The stock table opens one product's cartons beside it on desktop. Closed sessions can be reopened or given a new CSV before dispatch. Both changes preserve scan history and start a new verification.
-- Reset demo data is available to the Administrator and restores the initial 70 cartons. The C72 discards older queued records when it detects the reset. The connected demo has a local database and dashboard. TransIP hosting and Pilot work are pending.
-- Inbound receipt tagging accepts new EPCs for an outstanding product. **Demo barcode** starts checked. Clear it to scan a receipt Product Identifier using the integrated barcode reader or camera fallback.
-- Open a count on the dashboard, scan physically from **Stock tasks** on the handheld, and review the result on the dashboard. The app also supports a simulated count for synthetic tags. Cancel an unfinished count to start fresh while keeping the scan history.
-- Node model and browser smoke checks cover the connected workflow. The physical RFID demonstration uses the optional local sample CSV. Keep the sample, database, account store, SDK and signing key outside Git.
+Run `node tools/workspace-server.mjs` with Node 24 from the project folder, then open the [local dashboard](http://127.0.0.1:8790). For a C72 connected over ADB, forward handheld localhost to the PC with `adb -s <device> reverse tcp:8790 tcp:8790`. The Dev APK uses package `be.keypharm.rfid.poc.dev`. The [connected demo guide](docs/connected-poc.md) covers signing, build prerequisites, and a complete rehearsal. Use the shared demo sign-in once per interface, then switch roles using the Role selector.
+
+| Role | Demo responsibilities |
+| --- | --- |
+| Administrator (Test lead) | Imports receipts and manifests, prepares outbound sessions, manages reader power, and can approve and dispatch from the dashboard. |
+| Operator | Scans receipt Product Identifiers and carton EPCs, runs stock counts, and verifies outbound pallets and cartons on the C72. |
+| Supervisor | Records the outbound physical check, reviews count results, and dispatches sessions with approval. |
+| Reviewer | Records dispatch approval on the dashboard. |
+
+### What to present
+
+1. **Inbound.** The Administrator imports a receipt CSV in **Inbound**. The optional `product_identifier` column accepts a barcode, SKU, or supplier reference. The Operator opens the task on the C72 and selects **Scan barcode**. **Demo barcode** starts enabled. Clear it for the integrated barcode reader with camera fallback. The RFID reader stops after the first valid EPC. **×** discards an unconfirmed read. **Confirm** links the EPC to the product and saves it to the receipt and inventory. The dashboard shows the saved result after refresh.
+2. **Inventory and count.** The demo starts with 20 Physalis, 15 Tiger Balm, and 35 Biotona cartons. Generated labels use the product, a demo size (`XS`, `S`, `M`, or `L`), and a number, for example `Physalis-M-01`. Inventory shows **On hand** and **Dispatched**, with per-carton EPC and movement history. The Administrator’s Destination menu includes Receiving, Storage, Staging, and Hold. It disables the current location. A hold requires a reason and confirmation. Open a count in the dashboard, scan the location on the C72, and review the result as Supervisor. Use count simulation for synthetic demo tags.
+3. **Outbound.** After the Supervisor records the physical check, the Operator identifies the pallet first and scans its cartons. Missing or extra EPCs block **Continue**. A repeat after a discrepancy supplies a reason from the earlier scan. A repeat after a clean scan requires a reason from the Operator. After accepting a clean match, the final review starts with editable text **Successful Run**. The signed-off review saves the final wording. The dashboard supports individual and batch dispatch. Dispatch updates stock in the same database transaction. Before dispatch, the Administrator can reopen a closed session or replace its CSV while preserving earlier scan evidence.
+4. **Reset.** **Reset demo data** restores the 70 starting cartons. The connected handheld drops queued records from the old dataset when it detects the reset.
+
+### Code and verification
+
+- [`handheld.mjs`](app/src/main/assets/handheld.mjs) handles the handheld views and workflow. [`MainActivity.java`](app/src/main/java/be/keypharm/rfid/MainActivity.java) connects the WebView to the C72 reader and Android barcode paths.
+- [`workspace-server.mjs`](tools/workspace-server.mjs) serves the PC dashboard and API. [`workspace-store.mjs`](tools/workspace-store.mjs) and [`stock-workflows.mjs`](tools/stock-workflows.mjs) manage SQLite sessions, receipt tasks, inventory and dispatch.
+- Run `node --test tests/*.test.mjs`, `py -3.13 tests/browser_smoke.py`, and `py -3.13 tests/connected_smoke.py`. The browser checks cover the editable review note, RFID stop on first read, discard before confirmation, and inventory updates after confirmation with a mocked handheld bridge. Use the real C72 and the local physical tags for hardware acceptance.
+- The vendor SDK, signing key, private hardware CSV, SQLite data, and account store are machine-local. TransIP hosting, production credentials and database, client data contracts, and Pilot acceptance remain follow-up work. See the [platform brief review](docs/platform-poc-review.md) and [questionaire](docs/questionaire.md).
 
 ## Historical standalone baseline
 
