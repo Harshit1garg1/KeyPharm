@@ -88,7 +88,8 @@ let selected;
 let view = 'sessions';
 let pendingImport;
 let rescanReason = '';
-let scenario = 'Missing one';
+const defaultScenario = 'Clean match';
+let scenario = defaultScenario;
 let active;
 let reader = {ready:false,message:'Checking reader…'};
 let powerRequest;
@@ -120,6 +121,14 @@ function clearDrafts(prefix) {
 const session = () => store.sessions.find(entry => entry.id === selected);
 const latest = s => s?.runs.at(-1);
 const latestCurrentRun = s => s?.runs.findLast(run => isCurrentManifestRun(s,run));
+function automaticRescanReason(run) {
+  const missing = run?.result?.missing?.length;
+  const extra = run?.result?.extra?.length;
+  if (missing && extra) return 'Missing cartons and extra EPCs detected';
+  if (missing) return 'Missing cartons';
+  if (extra) return 'Extra EPCs detected';
+  return '';
+}
 function feedback(message, error = false) {
   notice.textContent = message;
   notice.toggleAttribute('data-error',error);
@@ -515,6 +524,7 @@ function readerSettings(s) {
 }
 function scanPanel(s) {
   const run = latestCurrentRun(s);
+  const automaticReason = automaticRescanReason(run);
   const isHardware = s.source === 'C72 hardware';
   const ready = !isHardware || reader.ready;
   return '<section class="scan-workspace"><div class="row spread scan-nav">' +
@@ -533,13 +543,12 @@ function scanPanel(s) {
       button('reconnect','Check reader','class="secondary"') : '') +
     '<p id="scan-clock" class="scan-clock" hidden></p><div id="scan-results" class="scan-results">' + scanSummary(s) + '</div>' +
     (!isHardware && s.identified ? '<label>Demo reads<select id="scenario">' +
-      ['Missing one','Unexpected extra',...(connected ? ['Missing and unexpected'] : []),'Clean match','Interrupted'].map(item => '<option ' + (scenario === item ? 'selected' : '') +
+      [defaultScenario,'Missing one','Unexpected extra','Missing and unexpected','Interrupted'].map(item => '<option ' + (scenario === item ? 'selected' : '') +
         '>' + item + '</option>').join('') + '</select></label>' : '') +
-    // FR-19: pick one of the design's reasons or type another.
-    (s.identified && run ? '<label>Rescan reason<input id="rescan" list="rescan-reasons" maxlength="160" value="' + escape(rescanReason) +
-      '" placeholder="Pick or type what changed"></label><datalist id="rescan-reasons">' +
+    (s.identified && run ? '<label>Rescan reason<input id="rescan" maxlength="160" value="' + escape(automaticReason || rescanReason) +
+      '"' + (automaticReason ? ' readonly></label>' : ' list="rescan-reasons" placeholder="Pick or type what changed"></label><datalist id="rescan-reasons">' +
       ['Missed carton','Label repositioned','Pallet rebuilt','Shielding adjusted','Scan method changed']
-        .map(reason => '<option value="' + reason + '"></option>').join('') + '</datalist>' : '') +
+        .map(reason => '<option value="' + reason + '"></option>').join('') + '</datalist>') : '') +
     (!isHardware ? '<button type="button" id="demo-trigger" class="secondary scan-cta">Hold demo trigger</button>' : '') +
     // Glove-friendly alternative to the trigger: tap once to start, tap again to stop (§6 scan screen).
     (isHardware ? '<button type="button" id="hw-toggle" class="scan-cta" ' + (!ready && !active ? 'disabled' : '') +
@@ -629,9 +638,9 @@ function begin() {
   const hardware = s.source === 'C72 hardware';
   if (hardware && !reader.ready) { feedback(reader.message,true); return; }
   const kind = s.identified ? 'cartons' : 'pallet';
-  const retry = kind === 'cartons' && Boolean(latestCurrentRun(s));
-  const reason = retry ? (document.querySelector('#rescan')?.value.trim() ?? rescanReason.trim()) : '';
-  if (retry && !reason) { feedback('Enter a rescan reason before starting another carton scan.',true); return; }
+  const previous = kind === 'cartons' && latestCurrentRun(s);
+  const reason = previous ? automaticRescanReason(previous) || rescanReason.trim() : '';
+  if (previous && !reason) { feedback('Enter a rescan reason before starting another carton scan.',true); return; }
   const startedAt = now();
   const capture = {id:id(),kind,hardware,startedAt,scenario,observations:{},ending:false};
   commit(() => {
@@ -739,6 +748,7 @@ function finalize(interrupted, message) {
   if (interrupted) bridge?.feedback('error');
   active = undefined;
   rescanReason = '';
+  if (capture.kind === 'pallet' && s.identified) scenario = defaultScenario;
   feedback(capture.kind === 'pallet' && !s.identified ? 'Pallet EPC not confirmed: no tag from this manifest was read. Scan closer to the pallet and retry.' : '',capture.kind === 'pallet' && !s.identified);
   render();
   if (capture.kind === 'pallet' && s.identified) focusScan();
@@ -923,6 +933,7 @@ document.addEventListener('click', event => action(() => {
     selected = control.dataset.open;
     view = 'session';
     rescanReason = '';
+    scenario = defaultScenario;
   }
   if (command === 'new' && canCreate()) view = 'new';
   if (command === 'build-open' && s && permits(role,'manifest') && !s.closedAt && !s.confirmedAt) { builder = {tags:{}}; view = 'build'; }
@@ -980,7 +991,7 @@ document.addEventListener('click', event => action(() => {
     builder = undefined;
     pendingImport = undefined;
     rescanReason = '';
-    scenario = 'Missing one';
+    scenario = defaultScenario;
     simulatedKeys = false;
     dashboardUrl = '';
     dashboardQr = '';
@@ -1115,10 +1126,16 @@ function download(name,text) {
 // Pointer capture and key-up implement the same hold/release behavior as the physical trigger.
 root.addEventListener('pointerdown',event => {
   if (event.target.id !== 'demo-trigger' || event.button !== 0) return;
+  event.preventDefault();
   event.target.setPointerCapture(event.pointerId);
   action(begin);
 });
-root.addEventListener('pointerup',event => { if (event.target.id === 'demo-trigger') action(() => end()); });
+root.addEventListener('pointerup',event => {
+  if (event.target.id !== 'demo-trigger' || !active || active.hardware) return;
+  // Keep the release gesture on the trigger before replacing it with the next scan screen.
+  const capture = active;
+  setTimeout(() => { if (active === capture) action(() => end()); },0);
+});
 root.addEventListener('pointercancel',event => { if (event.target.id === 'demo-trigger') action(() => end(true)); });
 root.addEventListener('keydown',event => {
   if (event.target.id !== 'demo-trigger' || !['Enter',' '].includes(event.key)) return;
@@ -1188,7 +1205,7 @@ if (connected) {
     view = 'sessions';
     selected = builder = pendingImport = undefined;
     query = rescanReason = '';
-    scenario = 'Missing one';
+    scenario = defaultScenario;
     pendingRecordRender = true;
     publish();
   };

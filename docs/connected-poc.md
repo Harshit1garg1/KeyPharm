@@ -16,7 +16,7 @@ The local demo uses the password `testing123` for all demo usernames. The server
 2. Under **Session controls**, open the prepared `KP-OUT-40` session. On a clean database, create it with **Simulation** and **Use Sample CSV**. On-hand stays at 70 until dispatch.
 3. As Supervisor, record the physical check. For a simulated presentation, say that the check is simulated and enter that in the notes. For hardware, check the actual carton contents and tags at the pallet.
 4. As Operator on the C72, open the session and run the pallet scan. In Simulation, choose **Missing and unexpected**. Show 40 observed, 39 matched, one missing, and one unexpected. Continue stays disabled.
-5. Choose **Clean match**, enter the rescan reason, and run again. Continue confirms the clean result. The first result stays in the evidence.
+5. Choose **Clean match** and run again. The app fills the rescan reason from the prior missing and unexpected EPCs. Continue confirms the clean result. The first result stays in the evidence. To rescan after a clean match, pick or enter a reason first.
 6. On the PC, the Test lead or Reviewer opens the session in **Outbound sessions** and chooses **Approve dispatch** after verifying the evidence. The Test lead or Supervisor can then select several approved sessions and choose **Confirm dispatch**. Inventory now shows 6 Juice, 5 Tiger Balm, and 19 Biotona on hand. If any selected session fails validation, the whole batch rolls back.
 7. Open the dispatched session to inspect its evidence and the approval and dispatch log entries.
 

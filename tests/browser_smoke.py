@@ -96,13 +96,17 @@ with sync_playwright() as playwright:
     expect(device.get_by_role("heading", name="Scan cartons")).to_be_visible()
     expect(device.get_by_text("Pallet verified by UHF EPC.")).to_be_visible()
     expect(device.get_by_label("Rescan reason")).to_have_count(0)
+    expect(device.get_by_label("Demo reads")).to_have_value("Clean match")
+    expect(device.get_by_role("dialog")).to_have_count(0)
     proceed = device.get_by_role("button", name="Continue", exact=True)
 
+    device.get_by_label("Demo reads").select_option("Missing one")
     hold(device)
     expect(proceed).to_be_disabled()
     expect(device.locator("#scan-results")).to_contain_text("Incomplete")
     expect(device.locator(".tag-row[data-tag-status=matched]")).to_have_count(3)
     expect(device.locator(".tag-row[data-tag-status=missing]")).to_have_count(1)
+    expect(device.get_by_label("Rescan reason")).to_have_value("Missing cartons")
     device.get_by_role("button", name="Session details").click()
     device.get_by_label("Note on the current run").fill("Carton behind stretch wrap")
     device.reload()  # the open session and the half-typed note both come back from localStorage
@@ -132,7 +136,7 @@ with sync_playwright() as playwright:
     expect(device.get_by_label("Rescan reason")).to_have_count(0)
     expect(device.locator("#scan-results")).to_contain_text("Ready to scan")
     hold(device)
-    expect(device.locator("#rescan-reasons option")).to_have_count(5)  # FR-19: pick a reason or type one
+    expect(device.get_by_label("Rescan reason")).to_have_value("Extra EPCs detected")
     expect(proceed).to_be_disabled()
     expect(device.locator("#scan-results .status")).to_have_text("Hold: unexpected reads")
     expect(device.locator(".tag-row[data-tag-status=unexpected]")).to_contain_text("Unexpected")
@@ -144,7 +148,6 @@ with sync_playwright() as playwright:
     expect(proceed).to_be_disabled()
 
     device.get_by_label("Demo reads").select_option("Clean match")
-    device.get_by_label("Rescan reason").fill("Neighbor label was removed")
     trigger = device.get_by_role("button", name="Hold demo trigger")
     trigger.scroll_into_view_if_needed()
     box = trigger.bounding_box()
@@ -162,6 +165,8 @@ with sync_playwright() as playwright:
     device.screenshot(path="build/handheld-reading.png")
     device.mouse.up()
     expect(proceed).to_be_enabled()
+    expect(device.get_by_label("Rescan reason")).to_have_value("")
+    expect(device.locator("#rescan-reasons option")).to_have_count(5)
     device.screenshot(path="build/handheld-smoke.png", full_page=True)
     proceed.click()
     expect(device.get_by_text("Clean carton match confirmed.")).to_be_visible()
@@ -176,6 +181,7 @@ with sync_playwright() as playwright:
     runs = snapshot["sessions"][0]["runs"]
     assert [run["result"]["status"] for run in runs] == ["Incomplete", "Hold", "Match"]
     assert len(runs[0]["result"]["missing"]) == 1 and len(runs[1]["result"]["extra"]) == 1
+    assert runs[2]["reason"] == "Extra EPCs detected"
     record = snapshot["sessions"][0]
     assert (record["creator"], record["verifiedBy"], runs[0]["operator"], record["closure"]["actor"]) ==         ("Operator C", "Verifier B", "Operator C", "Operator C"), record
     assert any(log["action"] == "Unexpected EPC neighbouring tag" for log in record["logs"])
