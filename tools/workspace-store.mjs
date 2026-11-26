@@ -276,7 +276,7 @@ export function createWorkspace(path, hardwareCsv = '') {
       if (input.power !== null && (!Number.isInteger(input.power) || input.power < 5 || input.power > 30)) fail('Use 5 to 30 dBm.',400);
       current.power = input.power === null ? null : {requested:input.power,requestedAt:time(),by:user.name};
     }
-    for (const key of ['stockPower','palletPower','lookupPower']) {
+    for (const key of ['stockPower','palletPower','lookupPower','identifyPower']) {
       const power = input[key];
       if (power === undefined) continue;
       if (!(key === 'lookupPower' && power === null) && (!Number.isInteger(power) || power < 5 || power > 30)) {

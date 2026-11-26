@@ -102,7 +102,7 @@ let receiptProduct = '', receiptCapture, receiptRead, receiptUpload;
 let demoBarcode = true, pendingBarcode;
 // The Search tab keeps the internal name 'lookup'; the Lookup tab is 'identify'.
 let palletTask, palletRead, utilityScan, lookupSessionId, lookupTarget, lookupRead, lookupTimer, identifyRead;
-const identifyPower = 10; // dBm: low, so the tag held close wins. ponytail: fixed, add an admin setting if a site needs another.
+const identifyPower = () => connected?.controls.identifyPower ?? 10; // dBm: low by default, so the tag held close wins.
 let pendingImport;
 let rescanReason = '';
 const defaultScenario = 'Clean match';
@@ -515,7 +515,7 @@ function startUtilityScan() {
   lookupRead = identifyRead = undefined;
   feedback('');
   if (kind === 'pallet') bridge.startStockReader(utilityScan.id,connected.controls.palletPower ?? 15);
-  else if (kind === 'identify') bridge.startStockReader(utilityScan.id,identifyPower);
+  else if (kind === 'identify') bridge.startStockReader(utilityScan.id,identifyPower());
   else if (lookupPower != null && bridge.startStockReader) bridge.startStockReader(utilityScan.id,lookupPower);
   else bridge.startReader(utilityScan.id);
   render();

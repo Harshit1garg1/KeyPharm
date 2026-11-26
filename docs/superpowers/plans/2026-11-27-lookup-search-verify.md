@@ -12,7 +12,7 @@ capture (`utilityScan`) for the new `identify` view. Native code is unchanged.
 ## Global Constraints
 
 - Version 0.9.25, versionCode 46.
-- Lookup power 10 dBm. Stored strings and setting keys unchanged.
+- Lookup power 10 dBm by default, new setting `identifyPower`. Stored strings and existing setting keys unchanged.
 - Sign with the key whose SHA-256 starts `fd7b153a` (same as the 0.9.24 release).
 
 ## Review Focus

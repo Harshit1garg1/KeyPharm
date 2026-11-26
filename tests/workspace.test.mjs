@@ -342,6 +342,16 @@ test('one generated manifest verifies two pallets in sequence before dispatching
   } finally { db.close(); }
 });
 
+test('admin sets Lookup power between 5 and 30 dBm', () => {
+  const db = createWorkspace(':memory:');
+  try {
+    const set = identifyPower => db.setControls(lead,{revision:db.settings().revision,operationId:randomUUID(),identifyPower});
+    assert.equal(set(18).identifyPower,18);
+    for (const bad of [4,31,10.5,null]) assert.throws(() => set(bad),/5 to 30 dBm/);
+    assert.equal(db.settings().identifyPower,18);
+  } finally { db.close(); }
+});
+
 test('operator sync skips unchanged sessions but requires verification for new scan evidence', () => {
   const db = createWorkspace(':memory:');
   try {

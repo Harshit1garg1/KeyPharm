@@ -106,5 +106,27 @@ with sync_playwright() as playwright:
 
     assert page.evaluate("localStorage.getItem('keypharm-poc-v1')") == stored, "Lookup must not write records"
     assert not errors, json.dumps(errors)
+
+    # Connected handheld: the admin's Lookup power is used and synced stock fills in the carton details.
+    synced = browser.new_page(viewport={"width":360, "height":700}, has_touch=True)
+    synced.on("pageerror", lambda error: errors.append(str(error)))
+    synced.route("https://handheld.test/**", serve_assets)
+    synced.add_init_script(bridge + """
+      window.KeypharmAndroid.workspaceRequest = () => {};
+      const seed = (key,value) => localStorage.setItem('keypharm-connected-v1' + key,JSON.stringify(value));
+      seed('-auth',{header:'Basic x',user:{name:'Operator',role:'operator'}});
+      seed('-controls',{revision:1,plan:[],power:null,identifyPower:18});
+      seed('-stock',[{epc:'AB00FF',carton:'ST-9',sku:'Ginger',location:'Rack A',state:'available'}]);
+    """)
+    synced.goto("https://handheld.test/handheld.html")
+    synced.get_by_role("navigation", name="Main menu").get_by_role("button", name="Lookup").click()
+    synced.evaluate("() => { window.testReads = [{epc:'AB00FF', rssi:'-42'}]; }")
+    synced.locator("[data-action=utility-scan]").click()
+    found = synced.locator(".tag-result")
+    expect(found.get_by_role("heading", name="Carton ST-9")).to_be_visible()
+    expect(found).to_contain_text("Rack A")
+    expect(found).to_contain_text("Available")
+    assert synced.evaluate("window.stockReads") == [18]
+    assert not errors, json.dumps(errors)
     browser.close()
     print("Lookup smoke test passed")

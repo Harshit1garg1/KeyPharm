@@ -36,7 +36,7 @@ In **Inventory → Pallets**, import one physical pallet per row with `pallet_re
 
 Open **Search** in the bottom menu and select any session with a manifest. Reader diagnostics, the test plan, and evidence tools are under **Settings**. Select the pallet or one carton and start the reader. The indicator breathes and the beep speeds up as the reader reports a stronger signal for that EPC. The RSSI below it is a signal reading in dBm. The beep stops when the target has not been detected recently.
 
-Open **Lookup** to find out what an unknown tag is. Hold the reader close and press **Scan tag** or the trigger. The read runs at 10 dBm and the strongest tag wins. A carton shows SKU, location, state, batch and sessions from the synced stock and session manifests; a pallet shows its sessions. A tag that is in neither shows **Not in records**, including a pallet that exists only in pallet inventory. Lookup writes no records.
+Open **Lookup** to find out what an unknown tag is. Hold the reader close and press **Scan tag** or the trigger. The read runs at 10 dBm unless the Administrator sets another **Lookup Power**, and the strongest tag wins. A carton shows SKU, location, state, batch and sessions from the synced stock and session manifests; a pallet shows its sessions. A tag that is in neither shows **Not in records**, including a pallet that exists only in pallet inventory. Lookup writes no records.
 
 ## Checks
 

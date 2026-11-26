@@ -281,7 +281,9 @@ function adminSettings() {
     '<label>Pallet Scan Power (dBm)<input name="palletPower" type="number" min="5" max="30" step="1" required value="' +
     (setting.palletPower ?? 15) + '"></label>' +
     '<label>Search Power (dBm)<input name="lookupPower" type="number" min="5" max="30" step="1" placeholder="Use session power" value="' +
-    escape(setting.lookupPower ?? '') + '"></label></div>' +
+    escape(setting.lookupPower ?? '') + '"></label>' +
+    '<label>Lookup Power (dBm)<input name="identifyPower" type="number" min="5" max="30" step="1" required value="' +
+    (setting.identifyPower ?? 10) + '"></label></div>' +
     '<div class="row workspace-actions"><button class="primary-button">Save test settings</button></div></form>' +
     '<div class="workspace-reset-row"><button type="button" data-action="reset">Reset data *</button></div></div></details>';
 }
@@ -580,6 +582,8 @@ panel.addEventListener('submit', async event => {
     if (palletPower !== (data.controls.palletPower ?? 15)) change.palletPower = palletPower;
     const lookupPower = values.get('lookupPower') === '' ? null : Number(values.get('lookupPower'));
     if (lookupPower !== (data.controls.lookupPower ?? null)) change.lookupPower = lookupPower;
+    const identifyPower = Number(values.get('identifyPower'));
+    if (identifyPower !== (data.controls.identifyPower ?? 10)) change.identifyPower = identifyPower;
     await mutate('api/settings',change);
     return;
   }
