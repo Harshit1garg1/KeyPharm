@@ -181,6 +181,14 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .reader-body p {margin:0}
 
 /* Primary action in the thumb zone, always reachable. */
+.bottom-tabs {position:fixed;inset:auto 0 0;z-index:6;padding:4px 12px calc(4px + env(safe-area-inset-bottom));background:var(--paper);border-top:1px solid var(--line)}
+.bottom-tabs > div {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;max-width:672px;margin:auto}
+.bottom-tabs button {min-height:48px;padding:8px 4px;border:0;background:transparent;color:var(--muted);font-size:.9rem}
+.bottom-tabs button svg {display:block;width:24px;height:24px;margin:auto;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.bottom-tabs button[aria-current="page"] {background:var(--sky);color:var(--action);font-weight:700}
+.shell:has(.bottom-tabs) {padding-bottom:calc(74px + env(safe-area-inset-bottom))}
+.shell:has(.bottom-tabs) .actionbar {bottom:calc(57px + env(safe-area-inset-bottom))}
+.shell:has(.bottom-tabs):has(.actionbar) {padding-bottom:calc(160px + env(safe-area-inset-bottom))}
 .actionbar {position:fixed;left:0;right:0;bottom:0;z-index:5;padding:12px 24px;background:var(--workspace);border-top:1px solid var(--line)}
 .actionbar .scan-cta {display:flex;max-width:672px;margin:0 auto}
 .shell:has(.actionbar) {padding-bottom:104px}
@@ -208,13 +216,21 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .workspace-strip {position:relative;display:grid;grid-template-columns:minmax(0,1.2fr) repeat(2,minmax(0,1fr));gap:8px;margin-bottom:12px}
 .workspace-strip:not(:has(select)) {grid-template-columns:repeat(2,minmax(0,1fr))}
 .workspace-bubble {
-  position:absolute;z-index:3;inset:calc(100% + 8px) 0 auto auto;max-width:min(240px,100%);margin:0;
-  padding:8px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);
+  position:fixed;z-index:8;bottom:calc(72px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);
+  width:max-content;max-width:min(320px,calc(100vw - 32px));margin:0;padding:8px 12px;border:0;
+  border-radius:18px;background:rgba(0,0,0,.82);color:#fff;pointer-events:none;
 }
-.workspace-bubble[data-visible="false"] {
-  width:1px;height:1px;padding:0;border:0;overflow:clip;clip-path:inset(50%);
+.workspace-bubble[data-visible="false"],.native-toast-status {
+  position:absolute;width:1px;height:1px;padding:0;border:0;overflow:clip;clip-path:inset(50%);pointer-events:none;
 }
 .workflow-dialog {width:min(calc(100% - 32px),400px);border:1px solid var(--line);border-radius:16px;padding:24px;background:var(--paper);color:var(--ink)}
+.lookup-indicator {width:112px;height:112px;margin:22px auto 6px;border:3px solid var(--line);border-radius:50%;background:var(--paper)}
+.lookup-indicator:not([data-signal="idle"]) {border-color:var(--action);background:var(--sky);animation:lookup-breathe 1.4s ease-in-out infinite}
+.lookup-indicator[data-signal="medium"] {animation-duration:.9s}
+.lookup-indicator[data-signal="strong"] {animation-duration:.5s}
+.lookup-label {text-align:center;margin:0}
+@keyframes lookup-breathe {0%,100% {transform:scale(.84);opacity:.65} 50% {transform:scale(1.07);opacity:1}}
+@media (prefers-reduced-motion:reduce) {.lookup-indicator:not([data-signal="idle"]) {animation:none}}
 .tagged-cartons {min-width:0;overflow-wrap:anywhere}
 #workflow-tags {max-height:min(40vh,300px);overflow:auto;text-align:left}
 .workflow-dialog h2 {margin:12px 0 8px}

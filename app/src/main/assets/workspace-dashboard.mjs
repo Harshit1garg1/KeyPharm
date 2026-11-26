@@ -1,11 +1,11 @@
-import {movementControls,stockPage} from './stock-dashboard.mjs';
+import {movementControls,receiptCartonDetails,stockPage} from './stock-dashboard.mjs';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, ch =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]);
 const nav = document.querySelector('#dashboard-nav');
 const workspaceSections = [
   ['inbound','Inbound','nav-inventory'],['inventory','Inventory','nav-inventory'],['counts','Stock counts','nav-scans'],
-  ['manage','Session controls','nav-manage'],['devices','Devices','nav-pallets'],['reports','Reports','nav-sessions']
+  ['manage','Session controls','nav-manage'],['manifests','Generate manifest','nav-manage'],['devices','Devices','nav-pallets'],['reports','Reports','nav-sessions']
 ];
 const section = () => location.hash.slice(1);
 const isWorkspace = () => workspaceSections.some(([key]) => key === section());
@@ -63,11 +63,12 @@ const statusBadge = status => '<span class="dashboard-badge" data-state="' + esc
 const actionButton = (key,label) => '<button type="button" data-action="' + key + '">' + label + '</button>';
 const controls = (s, user) => {
   const power = user.role === 'admin' && s.source === 'C72 hardware' ? actionButton('power','Change recommended power') : '';
-  if (s.dispatchedAt) return power;
+  const remove = user.role === 'admin' ? actionButton('remove','Remove session') : '';
+  if (s.dispatchedAt) return power + remove;
   const approval = user.role === 'admin' && data.approvable.includes(s.id) ? actionButton('approve','Approve dispatch') : '';
   if (s.closedAt) return user.role === 'admin' ?
-    actionButton('reopen','Reopen session') + actionButton('manifest','Change CSV') + approval + power : '';
-  return approval + power + (user.role === 'admin' && !s.confirmedAt && !s.acceptedAt ? actionButton('manifest',s.manifest ? 'Change CSV' : 'Load CSV') : '') +
+    actionButton('reopen','Reopen session') + actionButton('manifest','Change CSV') + approval + power + remove : '';
+  return approval + power + remove + (user.role === 'admin' && !s.confirmedAt && !s.acceptedAt ? actionButton('manifest',s.manifest ? 'Change CSV' : 'Load CSV') : '') +
     (['admin','supervisor'].includes(user.role) && s.manifest && !s.verifiedAt ? actionButton('physical','Record physical check') : '');
 };
 const csvPicker = id => '<label class="workspace-upload" data-csv-drop>' +
@@ -119,6 +120,7 @@ function inventory() {
 function cartonDetails(sku,cartons) {
   const active = history && cartons.find(c => c.epc === history.epc);
   const events = active ? '<div class="dashboard-fold-body"><h3>' + escape(active.carton) + ' history</h3>' +
+    receiptCartonDetails(active) +
     (history.entries.length ? '<ul class="log">' + history.entries.map(entry => '<li><strong>' + escape(entry.action) + '</strong> · ' +
       escape(entry.ref) + ' · ' + escape(entry.actor) + ' · ' + escape(new Date(entry.at).toLocaleString()) +
       (entry.reason ? '<br>' + escape(entry.reason) : '') + '</li>').join('') + '</ul>' : '<p>No movements recorded.</p>') +
@@ -144,8 +146,11 @@ function outboundTable() {
   const stockByEpc = new Map(data.inventory.map(carton => [carton.epc,carton.state]));
   const rows = data.sessions.map(s => {
     const eligible = data.dispatchable.includes(s.id);
+    const pallets = s.manifest?.pallets ?? [];
+    const cartons = pallets.length ? pallets.flatMap(pallet => pallet.cartons) : (s.manifest?.cartons ?? []);
+    const progress = pallets.filter(pallet => s.palletMatches?.[pallet.palletEpc]).length;
     const blocked = !s.dispatchedAt && (s.dispatchApproval || s.confirmedAt) ?
-      (s.manifest?.cartons ?? []).filter(carton => stockByEpc.get(carton.epc) !== 'available') : [];
+      cartons.filter(carton => stockByEpc.get(carton.epc) !== 'available') : [];
     const stockReason = blocked.length ? blocked.length + (blocked.length === 1 ? ' carton ' : ' cartons ') +
       (blocked.every(carton => stockByEpc.get(carton.epc) === 'dispatched') ? 'already dispatched' : 'unavailable') : '';
     const actions = controls(s,data.user);
@@ -161,6 +166,7 @@ function outboundTable() {
       (s.source === 'C72 hardware' ? '<small class="dispatch-block-reason">Recommended: ' +
         (data.controls.sessionPowers?.[s.id] ?? data.controls.power?.requested ?? 30) + ' dBm</small>' : '') + '</td><td>' +
       (stockReason ? statusBadge('Stock blocked') + '<small class="dispatch-block-reason">' + stockReason + '</small>' : statusBadge(stage(s))) +
+      (pallets.length > 1 && !s.dispatchedAt ? '<small class="dispatch-block-reason">' + progress + ' of ' + pallets.length + ' pallets matched</small>' : '') +
       '</td><td>' + dispatchButton + '</td><td>' + more + '</td></tr>';
   }).join('');
   return '<div class="row spread line"><h2>Outbound sessions</h2><div class="row">' +
@@ -173,6 +179,67 @@ function outboundTable() {
       '<th scope="col">Actions</th><th scope="col" aria-label="More actions"></th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table></div>' : '<p class="muted">No sessions yet.</p>');
 }
+let manifestSelected, manifestPreview;
+function manifestSettings() {
+  if (data.user.role !== 'admin') return '<p>Administrator access required.</p>';
+  const drafts = data.palletManifests ?? [];
+  const draft = drafts.find(item => item.id === manifestSelected) ?? drafts[0];
+  const esc = escape;
+  const form = (action,body) => '<form class="stock-action manifest-form" data-manifest-form="' + action + '">' + body + '</form>';
+  const hiddenId = draft ? '<input type="hidden" name="id" value="' + esc(draft.id) + '">' : '';
+  const submit = label => '<button class="primary-button">' + label + '</button>';
+  const devices = (data.devices ?? []).filter(device => Date.now() - Date.parse(device.lastContact) < 60_000);
+  const request = devices.length ? form('request','<label>Pallet reference<input name="reference" required maxlength="80"></label>' +
+    '<label>Handheld<select name="deviceId">' + devices.map(device => '<option value="' + esc(device.deviceId) + '">RFID handheld ' +
+      esc(device.deviceId) + '</option>').join('') + '</select></label>' + submit('Request pallet scan')) : '<p>No handheld is connected.</p>';
+  const chooser = drafts.length ? '<label>Manifest requests<select id="manifest-selection">' + drafts.map(item =>
+    '<option value="' + esc(item.id) + '"' + (draft.id === item.id ? ' selected' : '') + '>' +
+    esc(item.reference + ' · ' + item.status) + '</option>').join('') + '</select></label>' : '';
+  const table = (rows,selectable) => '<div class="workspace-table"><table><thead><tr>' + (selectable ? '<th scope="col">Select</th>' : '') +
+    '<th scope="col">Product</th><th scope="col">Carton</th><th scope="col">EPC</th><th scope="col">Pickup location</th></tr></thead><tbody>' +
+    rows.map(carton => '<tr>' + (selectable ? '<td><input type="checkbox" name="epc" value="' + esc(carton.epc) +
+      '" aria-label="Select ' + esc(carton.carton) + '"></td>' : '') + '<td>' + esc(carton.sku) + '</td><td>' + esc(carton.carton) +
+      '</td><td><code>' + esc(carton.epc) + '</code></td><td>' + esc(carton.location) + '</td></tr>').join('') + '</tbody></table></div>';
+  const pallets = draft?.pallets ?? (draft?.csv ? [{pallet:draft.reference,palletEpc:draft.palletEpc,cartons:draft.cartons}] : []);
+  const assigned = new Set(data.assignedCartonEpcs ?? []);
+  const palletList = pallets.map(pallet => '<details class="dashboard-fold"><summary><span>' + esc(pallet.pallet) + ' · ' +
+    pallet.cartons.length + ' cartons</span></summary><div class="dashboard-fold-body"><p><code>' + esc(pallet.palletEpc) +
+    '</code></p>' + table(pallet.cartons,false) + '</div></details>').join('');
+  const existing = (data.existingPallets ?? []).filter(pallet => pallet.draftId !== draft?.id);
+  const addPallet = draft?.status === 'Manifest ready' ? '<details class="dashboard-fold"' +
+    (panel.querySelector('#add-manifest-pallet[open]')?.dataset.draft === draft.id ? ' open' : '') +
+    ' id="add-manifest-pallet" data-draft="' + esc(draft.id) + '"><summary><span>Add another pallet</span></summary>' +
+    '<div class="dashboard-fold-body">' +
+    (existing.length ? form('add-existing',hiddenId +
+      '<label>Existing pallet<select name="palletEpc" required><option value="">Choose a pallet</option>' +
+      existing.map(pallet => '<option value="' + esc(pallet.palletEpc) + '">' +
+        esc(pallet.pallet + ' · ' + pallet.cartons.length + (pallet.cartons.length === 1 ? ' carton' : ' cartons')) +
+        '</option>').join('') + '</select></label>' + submit('Add existing pallet')) : '<p>No existing pallets are available.</p>') +
+    form('add-pallet',hiddenId + '<label>Next pallet reference<input name="reference" required maxlength="80"></label>' +
+      submit('Request new pallet scan')) + '</div></details>' : '';
+  let detail = '';
+  if (draft?.status === 'Pallet scanned') {
+    const available = data.inventory.filter(carton => carton.state === 'available' && !assigned.has(carton.epc));
+    const preview = manifestPreview?.id === draft.id ? manifestPreview.epcs.map(epc => available.find(item => item.epc === epc)) : [];
+    detail = preview.length && preview.every(Boolean) ?
+      '<h3>Preview pickup list</h3>' + table(preview,false) + form('generate',hiddenId +
+        preview.map(carton => '<input type="hidden" name="epc" value="' + esc(carton.epc) + '"><input type="hidden" name="locationAtPreview" value="' + esc(carton.location) + '">').join('') +
+        submit('Generate manifest') + '<button type="button" data-edit-manifest>Edit selection</button>') :
+      '<h3>Available cartons</h3>' + (available.length ? form('preview',hiddenId + table(available,true) + submit('Preview manifest')) :
+        '<p>No cartons are available.</p>');
+  } else if (draft?.csv) {
+    detail = '<p><a href="api/pallet-manifest.csv?id=' + encodeURIComponent(draft.id) + '" download data-manifest-download>Download CSV</a></p>' +
+      (draft.sessionId ? '<p><a href="#sessions/' + encodeURIComponent(draft.sessionId) + '">Open session</a></p>' : form('session',hiddenId +
+        '<label>Test ID<input name="testId" required maxlength="80" value="' + esc(draft.reference) + '"></label>' +
+        '<label>Location<input name="location" required value="Staging" maxlength="100"></label>' + submit('Create session from manifest')) +
+      addPallet);
+  }
+  return '<a href="#manage">Session controls</a>' + request + chooser + (draft ?
+    '<section class="line"><h3>' + esc(draft.reference) + '</h3><p>' + esc(draft.status) + ' · RFID handheld ' + esc(draft.deviceId) +
+    (draft.scanReference ? ' · ' + esc(draft.scanReference) : '') +
+    (draft.palletEpc ? ' · <code>' + esc(draft.palletEpc) + '</code>' : '') + '</p>' + palletList + detail +
+    form('cancel',hiddenId + '<button>Remove pallet manifest</button>') + '</section>' : '');
+}
 function manage() {
   const setting = data.controls;
   const controlsForm = '<details id="workspace-lead-settings" class="dashboard-fold"' +
@@ -183,10 +250,14 @@ function manage() {
     '<label>Requested Power (dBm)<input type="number" min="5" max="30" step="1" name="power" placeholder="30" value="' +
     escape(setting.power?.requested ?? '') + '"></label>' +
     '<label>Stock Task Power (dBm)<input name="stockPower" type="number" min="5" max="30" step="1" required value="' +
-    (setting.stockPower ?? 10) + '"></label></div>' +
+    (setting.stockPower ?? 10) + '"></label>' +
+    '<label>Pallet Scan Power (dBm)<input name="palletPower" type="number" min="5" max="30" step="1" required value="' +
+    (setting.palletPower ?? 15) + '"></label>' +
+    '<label>LookUp Power (dBm)<input name="lookupPower" type="number" min="5" max="30" step="1" placeholder="Use session power" value="' +
+    escape(setting.lookupPower ?? '') + '"></label></div>' +
     '<div class="row workspace-actions"><button class="primary-button">Save test settings</button></div></form>' +
     '<div class="line"><button type="button" data-action="reset">Reset demo data</button></div></div></details>';
-  return (data.user.role === 'admin' ? '<form id="workspace-create"><h2>New session</h2><div class="workspace-fields">' +
+  return (data.user.role === 'admin' ? '<p><a href="#manifests">Generate manifest</a></p><form id="workspace-create"><h2>New session</h2><div class="workspace-fields">' +
     '<label>Test ID<input name="testId" maxlength="80" required></label><label>Location<input name="location" maxlength="100" value="Staging" required></label>' +
     '<label>Reader source<select name="source"><option>Simulation</option><option value="C72 hardware">RFID handheld</option></select></label></div>' +
     '<div class="workspace-create-actions"><div class="workspace-csv-choice">' + csvPicker('create-csv-status') +
@@ -216,7 +287,7 @@ panel.after(confirmation);
 const render = () => {
   if (!data) { panel.textContent = message || 'Loading workspace…'; return; }
   panel.innerHTML = '<p id="workspace-message" role="status">' + escape(message) + '</p>' +
-    (section() === 'inventory' ? inventory() : section() === 'manage' ? manage() : stockPage(section(),data,stockData,stockSelection,receiptPreview)) +
+    (section() === 'inventory' ? inventory() : section() === 'manage' ? manage() : section() === 'manifests' ? manifestSettings() : stockPage(section(),data,stockData,stockSelection,receiptPreview)) +
     '<dialog id="workspace-dialog" aria-labelledby="workspace-dialog-title"><form method="dialog" id="workspace-dialog-form">' +
     '<h2 id="workspace-dialog-title"></h2><p></p><div class="workspace-dialog-fields"></div>' +
     '<div class="row workspace-actions"><button value="cancel" formnovalidate>Cancel</button>' +
@@ -282,6 +353,7 @@ async function mutate(path, payload) {
   let result;
   try {
     result = await readApi(path,{...payload,generation:data.generation});
+    if (path === 'api/pallet-manifest') { manifestSelected = result.id; manifestPreview = undefined; }
     if (['count','receipt'].includes(payload.action) && result.id) stockSelection = result.id;
     if (payload.action === 'receipt') { receiptPreview = receiptCsv = undefined; }
     if (['transfer','hold','release'].includes(payload.action) && history?.epc === payload.epc) {
@@ -319,7 +391,63 @@ async function mutate(path, payload) {
     updateSelection();
   }
 }
+panel.addEventListener('change', event => {
+  if (event.target.id !== 'manifest-selection') return;
+  manifestSelected = event.target.value;
+  manifestPreview = undefined;
+  message = '';
+  render();
+});
+panel.addEventListener('click', async event => {
+  const link = event.target.closest('[data-manifest-download]');
+  if (link) {
+    event.preventDefault();
+    try {
+      const response = await fetch(link.href,{cache:'no-store',headers:{'X-KeyPharm-Role':role}});
+      if (!response.ok || !response.headers.get('Content-Type')?.startsWith('text/csv')) throw new Error('Could not download the manifest CSV.');
+      const url = URL.createObjectURL(await response.blob());
+      const download = document.createElement('a');
+      download.href = url;
+      download.download = 'pallet-manifest.csv';
+      download.click();
+      setTimeout(() => URL.revokeObjectURL(url),1000);
+    } catch (error) { panel.querySelector('#workspace-message').textContent = error.message; }
+    return;
+  }
+  if (!event.target.closest('[data-edit-manifest]')) return;
+  const epcs = manifestPreview?.epcs ?? [];
+  manifestPreview = undefined;
+  render();
+  for (const option of panel.querySelectorAll('input[name="epc"]')) option.checked = epcs.includes(option.value);
+});
 panel.addEventListener('submit', async event => {
+  if (event.target.dataset.manifestForm) {
+    event.preventDefault();
+    const action = event.target.dataset.manifestForm;
+    const values = new FormData(event.target);
+    const epcs = values.getAll('epc');
+    if (action === 'preview') {
+      if (!epcs.length) { panel.querySelector('#workspace-message').textContent = 'Select at least one carton.'; return; }
+      manifestPreview = {id:values.get('id'),epcs};
+      render();
+      return;
+    }
+    const payload = {...Object.fromEntries(values),action,epcs,locations:values.getAll('locationAtPreview')};
+    if (action === 'cancel') {
+      const dialog = panel.querySelector('dialog');
+      dialog.returnValue = 'cancel';
+      dialog.querySelector('h2').textContent = 'Remove pallet manifest?';
+      dialog.querySelector('p').textContent = 'This removes it from the manifest list. Any session created from it stays available.';
+      dialog.querySelector('.workspace-dialog-fields').replaceChildren();
+      dialog.addEventListener('close',() => {
+        if (dialog.returnValue === 'confirm') void mutate('api/pallet-manifest',{...payload,confirmed:true});
+      },{once:true});
+      dialog.showModal();
+      return;
+    }
+    await mutate('api/pallet-manifest',payload);
+    return;
+  }
   if (event.target.dataset.stockAction) {
     event.preventDefault();
     const values = new FormData(event.target);
@@ -367,6 +495,10 @@ panel.addEventListener('submit', async event => {
     if (requested !== (data.controls.power?.requested ?? null)) change.power = requested;
     const stockPower = Number(values.get('stockPower'));
     if (stockPower !== (data.controls.stockPower ?? 10)) change.stockPower = stockPower;
+    const palletPower = Number(values.get('palletPower'));
+    if (palletPower !== (data.controls.palletPower ?? 15)) change.palletPower = palletPower;
+    const lookupPower = values.get('lookupPower') === '' ? null : Number(values.get('lookupPower'));
+    if (lookupPower !== (data.controls.lookupPower ?? null)) change.lookupPower = lookupPower;
     await mutate('api/settings',change);
     return;
   }
@@ -434,6 +566,7 @@ panel.addEventListener('click', async event => {
       'This records approval and deducts the selected cartons from on-hand stock.' : 'This deducts the selected cartons from on-hand stock.') :
     action === 'manifest' && record.closedAt ? 'Changing the CSV reopens the session and requires a new physical check.' :
     action === 'manifest' && record.manifest ? 'Changing the CSV requires a new physical check.' :
+    action === 'remove' ? 'Remove this session from the dashboard and handheld lists. Scan history and inventory are retained.' :
     action === 'reopen' ? 'Keep the current CSV and start a new verification. Previous scans stay in the session history.' :
     action === 'reset' ? 'Clear sessions, scans and test settings from the shared workspace and the handheld. Restore starting stock.' :
     'Session ' + record.testId;

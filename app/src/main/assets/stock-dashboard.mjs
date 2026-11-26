@@ -9,6 +9,12 @@ const button = label => '<button class="primary-button">' + label + '</button>';
 const list = items => items.length ? '<ul class="log">' + items.map(epc => '<li><code>' + esc(epc) + '</code></li>').join('') + '</ul>' : '';
 const form = (action,body) => '<form class="stock-action" data-stock-action="' + action + '">' + body + '</form>';
 
+export function receiptCartonDetails(details) {
+  const labels = [details?.batch_lot && 'Batch/lot ' + esc(details.batch_lot),
+    details?.units_per_carton && esc(details.units_per_carton) + ' units per carton'].filter(Boolean);
+  return labels.length ? '<div class="muted">' + labels.join(' · ') + '</div>' : '';
+}
+
 function runDetails(run,open) {
   const total = run.found.length + (run.outstanding ?? run.missing.length);
   return '<details class="dashboard-fold"' + (open ? ' open' : '') + '><summary><span>' + esc(time(run.at)) + ' · ' + esc(run.source) + '</span></summary>' +
@@ -27,7 +33,7 @@ function skuTotals(task, latest) {
     const expected = task.quantities?.[sku] ?? epcs.length;
     const received = task.receivedBySku?.[sku] ?? epcs.filter(epc => task.received.includes(epc)).length;
     const observed = latest?.bySku?.[sku] ?? epcs.filter(epc => latest?.found.includes(epc)).length;
-    return '<tr><th scope="row">' + esc(sku) + '</th><td>' + expected + '</td><td>' + observed + '</td><td>' + received +
+    return '<tr><th scope="row">' + esc(sku) + receiptCartonDetails(task.cartonDetails?.[sku]) + '</th><td>' + expected + '</td><td>' + observed + '</td><td>' + received +
       '</td><td>' + (expected - received) + '</td></tr>';
   });
   return '<div class="workspace-table"><table><thead><tr><th>Product</th><th>Expected</th><th>Observed</th><th>Received</th>' +
@@ -72,7 +78,7 @@ function receiptSetup(preview) {
     form('preview','<label>Receipt CSV<input name="csv" type="file" accept=".csv,text/csv" required></label>' + button('Preview receipt')) +
     (preview ? '<p>' + esc(preview.id) + ' · ' + esc(preview.location) + ' · ' + esc(preview.mode) + ' comparison</p><ul>' +
       preview.identifiers.map(([identifier,sku]) => '<li>' + esc(identifier) + (identifier === sku ? '' : ' · ' + esc(sku)) +
-        ' · ' + preview.quantities[sku] + '</li>').join('') + '</ul>' +
+        ' · ' + preview.quantities[sku] + receiptCartonDetails(preview.cartonDetails?.[sku]) + '</li>').join('') + '</ul>' +
       form('receipt',button('Create receipt')) : '');
   return '<details class="dashboard-fold"' + (preview ? ' open' : '') + '><summary><span>Import receipt' +
     '</span></summary><div class="dashboard-fold-body">' + importSetup + '</div></details>';

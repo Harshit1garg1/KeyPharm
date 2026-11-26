@@ -7,6 +7,7 @@ const outboundRef = 'KP-RECEIVED-40';
 const demoPallet = 'D60000000000000000000001';
 const unknownTag = 'F60000000000000000000001';
 const receiptHeaders = ['receipt_ref','source_ref','destination_location','sku','expected_cartons','carton_id','epc'];
+const receiptOptionalHeaders = ['product_identifier','batch_lot','units_per_carton'];
 const now = () => new Date().toISOString();
 const fail = (message,status = 409) => { throw Object.assign(new Error(message),{status}); };
 const field = (value, label) => {
@@ -31,9 +32,12 @@ export function nextCartonLabel(db,sku) {
 }
 
 export function stockWorkflows(db, products) {
-  if (!db.prepare('PRAGMA table_info(cartons)').all().some(column => column.name === 'location')) {
+  const cartonColumns = new Set(db.prepare('PRAGMA table_info(cartons)').all().map(column => column.name));
+  if (!cartonColumns.has('location')) {
     db.exec("ALTER TABLE cartons ADD COLUMN location TEXT NOT NULL DEFAULT 'Staging'");
   }
+  if (!cartonColumns.has('batch_lot')) db.exec('ALTER TABLE cartons ADD COLUMN batch_lot TEXT');
+  if (!cartonColumns.has('units_per_carton')) db.exec('ALTER TABLE cartons ADD COLUMN units_per_carton INTEGER');
   db.exec(`
     CREATE TABLE IF NOT EXISTS stock_tasks (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, body TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS stock_commands (id TEXT PRIMARY KEY, actor TEXT NOT NULL, body TEXT NOT NULL);
@@ -99,20 +103,25 @@ export function stockWorkflows(db, products) {
       createdAt:now(),actor:user.name,stockVersion:stockVersion(),expected,runs:[]});
   }
   function prepareReceipt(text) {
-    const header = typeof text === 'string' ? text.split(/\r?\n/,1)[0] : '';
-    const hasIdentifier = /[,;]\s*product_identifier\s*$/i.test(header);
-    const rows = parseCsvRows(text,hasIdentifier ? [...receiptHeaders,'product_identifier'] : receiptHeaders);
+    const header = typeof text === 'string' ? text.trimStart().split(/\r?\n/,1)[0].toLowerCase().split(/[,;]/).map(name => name.trim()) : [];
+    const optional = header.slice(receiptHeaders.length);
+    if (new Set(optional).size !== optional.length || optional.some(name => !receiptOptionalHeaders.includes(name))) {
+      fail('Use the receipt template headers.',400);
+    }
+    const rows = parseCsvRows(text,[...receiptHeaders,...optional]);
     if (rows.length > 500) fail('Use up to 500 receipt lines.',400);
     const [id,sourceRef,location] = rows[0];
     const quantities = {};
+    const cartonDetails = {};
     const identifiers = new Map();
     const expected = [];
     const seen = new Set();
     const mode = rows[0][6] ? 'EPC' : 'SKU';
-    rows.forEach(([ref,source,destination,rawSku,count,cartonId,tag,rawIdentifier],index) => {
+    rows.forEach(([ref,source,destination,rawSku,count,cartonId,tag,...values],index) => {
       const row = 'Row ' + (index + 2) + ': ';
       const sku = productSku(rawSku);
-      const identifier = rawIdentifier || sku;
+      const {product_identifier,batch_lot,units_per_carton} = Object.fromEntries(optional.map((name,i) => [name,values[i]]));
+      const identifier = product_identifier || sku;
       if (!id || !sourceRef || id.length > 80 || sourceRef.length > 100 || ref !== id || source !== sourceRef || destination !== location ||
           !locations.includes(location) || location === 'Hold') fail(row + 'use one receipt reference, source and destination.',400);
       const quantity = Number(count);
@@ -122,6 +131,17 @@ export function stockWorkflows(db, products) {
       if (identifier.length > 100 || (identifiers.has(identifier) && identifiers.get(identifier) !== sku)) {
         fail(row + 'use a Product Identifier that maps to one SKU.',400);
       }
+      const units = units_per_carton ? Number(units_per_carton) : null;
+      if (units_per_carton && (!/^\d+$/.test(units_per_carton) || !Number.isSafeInteger(units) || units < 1)) {
+        fail(row + 'units per carton must be a positive whole number.',400);
+      }
+      if (batch_lot?.length > 100) fail(row + 'batch/lot must be 100 characters or fewer.',400);
+      const details = {batch_lot:batch_lot || null,units_per_carton:units};
+      const previous = cartonDetails[sku];
+      if (previous && (previous.batch_lot !== details.batch_lot || previous.units_per_carton !== details.units_per_carton)) {
+        fail(row + 'use a separate receipt for this SKU with a different batch/lot or units per carton.',400);
+      }
+      cartonDetails[sku] = details;
       identifiers.set(identifier,sku);
       if (mode === 'EPC') {
         const epc = normalizeEpc(tag);
@@ -137,7 +157,7 @@ export function stockWorkflows(db, products) {
       quantities[sku] = (quantities[sku] ?? 0) + quantity;
     });
     if (Object.values(quantities).reduce((sum,n) => sum + n,0) > 500) fail('Use up to 500 expected cartons.',400);
-    return {id,sourceRef,location,mode,quantities,expected,identifiers:[...identifiers]};
+    return {id,sourceRef,location,mode,quantities,expected,identifiers:[...identifiers],cartonDetails};
   }
   function register(user,input,source = 'Manual entry') {
     const epc = normalizeEpc(input.epc), name = field(input.carton,'a carton reference');
@@ -177,8 +197,9 @@ export function stockWorkflows(db, products) {
     before ??= register(user,{epc,sku:line.sku,carton:expected?.carton ?? nextCartonLabel(db,line.sku)},source);
     const at = now();
     const remaining = [...new Map(lines.map(item => [item.sku,item.remaining])).values()].reduce((sum,n) => sum+n,0) - 1;
-    db.prepare("UPDATE cartons SET state='available',location=?,physical=max(physical,?) WHERE epc=?")
-      .run(task.location,simulated ? 0 : 1,epc);
+    const details = task.cartonDetails?.[line.sku];
+    db.prepare("UPDATE cartons SET state='available',location=?,physical=max(physical,?),batch_lot=?,units_per_carton=? WHERE epc=?")
+      .run(task.location,simulated ? 0 : 1,details?.batch_lot ?? null,details?.units_per_carton ?? null,epc);
     record(user,task.id,before,carton(epc),'Received','Product Identifier: ' + line.identifier,source);
     const receivedForSku = task.expected.filter(item => item.sku === line.sku && task.received.includes(item.epc)).length;
     task.receivedBySku ??= {};
@@ -245,7 +266,9 @@ export function stockWorkflows(db, products) {
       const remaining = remainingBySku.get(before.sku);
       if (!(remaining > 0)) fail('This scan contains more cartons than are outstanding for ' + before.sku + '.');
       remainingBySku.set(before.sku,remaining - 1);
-      db.prepare("UPDATE cartons SET state='available',location=? WHERE epc=?").run(task.location,epc);
+      const details = task.cartonDetails?.[before.sku];
+      db.prepare("UPDATE cartons SET state='available',location=?,batch_lot=?,units_per_carton=? WHERE epc=?")
+        .run(task.location,details?.batch_lot ?? null,details?.units_per_carton ?? null,epc);
       record(user,task.id,before,carton(epc),'Received',reason,run.source);
       task.received.push(epc);
       task.receivedBySku ??= {};
@@ -324,10 +347,6 @@ export function stockWorkflows(db, products) {
   }
   function prepareOutbound(user,task,create) {
     if (task.type !== 'receipt' || task.status !== 'Completed' || task.outbound) fail('Complete the receipt first.');
-    if (!tasks().some(count => count.type === 'count' && count.status === 'Reviewed' &&
-      count.location === task.location && task.received.every(epc => count.expected.some(item => item.epc === epc)))) {
-      fail('Review a count of the received cartons first.');
-    }
     if (task.received.some(epc => carton(epc)?.state !== 'available')) fail('Every carton must be on hand.');
     const ref = task.id === receiptId ? outboundRef : (task.id.slice(0,75) + '-OUT');
     const pallet = task.id === receiptId ? demoPallet : 'D6' + randomUUID().replaceAll('-','').slice(0,22).toUpperCase();
@@ -382,9 +401,10 @@ export function stockWorkflows(db, products) {
   const events = epc => epc ? db.prepare('SELECT * FROM stock_events WHERE epc=? ORDER BY id DESC').all(epc) :
     db.prepare('SELECT * FROM stock_events ORDER BY id DESC LIMIT 50').all();
   function report(type) {
-    if (type === 'receipt-template') return csv([...receiptHeaders,'product_identifier'],
-      [['KP-IN-CSV','Demo delivery','Storage',products[0].sku,2,'','',products[0].sku]]);
-    if (type === 'stock') return csv(['carton','epc','sku','location','stock_state'],inventory().map(c => [c.carton,c.epc,c.sku,c.location,c.state]));
+    if (type === 'receipt-template') return csv([...receiptHeaders,...receiptOptionalHeaders],
+      [['KP-IN-CSV','Demo delivery','Storage',products[0].sku,2,'','',products[0].sku,'LOT-DEMO-01',10]]);
+    if (type === 'stock') return csv(['carton','epc','sku','location','stock_state','batch_lot','units_per_carton'],
+      inventory().map(c => [c.carton,c.epc,c.sku,c.location,c.state,c.batch_lot,c.units_per_carton]));
     if (type === 'movements') return csv(['reference','epc','action','actor','time_utc','before','after','reason','input_source'],
       db.prepare('SELECT * FROM stock_events ORDER BY id').all().map(e => [e.ref,e.epc,e.action,e.actor,e.at,e.before_state,e.after_state,e.reason,e.source]));
     const kind = type === 'receipts' ? 'receipt' : 'count';

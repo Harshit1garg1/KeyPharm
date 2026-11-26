@@ -1,8 +1,8 @@
 # KeyPharm RFID PoC handover
 
-## Connected PoC on Harshit-Dev
+## Connected PoC
 
-Updated 25 November 2026. Android version **0.9.15**, version code **36**. The demo links receipt `KP-IN-40`, a Storage count, and outbound session `KP-RECEIVED-40` using the same carton EPCs. The PC runs the dashboard and SQLite database. The C72 runs the handheld workflow and caches outbound records for sync after a reconnect.
+Updated 26 November 2026. Android **0.9.21** (version code **42**) was built, installed, and launched on the C72 over ADB. The local dashboard server was restarted against the existing SQLite database, and its session count was preserved. This release is in the local `build/dark-dashboard` worktree, based on `origin/Harshit-Dev` at `8b7f04a`. The 0.9.21 changes are uncommitted. The demo links receipt `KP-IN-40`, a Storage count, and outbound session `KP-RECEIVED-40` using the same carton EPCs. The PC runs the dashboard and SQLite database. The C72 runs the handheld workflow and caches outbound records for sync after a reconnect.
 
 ### Start the demo
 
@@ -22,14 +22,33 @@ Run `node tools/workspace-server.mjs` with Node 24 from the project folder, then
 3. **Outbound.** After the Supervisor records the physical check, the Operator identifies the pallet first and scans its cartons. Missing or extra EPCs block **Continue**. A repeat after a discrepancy supplies a reason from the earlier scan. A repeat after a clean scan requires a reason from the Operator. After accepting a clean match, the final review starts with editable text **Successful Run**. The signed-off review saves the final wording. The dashboard supports individual and batch dispatch. Dispatch updates stock in the same database transaction. Before dispatch, the Administrator can reopen a closed session or replace its CSV while preserving earlier scan evidence.
 4. **Reset.** **Reset demo data** restores the 70 starting cartons. The connected handheld drops queued records from the old dataset when it detects the reset.
 
+### Dashboard manifest generation and reader settings
+
+- In **Generate manifest**, the Administrator selects a connected handheld and requests a pallet scan. The Operator opens the assigned task. The handheld scans for about 850 ms, stops automatically, and previews the EPC with the strongest reported RSSI. Tap **×** to discard it and scan again. **Send Scan** asks for confirmation before submitting the EPC to the dashboard.
+- The Administrator selects on-hand cartons and previews product names, EPCs, and pickup locations before generating the manifest. **Download CSV** uses the selected dashboard role and saves `pallet-manifest.csv`. The manifest can also create an outbound session directly. **LookUp** on the handheld can search by a manifest's pallet or carton EPC and shows signal strength with RSSI and proximity beeps.
+- **Session controls → Administrator settings** configures outbound, stock task, pallet capture, and LookUp power from 5 to 30 dBm. Outbound defaults to 30 dBm and supports per-session overrides. Stock tasks default to 10 dBm, and pallet capture for manifest requests defaults to 15 dBm. A blank LookUp setting uses the selected session's power.
+- Administrators can remove an outbound session or a pallet manifest after confirming. Removed sessions disappear from the dashboard and the handheld after sync. Scan history and inventory are preserved. Removing a manifest leaves any session created from it available. The handheld bottom bar uses icons for **Home**, **LookUp**, and **Settings**.
+
+- The carton picker shows on-hand cartons with no pallet assignment in a saved manifest or outbound session. The server checks the assignment again when saving. Inventory still counts assigned cartons as on hand until dispatch.
+- Open **Add another pallet** from a ready manifest. **Add existing pallet** moves a saved pallet and its carton assignments from another ready manifest. Pallets already in an outbound session are unavailable. The source keeps any remaining pallets and leaves the active list if emptied. **Request new pallet scan** sends a new tag request to the assigned handheld, then the Administrator maps the cartons.
+- Download one CSV or create one outbound session for all pallets. After the physical check, scan each displayed pallet tag and its cartons in CSV order. **Next pallet** requires a clean match for the current pallet. Dispatch requires clean matches for all pallets and deducts all their cartons together.
+- The local dashboard was restarted with the manifest update and preserved the workspace. All 33 Node tests and both browser smoke suites passed, including cross-manifest carton filtering and combining two saved pallets. The handheld continues to use Android 0.9.21.
+
+### Sync and feedback in 0.9.21
+
+- Older cached sessions and unchanged retries reconcile with the dashboard without submitting scan evidence. New pallet and carton scans still require physical verification. Genuine unsynced evidence stays queued.
+- Short notices use Android’s native toast. Verified on the C72 that **Sync now** showed **Synced**, the toast dismissed automatically, and the unverified session still showed **Check by hand**. All 32 Node tests and both browser smoke suites passed.
+
 ### Code and verification
 
 - [`handheld.mjs`](app/src/main/assets/handheld.mjs) handles the handheld views and workflow. [`MainActivity.java`](app/src/main/java/be/keypharm/rfid/MainActivity.java) connects the WebView to the C72 reader and Android barcode paths.
 - [`workspace-server.mjs`](tools/workspace-server.mjs) serves the PC dashboard and API. [`workspace-store.mjs`](tools/workspace-store.mjs) and [`stock-workflows.mjs`](tools/stock-workflows.mjs) manage SQLite sessions, receipt tasks, inventory and dispatch.
-- Run `node --test tests/*.test.mjs`, `py -3.13 tests/browser_smoke.py`, and `py -3.13 tests/connected_smoke.py`. The browser checks cover the editable review note, RFID stop on first read, discard before confirmation, and inventory updates after confirmation with a mocked handheld bridge. Use the real C72 and the local physical tags for hardware acceptance.
+- Run `node --test tests/*.test.mjs`, `py -3.13 tests/browser_smoke.py`, and `py -3.13 tests/connected_smoke.py`. All 30 Node tests and both browser smoke suites passed for 0.9.20. The tests cover downloading a two-pallet CSV, rejecting a neighboring pallet, advancing after a clean scan, and unlocking dispatch only after both pallets match. The APK installation and launch were verified on the C72. Live RFID validation of the multi-pallet sequence remains pending.
 - The vendor SDK, signing key, private hardware CSV, SQLite data, and account store are machine-local. TransIP hosting, production credentials and database, client data contracts, and Pilot acceptance remain follow-up work. See the [platform brief review](docs/platform-poc-review.md) and [questionaire](docs/questionaire.md).
 
 ## Historical standalone baseline
+
+The remaining sections describe the earlier standalone PoC and its acceptance history.
 
 Updated 24 November 2026. Work continues on `Naveen-Dev`, which carries GitHub `main` up to `de89561` (PRs #1 to #6 merged, tag `v0.8.2`). The Android build is 0.8.6 (versionCode 20): 0.8.5 is Harshit's dark records dashboard (PR #8), 0.8.6 adds the 0.8.4 design-gap fixes on top. 0.8.2 merged the separate **Keypharm RFID POC Reset** app (`be.keypharm.rfid.poc.reset`, built by Codex on 23 November 2026) back into the single Dev app (`be.keypharm.rfid.poc.dev`): the Dev app now has **Reset all local data**, and the Reset package is retired. On 24 November 2026 0.8.2 was installed over the Dev app on the C72 (existing sessions kept, reader ready at ETSI / 30 dBm) and the Reset app was uninstalled, so the C72 carries only the Dev app. The older `be.keypharm.rfid.poc` install and its local records were removed on 23 November 2026 at the user's request. [HANDOVER.md](HANDOVER.md) has Harshit's earlier handover notes. Docs were brought up to date on 24 November 2026: [docs/prd-poc.md](docs/prd-poc.md) holds scope, built status per requirement and milestones; [docs/questionaire.md](docs/questionaire.md) the open questions; README the demo and build steps. `docs/architecture.md`, the Kotlin plan and the research notes are marked as not adopted or historical.
 

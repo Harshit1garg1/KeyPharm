@@ -5,9 +5,9 @@ const read = (key,fallback) => {
   catch { return fallback; }
 };
 const write = (key,value) => localStorage.setItem(prefix + key,JSON.stringify(value));
-const fingerprint = s => JSON.stringify([
+const fingerprint = (s, legacy = false) => JSON.stringify([
   s.manifest, s.verifiedAt, s.palletAttempts, s.runs?.filter(run => run.state !== 'Reading'),
-  s.confirmedAt,s.closedAt,s.closure,s.logs?.filter(log => !log.action.endsWith('capture started'))
+  ...(legacy ? [] : [s.palletMatches,s.identified]),s.confirmedAt,s.closedAt,s.closure,s.logs?.filter(log => !log.action.endsWith('capture started'))
 ]);
 
 export function workspaceClient(bridge) {
@@ -15,6 +15,8 @@ export function workspaceClient(bridge) {
   const pending = new Map();
   const client = {auth:read('-auth',null), samples:read('-samples',{}), stock:read('-stock',[]), state:'Unsynced'};
   client.stockTasks = [];
+  client.palletTasks = [];
+  client.removedSessions = new Set(read('-removed-sessions',[]));
   const demoRoles = {admin:'Administrator',operator:'Operator',supervisor:'Supervisor',reviewer:'Reviewer'};
   if (client.auth?.user.canSwitch && Object.hasOwn(demoRoles,client.auth.user.role)) {
     client.auth.user.name = demoRoles[client.auth.user.role];
@@ -34,6 +36,8 @@ export function workspaceClient(bridge) {
     controlsChange = null;
     client.stock = [];
     client.stockTasks = [];
+    client.removedSessions.clear();
+    write('-removed-sessions',[]);
     client.controls = {revision:0,plan:[],power:null};
     write('-base',base);
     write('-queue',queue);
@@ -67,7 +71,9 @@ export function workspaceClient(bridge) {
       } else call.resolve(data);
     } catch (error) { call.reject(error); }
   };
-  const changes = list => list.filter(s => fingerprint(s) !== base[s.id] || queue[s.id]);
+  const hasLocalChanges = s => fingerprint(s) !== base[s.id] &&
+    (s.palletMatches || fingerprint(s,true) !== base[s.id]);
+  const changes = list => list.filter(s => !client.removedSessions.has(s.id) && (hasLocalChanges(s) || queue[s.id]));
   client.hasPending = list => changes(list).length > 0 || Boolean(controlsChange);
   client.stockPower = () => controlsChange?.stockPower ?? client.controls.stockPower ?? 10;
   client.sessionPowerOverride = id => {
@@ -117,6 +123,12 @@ export function workspaceClient(bridge) {
       client.state = 'Unsynced';
     } finally { busy = false; }
   };
+  client.submitPalletScan = async (task,epc) => {
+    if (refreshing) await refreshing;
+    const result = await request('pallet-manifest',{action:'scan',id:task.id,scanReference:task.scanReference,epc,generation});
+    client.palletTasks = client.palletTasks.filter(item => item.id !== task.id);
+    return result;
+  };
   client.stockAction = async (task,change) => {
     if (refreshing) await refreshing;
     if (busy) throw new Error('Wait for sync to finish before scanning.');
@@ -139,11 +151,26 @@ export function workspaceClient(bridge) {
       let workspace = await request('workspace');
       if (!safe()) return;
       adoptGeneration(workspace.generation,clearRecords);
+      client.removedSessions = new Set(workspace.removedSessions ?? []);
+      write('-removed-sessions',[...client.removedSessions]);
       let uploaded = false;
       for (const current of changes(list())) {
         if (!safe()) return;
         if (client.auth.user.role === 'reviewer') break;
-        const entry = queue[current.id] ?? {
+        const remote = workspace.sessions.find(s => s.id === current.id);
+        const queued = queue[current.id];
+        const cachedOnly = !hasLocalChanges(current) && (!queued || !hasLocalChanges(queued.session));
+        const alreadySynced = remote && fingerprint(remote) === fingerprint(current) &&
+          (!queued || fingerprint(queued.session) === fingerprint(remote));
+        if (remote && (cachedOnly || alreadySynced)) {
+          delete queue[current.id];
+          base[current.id] = fingerprint(remote);
+          write('-queue',queue);
+          write('-base',base);
+          if (current.workspaceRevision !== remote.workspaceRevision || fingerprint(current) !== fingerprint(remote)) apply(remote);
+          continue;
+        }
+        const entry = queued ?? {
           operationId:crypto.randomUUID(),revision:current.workspaceRevision ?? 0,session:structuredClone(current),by:actorKey()
         };
         const formerDemoAccount = client.auth.user.id === 'testing' && entry.by === 'handheld/' + client.auth.user.role;
@@ -181,9 +208,10 @@ export function workspaceClient(bridge) {
       client.stock = workspace.inventory;
       write('-stock',client.stock);
       client.stockTasks = workspace.stockTasks ?? [];
+      client.palletTasks = workspace.palletManifests ?? [];
       if (safe()) for (const server of workspace.sessions) {
         const local = list().find(s => s.id === server.id);
-        if (local && (fingerprint(local) !== base[local.id] || queue[local.id])) continue;
+        if (local && (hasLocalChanges(local) || queue[local.id])) continue;
         if (!local || local.workspaceRevision !== server.workspaceRevision || fingerprint(local) !== fingerprint(server)) apply(server);
         base[server.id] = fingerprint(server);
       }

@@ -5,6 +5,7 @@ import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createWorkspace} from '../tools/workspace-store.mjs';
+import {workspaceClient} from '../app/src/main/assets/workspace-client.mjs';
 
 const lead = {id:'lead',role:'admin',name:'Administrator'};
 const operator = {id:'operator',role:'operator',name:'Operator'};
@@ -149,6 +150,7 @@ test('same 40 cartons move from a 38+2 receipt through count, outbound Hold, Mat
     receipt = db.stockCommand(operator,partial);
     db.stockCommand(operator,partial);
     assert.equal(receipt.status,'Partially received');
+    assert.throws(() => command(lead,'outbound',receipt),/Complete the receipt first/);
     assert.equal(onHand(),108);
     const oldCount = command(operator,'count',null,{location:'Storage'});
     const stale = command(operator,'scan',oldCount,{scenario:'missing'});
@@ -156,6 +158,7 @@ test('same 40 cartons move from a 38+2 receipt through count, outbound Hold, Mat
     assert.equal(receipt.runs[1].found.length,2);
     receipt = command(operator,'receive',receipt);
     assert.equal(onHand(),110);
+    receipt = command(lead,'outbound',receipt);
     assert.throws(() => command(supervisor,'review',stale,{reason:'Old count'}),/Stock changed/);
     assert.throws(() => command(reviewer,'cancel-count',stale),/role/);
     const inventoryBeforeCancellation = db.inventory();
@@ -173,7 +176,6 @@ test('same 40 cartons move from a 38+2 receipt through count, outbound Hold, Mat
     assert.equal(onHand(),110);
     assert.throws(() => command(operator,'review',count),/role/);
     command(supervisor,'review',count);
-    receipt = command(lead,'outbound',receipt);
     let s = db.records().sessions.find(session => session.id === receipt.outbound);
     assert.deepEqual(s.manifest.cartons.map(item => item.epc).sort(),receipt.received.slice().sort());
     const action = (user,name) => db.action(user,{id:s.id,revision:s.workspaceRevision,action:name,confirmed:true});
@@ -245,12 +247,14 @@ test('SKU receipt import keeps unknown EPCs out of stock and requires consistent
 test('handheld pairs a receipt Product Identifier with one EPC and records it once', () => {
   const db = createWorkspace(':memory:');
   const action = (user,name,extra) => db.stockCommand(user,{action:name,operationId:randomUUID(),...extra});
-  const csv = 'receipt_ref,source_ref,destination_location,sku,expected_cartons,carton_id,epc,product_identifier\n' +
-    'TEST-IN,Supplier,Storage,Physalis,2,,,SUP-001';
+  const csv = 'receipt_ref,source_ref,destination_location,sku,expected_cartons,carton_id,epc,product_identifier,batch_lot,units_per_carton\n' +
+    'TEST-IN,Factory,Storage,Physalis,2,,,SUP-001,LOT-01,10';
   try {
     assert.throws(() => action(operator,'receipt',{csv}),/role/);
+    assert.throws(() => action(lead,'preview',{csv:csv.replace(/,10$/,',2.5')}),/positive whole number/);
     const receipt = action(lead,'receipt',{csv});
     assert.deepEqual(receipt.identifiers,[['SUP-001','Physalis']]);
+    assert.deepEqual(receipt.cartonDetails.Physalis,{batch_lot:'LOT-01',units_per_carton:10});
     const pair = {action:'receive-carton',operationId:randomUUID(),id:receipt.id,revision:receipt.revision,identifier:'SUP-001',epc:'AB0001'};
     assert.throws(() => db.stockCommand(lead,pair),/role/);
     assert.throws(() => db.stockCommand(operator,{...pair,identifier:'Wrong'}),/Product Identifier/);
@@ -259,7 +263,11 @@ test('handheld pairs a receipt Product Identifier with one EPC and records it on
     assert.equal(partial.runs[0].identifier,'SUP-001');
     assert.deepEqual(db.stockCommand(operator,pair).received,['AB0001']);
     assert.equal(db.inventory().find(c => c.epc === 'AB0001').sku,'Physalis');
-    assert.equal(db.inventory().find(c => c.epc === 'AB0001').physical,1);
+    const receivedCarton = db.inventory().find(c => c.epc === 'AB0001');
+    assert.equal(receivedCarton.physical,1);
+    assert.equal(receivedCarton.batch_lot,'LOT-01');
+    assert.equal(receivedCarton.units_per_carton,10);
+    assert.match(db.stockReport('stock'),/"AB0001","Physalis","Storage","available","LOT-01","10"/);
     assert.throws(() => action(operator,'receive-carton',{id:receipt.id,revision:partial.revision,identifier:'SUP-001',epc:'AB0001'}),/already tagged to Physalis in this task/);
     const finished = action(operator,'receive-carton',{id:receipt.id,revision:partial.revision,identifier:'SUP-001',simulation:true});
     assert.equal(finished.status,'Completed');
@@ -280,5 +288,151 @@ test('handheld pairs a receipt Product Identifier with one EPC and records it on
     assert.equal(db.inventory().some(c => c.epc === 'AB0001'),false);
     assert.equal(db.stockHistory('AB0001')[0].action,'Carton untagged');
     assert.equal(action(operator,'receive-carton',{...pair,revision:reopened.revision,operationId:randomUUID()}).status,'Completed');
+  } finally { db.close(); }
+});
+
+test('one generated manifest verifies two pallets in sequence before dispatching both', () => {
+  const db = createWorkspace(':memory:');
+  try {
+    const [first,second] = db.inventory();
+    const device = 'demo-handheld';
+    const manifest = (user, input, scannedDevice) => db.palletManifest(user,input,scannedDevice,[device]);
+    const request = manifest(lead,{action:'request',reference:'PAL-A',deviceId:device});
+    const draft = (action,fields = {}) => ({id:request.id,action,...fields});
+    const scan = (epc,scanReference) => manifest(operator,draft('scan',{epc,scanReference}),device);
+    const generate = carton => manifest(lead,draft('generate',{epcs:[carton.epc],locations:[carton.location]}));
+    scan('AC0001');
+    generate(first);
+    manifest(lead,draft('add-pallet',{reference:'PAL-B'}));
+    assert.throws(() => scan('AC0002'),/no longer pending/);
+    assert.throws(() => scan('AC0001','PAL-B'),/already in this manifest/);
+    scan('AC0002','PAL-B');
+    assert.throws(() => generate(first),/already assigned to a pallet/);
+    const ready = generate(second);
+    assert.deepEqual(ready.pallets.map(p => [p.pallet,p.cartons[0].epc]),[['PAL-A',first.epc],['PAL-B',second.epc]]);
+    assert.equal(ready.csv.split('\n').length,3);
+    const {sessionId} = manifest(lead,draft('session',{testId:'MULTI',location:'Staging'}));
+    let session = db.records().sessions.find(s => s.id === sessionId);
+    session = db.action(supervisor,{id:sessionId,revision:session.workspaceRevision,action:'physical',confirmed:true});
+    const sync = fields => db.sync(operator,{revision:session.workspaceRevision,operationId:randomUUID(),session:{...session,...fields}});
+    const run = (palletEpc,epcs) => ({
+      id:randomUUID(),source:session.source,state:'Finished',manifestRevision:1,palletEpc,
+      observations:Object.fromEntries(epcs.map(epc => [epc,{count:1}]))
+    });
+    const identified = palletEpc => ({id:randomUUID(),manifestRevision:1,palletEpc,observations:{[palletEpc]:{count:1}}});
+    const a = run('AC0001',[first.epc]);
+    const b = run('AC0002',[second.epc]);
+    const pa = identified('AC0001'), pb = identified('AC0002');
+    assert.throws(() => sync({palletAttempts:[pa],runs:[a,b]}),/current verified manifest/);
+    session = sync({palletAttempts:[pa],runs:[a],palletMatches:{AC0001:a.id},confirmedAt:'claimed'});
+    assert.equal(session.confirmedAt,null);
+    assert.deepEqual(db.outbound(lead,[session]).dispatchable,[]);
+    const wrong = run('AC0002',[first.epc,second.epc]);
+    session = sync({palletAttempts:[pa,pb],runs:[a,wrong],palletMatches:{AC0001:a.id,AC0002:wrong.id}});
+    assert.equal(session.runs.at(-1).result.status,'Hold');
+    assert.equal(session.confirmedAt,null);
+    session = sync({runs:[a,wrong,b],palletMatches:{AC0001:a.id,AC0002:b.id}});
+    assert.ok(session.confirmedAt);
+    assert.deepEqual(db.outbound(lead,[session]).dispatchable,[sessionId]);
+    db.action(lead,{id:sessionId,revision:session.workspaceRevision,action:'dispatch',confirmed:true},true);
+    assert.ok(db.inventory().filter(c => [first.epc,second.epc].includes(c.epc)).every(c => c.state === 'dispatched'));
+  } finally { db.close(); }
+});
+
+test('operator sync skips unchanged sessions but requires a physical check for new scan evidence', () => {
+  const db = createWorkspace(':memory:');
+  try {
+    const session = db.create(lead,sample);
+    const sync = fields => db.sync(operator,{
+      revision:session.workspaceRevision,operationId:randomUUID(),session:{...session,...fields}
+    });
+    assert.equal(sync({}).workspaceRevision,session.workspaceRevision);
+    assert.throws(() => sync({palletAttempts:[{id:randomUUID(),observations:{}}]}),/physical check before scanning/);
+    assert.throws(() => sync({runs:[{id:randomUUID(),state:'Finished'}]}),/physical check before scanning/);
+    assert.equal(db.records().sessions[0].runs.length,0);
+  } finally { db.close(); }
+});
+
+test('sync adopts old cache fingerprints and drops only an unchanged retry', async t => {
+  const remote = {id:randomUUID(),workspaceRevision:1,manifest:{revision:1},runs:[],logs:[]};
+  const next = {...remote,id:randomUUID()};
+  const unsynced = {...remote,id:randomUUID(),palletAttempts:[{id:randomUUID(),observations:{}}]};
+  const legacy = JSON.stringify([remote.manifest,null,null,[],null,null,null,[]]);
+  const prefix = 'keypharm-connected-v1';
+  const stored = new Map([
+    [prefix + '-generation','1'],
+    [prefix + '-auth',JSON.stringify({token:'demo',user:operator})],
+    [prefix + '-samples',JSON.stringify({Simulation:'demo','C72 hardware':'demo'})],
+    [prefix + '-base',JSON.stringify({[remote.id]:legacy,[next.id]:legacy,[unsynced.id]:legacy})],
+    [prefix + '-queue',JSON.stringify({[remote.id]:{session:remote,operationId:randomUUID(),revision:1,by:'operator/operator'}})]
+  ]);
+  const previous = Object.getOwnPropertyDescriptor(globalThis,'localStorage');
+  Object.defineProperty(globalThis,'localStorage',{configurable:true,value:{
+    getItem:key => stored.get(key) ?? null, setItem:(key,value) => stored.set(key,value)
+  }});
+  t.after(() => {
+    if (previous) Object.defineProperty(globalThis,'localStorage',previous);
+    else delete globalThis.localStorage;
+  });
+  const uploaded = [];
+  const verified = {...remote,workspaceRevision:2,verifiedAt:'2026-11-26'};
+  const workspace = {generation:1,controls:{},inventory:[],sessions:[verified,next,{...unsynced,palletAttempts:undefined}]};
+  const local = [remote,next,unsynced];
+  const client = workspaceClient({workspaceRequest(id,path,_auth,body) {
+    queueMicrotask(() => {
+      if (path === 'sync') {
+        uploaded.push(JSON.parse(body).session.id);
+        workspace.sessions[2] = unsynced;
+      }
+      const data = path === 'sync' ? unsynced : workspace;
+      client.receive({id,status:200,body:JSON.stringify(data)});
+    });
+  }});
+  const apply = record => { local[local.findIndex(s => s.id === record.id)] = record; };
+  await client.refresh(() => local,apply,() => true,() => {},() => {});
+  assert.equal(local[0].verifiedAt,verified.verifiedAt);
+  assert.deepEqual(uploaded,[unsynced.id]);
+  assert.deepEqual(JSON.parse(stored.get(prefix + '-queue')),{});
+  assert.equal(client.state,'Synced');
+});
+
+test('saved pallets retain exclusive carton assignments when moved between manifests', () => {
+  const db = createWorkspace(':memory:');
+  try {
+    const [first,second,third] = db.inventory();
+    const device = 'demo-handheld';
+    const command = (action,fields) => db.palletManifest(lead,{action,...fields},undefined,[device]);
+    const scan = (id,epc,scanReference) => db.palletManifest(operator,{action:'scan',id,epc,scanReference},device,[device]);
+    const newDraft = (reference,epc) => {
+      const {id} = command('request',{reference,deviceId:device});
+      scan(id,epc);
+      return id;
+    };
+    const generate = (id,carton) => command('generate',{id,epcs:[carton.epc],locations:[carton.location]});
+    const destination = newDraft('PAL-A','AC0001');
+    generate(destination,first);
+    const source = newDraft('PAL-B','AC0002');
+    assert.throws(() => generate(source,first),/already assigned to a pallet/);
+    generate(source,second);
+    command('add-pallet',{id:source,reference:'PAL-C'});
+    scan(source,'AC0003','PAL-C');
+    generate(source,third);
+    assert.deepEqual(new Set(db.assignedCartonEpcs()),new Set([first.epc,second.epc,third.epc]));
+    const combined = command('add-existing',{id:destination,palletEpc:'AC0002'});
+    assert.deepEqual(combined.pallets.map(pallet => pallet.pallet),['PAL-A','PAL-B']);
+    const remaining = db.palletManifests().find(draft => draft.id === source);
+    assert.deepEqual(remaining.pallets.map(pallet => pallet.pallet),['PAL-C']);
+    assert.equal(remaining.csv.includes(second.epc),false);
+    assert.throws(() => command('add-existing',{id:destination,palletEpc:'AC0002'}),/no longer available/);
+    const merged = command('add-existing',{id:destination,palletEpc:'AC0003'});
+    assert.equal(merged.pallets.length,3);
+    assert.equal(db.palletManifests().find(draft => draft.id === source).mergedInto,destination);
+    const {sessionId} = command('session',{id:destination,testId:'SHIPMENT',location:'Staging'});
+    assert.equal(db.existingPallets().length,0);
+    command('cancel',{id:destination,confirmed:true});
+    assert.deepEqual(new Set(db.assignedCartonEpcs()),new Set([first.epc,second.epc,third.epc]));
+    const session = db.records().sessions.find(row => row.id === sessionId);
+    db.action(lead,{id:sessionId,revision:session.workspaceRevision,action:'remove',confirmed:true});
+    assert.equal(db.assignedCartonEpcs().length,0);
   } finally { db.close(); }
 });

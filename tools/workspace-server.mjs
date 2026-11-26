@@ -50,6 +50,7 @@ const hardware = await readFile(resolve(assets,'private-live-sample.csv'),'utf8'
 });
 const workspace = createWorkspace(resolve(storage,'workspace.sqlite'),hardware);
 let handheldContact;
+const handheldDevices = new Map();
 const pages = new Map([
   ['/','dashboard.html'], ['/dashboard.css','dashboard.css'], ['/dashboard.mjs','dashboard.mjs'],
   ['/dashboard-model.mjs','dashboard-model.mjs'], ['/workspace-dashboard.mjs','workspace-dashboard.mjs'],
@@ -81,6 +82,8 @@ const server = createServer(async (req,res) => {
   const path = new URL(req.url,'http://localhost').pathname;
   const user = authenticate(req.headers.authorization,req.headers['x-keypharm-role']);
   const handheld = req.headers.authorization?.startsWith('Bearer ');
+  const deviceHeader = req.headers['x-keypharm-device-id'];
+  const deviceId = handheld && typeof deviceHeader === 'string' && /^[0-9a-f]{1,16}$/i.test(deviceHeader) ? deviceHeader.toLowerCase() : null;
   try {
     if (!user) {
       if (path === '/') res.setHeader('WWW-Authenticate','Basic realm="KeyPharm local demonstration"');
@@ -96,15 +99,29 @@ const server = createServer(async (req,res) => {
       }
       if (path === '/api/workspace') {
         if (handheld) {
-          const id = req.headers['x-keypharm-device-id'];
-          const deviceId = typeof id === 'string' && /^[0-9a-f]{1,16}$/i.test(id) ? id : handheldContact?.deviceId;
-          handheldContact = {lastContact:new Date().toISOString(),deviceId};
+          handheldContact = {lastContact:new Date().toISOString(),deviceId:deviceId ?? handheldContact?.deviceId};
+          if (deviceId) handheldDevices.set(deviceId,handheldContact);
         }
         const {sessions} = workspace.records();
         const stockTasks = !handheld ? [] : workspace.stockTasks().tasks.filter(task =>
           (user.role === 'operator' && !['Reviewed','Cancelled'].includes(task.status)) || (user.role === 'admin' && task.type === 'receipt'));
-        return json(res,200,{user,generation:workspace.generation(),inventory:workspace.inventory(),
+        const palletManifests = !handheld && user.role === 'admin' ? workspace.palletManifests().filter(item => item.status !== 'Cancelled') :
+          deviceId && user.role === 'operator' ? workspace.palletManifests().filter(item =>
+            item.deviceId === deviceId && item.status === 'Awaiting pallet scan') : [];
+        const managesManifests = !handheld && user.role === 'admin';
+        return json(res,200,{user,generation:workspace.generation(),inventory:workspace.inventory(),palletManifests,
+          ...(managesManifests ? {assignedCartonEpcs:workspace.assignedCartonEpcs(),existingPallets:workspace.existingPallets()} : {}),
+          removedSessions:handheld ? workspace.removedSessions() : [],
+          devices:!handheld && user.role === 'admin' ? [...handheldDevices.values()] : [],
           controls:workspace.settings(),sessions,stockTasks,...workspace.outbound(user,sessions)});
+      }
+      if (path === '/api/pallet-manifest.csv') {
+        if (handheld || user.role !== 'admin') return json(res,403,{message:'Administrator access required.'});
+        const id = new URL(req.url,'http://localhost').searchParams.get('id');
+        const draft = workspace.palletManifests().find(item => item.id === id && item.status !== 'Cancelled');
+        if (!draft?.csv) return json(res,404,{message:'Manifest not found.'});
+        res.writeHead(200,{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':'attachment; filename="pallet-manifest.csv"'});
+        return res.end(draft.csv);
       }
       if (path === '/api/evidence.csv') {
         res.writeHead(200,{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':'attachment; filename="keypharm-evidence.csv"'});
@@ -140,6 +157,11 @@ const server = createServer(async (req,res) => {
       if (path === '/api/reset') return json(res,200,workspace.reset(user,body));
       if ((body.generation ?? 0) !== workspace.generation()) {
         return json(res,409,{message:'Demo data was reset. Sync or refresh before making changes.'});
+      }
+      if (path === '/api/pallet-manifest') {
+        if (handheld && (!deviceId || body.action !== 'scan')) return json(res,403,{message:'A registered handheld is required for this scan.'});
+        return json(res,200,workspace.palletManifest(user,body,deviceId,[...handheldDevices.values()]
+          .filter(device => Date.now() - Date.parse(device.lastContact) < 60_000).map(device => device.deviceId)));
       }
       if (path === '/api/session') return json(res,201,workspace.create(user,body));
       if (path === '/api/action') return json(res,200,workspace.action(user,body,!handheld));

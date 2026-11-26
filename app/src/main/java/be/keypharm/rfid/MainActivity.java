@@ -11,6 +11,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.KeyEvent;
 import android.webkit.*;
+import android.widget.Toast;
 import org.json.JSONObject;
 import com.rscja.barcode.BarcodeDecoder;
 import com.rscja.barcode.BarcodeFactory;
@@ -49,11 +50,13 @@ public final class MainActivity extends Activity {
     private volatile boolean foreground;
     private String template;
     private ToneGenerator tones;
+    private Toast toast;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         reader = new C72Reader(getApplicationContext());
-        try { tones = new ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80); }
+        setVolumeControlStream(AudioManager.STREAM_MUSIC);
+        try { tones = new ToneGenerator(AudioManager.STREAM_MUSIC, 90); }
         catch (RuntimeException unavailable) { tones = null; }
         web = new WebView(this);
         web.setBackgroundColor(0xfff1f5f2);
@@ -174,6 +177,7 @@ public final class MainActivity extends Activity {
     @Override protected void onPause() {
         if (barcodeRequest != null && !cameraBarcode) endBarcode(barcodeRequest, "", "Barcode scan cancelled.");
         foreground = false;
+        if (toast != null) toast.cancel();
         activeKey = -1;
         event("cancel", new JSONObject());
         hardware.execute(() -> {
@@ -194,9 +198,16 @@ public final class MainActivity extends Activity {
         super.onDestroy();
     }
 
+    private void playScanStartTone() {
+        main.post(() -> {
+            if (!destroyed && foreground && tones != null) tones.startTone(ToneGenerator.TONE_PROP_ACK, 120);
+        });
+    }
+
     private void scanBarcode(String id) {
         if (!foreground || barcodeRequest != null) return;
         barcodeRequest = id;
+        playScanStartTone();
         hardware.execute(() -> {
             try {
                 barcodeDecoder = BarcodeFactory.getInstance().getBarcodeDecoder();
@@ -267,6 +278,15 @@ public final class MainActivity extends Activity {
         }
         @JavascriptInterface public void closeApp() { main.post(MainActivity.this::finish); }
 
+        @JavascriptInterface public void showToast(String message) {
+            main.post(() -> {
+                if (destroyed || !foreground || message == null || message.isBlank()) return;
+                if (toast != null) toast.cancel();
+                toast = Toast.makeText(MainActivity.this, message, Toast.LENGTH_SHORT);
+                toast.show();
+            });
+        }
+
         @JavascriptInterface public void connectReader() {
             hardware.execute(() -> {
                 if (hardwareRun == null) event("reader", reader.connect());
@@ -309,6 +329,7 @@ public final class MainActivity extends Activity {
                     return;
                 }
                 hardwareRun = id;
+                playScanStartTone();
                 event("started", C72Reader.json("id", id, "profile", settings));
                 main.removeCallbacks(tick);
                 main.postDelayed(tick, 200);
@@ -323,6 +344,16 @@ public final class MainActivity extends Activity {
 
         /** Short beep and buzz for a new unique EPC; longer error tone for reader loss or a failed scan. */
         @JavascriptInterface public void feedback(String kind) {
+            if ("start".equals(kind)) {
+                playScanStartTone();
+                return;
+            }
+            if ("lookup".equals(kind)) {
+                main.post(() -> {
+                    if (!destroyed && foreground && tones != null) tones.startTone(ToneGenerator.TONE_PROP_BEEP, 50);
+                });
+                return;
+            }
             boolean error = "error".equals(kind);
             main.post(() -> {
                 if (destroyed) return;
@@ -351,7 +382,7 @@ public final class MainActivity extends Activity {
         }
 
         @JavascriptInterface public void workspaceRequest(String id, String path, String authorization, String body) {
-            if (!Set.of("login", "workspace", "sample", "physical-sample", "sync", "settings", "reset", "stock-action").contains(path)) return;
+            if (!Set.of("login", "workspace", "sample", "physical-sample", "sync", "settings", "reset", "stock-action", "pallet-manifest").contains(path)) return;
             workspaceNetwork.execute(() -> {
                 HttpURLConnection connection = null;
                 try {
@@ -360,7 +391,7 @@ public final class MainActivity extends Activity {
                     connection.setReadTimeout(4000);
                     connection.setInstanceFollowRedirects(false);
                     connection.setRequestProperty("Authorization", authorization);
-                    if ("workspace".equals(path)) {
+                    if ("workspace".equals(path) || "pallet-manifest".equals(path)) {
                         String deviceId = reader.deviceId();
                         if (deviceId != null) connection.setRequestProperty("X-KeyPharm-Device-Id", deviceId);
                     }

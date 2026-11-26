@@ -68,9 +68,11 @@ with sync_playwright() as playwright:
     assert device.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth === 681")
     assert device.locator(".brand").bounding_box()["x"] < device.locator("#who").bounding_box()["x"]
     pick_role(device, "admin")
+    device.get_by_role("button", name="Settings",exact=True).click()
     device.get_by_label("One test per line: Test ID, then description").fill("KP-TEST-01 Mixed pallet check\nKP-TEST-02 Ginger pallet")
     device.get_by_role("button", name="Save test plan").click()
     expect(device.get_by_text("Not run", exact=True)).to_have_count(2)
+    device.get_by_role("button", name="Home",exact=True).click()
     device.get_by_role("button", name="New test session").click()
     expect(device.get_by_label("Test ID")).to_have_value("KP-TEST-01")
     device.get_by_role("button", name="Create session").click()
@@ -192,6 +194,7 @@ with sync_playwright() as playwright:
     downloads = []
     device.on("download", lambda download: downloads.append(download))
     device.get_by_role("button", name="Sessions").click()
+    device.get_by_role("button", name="Settings",exact=True).click()
     expect(device.locator(".export-state")).to_have_text("1 of 1 sessions not exported since their last change: KP-TEST-01")
     device.get_by_role("button", name="Export CSV and summary").click()
     device.wait_for_timeout(1000)
@@ -206,11 +209,13 @@ with sync_playwright() as playwright:
     assert "KP-TEST-01 Mixed pallet check: Done" in files["keypharm-summary.txt"], files["keypharm-summary.txt"]
     assert "KP-TEST-02 Ginger pallet: Not run" in files["keypharm-summary.txt"]
 
+    device.get_by_role("button", name="Home",exact=True).click()
     device.get_by_role("button", name="KP-TEST-01", exact=False).click()
     device.get_by_role("button", name="Export this test").click()
     device.wait_for_timeout(1000)
     assert len(downloads) == 6, len(downloads)
     device.get_by_role("button", name="Sessions").click()
+    device.get_by_role("button", name="Settings",exact=True).click()
     device.locator("summary", has_text="Close PoC day").click()
     device.get_by_label("Coverage reviewed and signed off").check()
     device.get_by_role("button", name="Close PoC day").click()
@@ -222,9 +227,11 @@ with sync_playwright() as playwright:
     reset = device.get_by_role("button", name="Reset all local data")
     expect(reset).to_have_count(0)
     pick_role(device, "admin")
+    device.get_by_role("button", name="Home",exact=True).click()
     device.get_by_role("button", name="New test session").click()
     device.get_by_label("Test ID").fill("KP-DRAFT")
     device.get_by_role("button", name="Sessions").click()
+    device.get_by_role("button", name="Settings",exact=True).click()
     before_reset = device.evaluate("""() => {
       localStorage.setItem('unrelated-preference', 'keep');
       return ['keypharm-poc-v1', 'keypharm-poc-ui-v1'].map(key => localStorage.getItem(key));
@@ -251,8 +258,10 @@ with sync_playwright() as playwright:
     assert device.evaluate("localStorage.getItem('unrelated-preference')") == "keep"
     device.reload()
     expect(device.get_by_text("No sessions yet.", exact=True)).to_be_visible()
-    expect(device.get_by_text("No planned tests.", exact=True)).to_be_visible()
     assert device.evaluate("localStorage.getItem('keypharm-poc-ui-v1')") is None
+    device.get_by_role("button", name="Settings",exact=True).click()
+    expect(device.get_by_text("No planned tests.", exact=True)).to_be_visible()
+    device.get_by_role("button", name="Home",exact=True).click()
     device.get_by_label("Role and name").click()
     expect(device.locator("#role")).to_have_value("operator")
     expect(device.get_by_label("Your name")).to_have_value("")
@@ -285,6 +294,7 @@ with sync_playwright() as playwright:
     c72.evaluate("localStorage.clear()")
     c72.reload()
     as_person(c72, "admin", "Lead A")
+    c72.get_by_role("button", name="Settings",exact=True).click()
     c72.get_by_role("button", name="Share web dashboard").click()
     code = c72.get_by_role("img", name="Dashboard QR code")
     expect(code.locator("svg path")).to_be_visible()
@@ -296,6 +306,7 @@ with sync_playwright() as playwright:
     c72.get_by_role("button", name="Stop dashboard sharing").click()
     expect(code).to_have_count(0)
     expect(c72.get_by_text(url, exact=True)).to_have_count(0)
+    c72.get_by_role("button", name="Home",exact=True).click()
     c72.get_by_role("button", name="New test session").click()
     c72.get_by_label("Reader source").select_option("C72 hardware")
     c72.get_by_role("button", name="Create session").click()
@@ -317,6 +328,7 @@ with sync_playwright() as playwright:
     c72.get_by_role("button", name="Sessions").click()
     pick_role(c72, "admin")
     c72.evaluate("window.deferDashboardEvents = true")
+    c72.get_by_role("button", name="Settings",exact=True).click()
     share = c72.get_by_role("button", name="Share web dashboard")
     share.click()
     assert c72.evaluate("dashboardCalls.at(-1)") is True
@@ -324,6 +336,7 @@ with sync_playwright() as playwright:
     c72.once("dialog", lambda dialog: dialog.accept())
     c72.get_by_role("button", name="Reset all local data").click()
     assert c72.evaluate("dashboardCalls.slice(-2)") == [{"sessions": []}, False]
+    c72.get_by_role("button", name="Settings",exact=True).click()
     expect(share).to_be_disabled()
     c72.evaluate("url => window.keypharmEvent('dashboard', {url})", url)
     expect(share).to_be_disabled()
@@ -331,7 +344,7 @@ with sync_playwright() as playwright:
     expect(c72.get_by_role("button", name="Copy dashboard link")).to_have_count(0)
     c72.evaluate("window.keypharmEvent('dashboard', {url:''})")
     expect(share).to_be_enabled()
-    expect(c72.locator("#notice")).to_have_text("Local data reset.")
+    expect(c72.get_by_role("heading",name="Settings")).to_be_visible()
 
     dashboard = browser.new_page(viewport={"width":1280, "height":800})
     dashboard.on("pageerror", lambda error: errors.append(str(error)))
@@ -479,8 +492,9 @@ with sync_playwright() as playwright:
       };
     """)
     hardware.goto("https://handheld.test/handheld.html")
-    # Reader power is on the home screen: the Test lead sets it, other roles see who does.
+    # Reader power lives under Settings and remains restricted by role.
     as_person(hardware, "admin", "Lead A")
+    hardware.get_by_role("button", name="Settings",exact=True).click()
     expect(hardware.locator(".reader-card")).to_contain_text("ETSI / 30 dBm")
     hardware.locator("#reader-card > summary").click()  # one glanceable row; tap it to change power
     hardware.locator(".reader-card").get_by_label("Output power (dBm)").fill("25")
@@ -494,6 +508,7 @@ with sync_playwright() as playwright:
     pick_role(hardware, "operator")
     expect(hardware.locator(".reader-card")).to_contain_text("The Administrator sets reader power.")
     as_person(hardware, "operator", "Operator C")
+    hardware.get_by_role("button", name="Home",exact=True).click()
     hardware.get_by_role("button", name="New test session").click()
     hardware.get_by_role("button", name="Create session").click()
     expect(hardware.get_by_role("button", name="Set power")).to_have_count(0)
@@ -532,7 +547,7 @@ with sync_playwright() as playwright:
     expect(hardware.locator(".tag-row[data-tag-status=unexpected]")).to_have_count(1)
     expect(hardware.get_by_role("button", name="Continue",exact=True)).to_be_disabled()
 
-    # One CSV with two pallets: the strongest tag (a pallet-B carton) locks pallet B; a pallet-A carton is then flagged.
+    # Verify one pallet at a time. A neighboring pallet cannot identify the requested pallet.
     multi = browser.new_page(viewport={"width":360, "height":700})
     multi.on("pageerror", lambda error: errors.append(str(error)))
     multi.route("https://handheld.test/**", serve_assets)
@@ -555,25 +570,34 @@ with sync_playwright() as playwright:
     multi.get_by_role("button", name="Use live sample").click()
     expect(multi.get_by_text("2 pallet(s) / 4 cartons", exact=False)).to_be_visible()
     multi.get_by_role("button", name="Save manifest").click()
-    expect(multi.locator(".next").get_by_text("Any of 2 pallets / 4 cartons, locks on scan", exact=False)).to_be_visible()
+    expect(multi.locator(".next").get_by_text("2 pallets / 4 cartons", exact=False)).to_be_visible()
     as_person(multi, "supervisor", "Verifier B")
     multi.get_by_label("Contents and label assignment verified").check()
     multi.get_by_role("button", name="Record verification").click()
     as_person(multi, "operator", "Operator C")
     multi.get_by_role("button", name="Open pallet scanner").click()
-    multi.evaluate("window.scanReads = [{epc:'C0A1', rssi:'-62.0'}, {epc:'C0B2', rssi:'-41.5'}, {epc:'FFFF', rssi:'-30'}]")
-    multi.get_by_role("button", name="Start scan").click()
-    multi.get_by_role("button", name="Stop scan").click()
+    def multi_scan(epcs):
+        multi.evaluate("(epcs) => { window.scanReads = epcs.map(epc => ({epc})); }",epcs)
+        multi.get_by_role("button", name="Start scan").click()
+        multi.get_by_role("button", name="Stop scan").click()
+
+    multi_scan(["B1B1","C0A1"])
+    expect(multi.get_by_role("heading", name="Scan pallet")).to_be_visible()
+    multi_scan(["A1A1","B1B1"])
     expect(multi.get_by_role("heading", name="Scan cartons")).to_be_visible()
-    locked = multi.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0]")
-    assert (locked["manifest"]["pallet"], len(locked["manifest"]["cartons"]), locked["allocation"]["cartons"]) == ("PAL-B", 2, 2), locked["manifest"]
-    assert locked["logs"][-1]["action"] == "Pallet locked" and "-41.5 dBm" in locked["logs"][-1]["detail"], locked["logs"][-1]
-    multi.evaluate("window.scanReads = [{epc:'C0B1'}, {epc:'C0B2'}, {epc:'C0A1'}]")
-    multi.get_by_role("button", name="Start scan").click()
-    multi.get_by_role("button", name="Stop scan").click()
-    expect(multi.locator(".tag-row[data-tag-status=unexpected]")).to_contain_text("Belongs to pallet PAL-A")
-    expect(multi.locator(".tag-row[data-tag-status=matched]")).to_have_count(2)
-    expect(multi.get_by_role("button", name="Continue", exact=True)).to_be_disabled()
+    multi_scan(["C0A1","C0A2","C0B1"])
+    expect(multi.locator(".tag-row[data-tag-status=unexpected]")).to_contain_text("Belongs to pallet PAL-B")
+    expect(multi.get_by_role("button", name="Next pallet", exact=True)).to_be_disabled()
+    multi_scan(["C0A1","C0A2"])
+    multi.get_by_role("button", name="Next pallet", exact=True).click()
+    expect(multi.get_by_text("Pallet 2 of 2", exact=False)).to_be_visible()
+    multi_scan(["B1B1"])
+    expect(multi.get_by_role("heading", name="Scan cartons")).to_be_visible()
+    multi_scan(["C0B1","C0B2"])
+    multi.get_by_role("button", name="Continue", exact=True).click()
+    expect(multi.get_by_role("heading", name="Review and close the test")).to_be_visible()
+    verified = multi.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0]")
+    assert len(verified["palletMatches"]) == 2 and verified["allocation"]["cartons"] == 4
 
     # Manifest generator: scan one pallet's tags on the C72, drop a stray tag, save the CSV, then load it.
     gen = browser.new_page(viewport={"width":360, "height":700})
@@ -592,7 +616,9 @@ with sync_playwright() as playwright:
     """)
     gen.goto("https://handheld.test/handheld.html")
     as_person(gen, "admin", "Lead A")
-    expect(gen.locator("#share-all")).to_be_checked()  # the dashboard shares hardware records by default
+    gen.get_by_role("button", name="Settings",exact=True).click()
+    expect(gen.locator("#share-all")).to_be_checked()
+    gen.get_by_role("button", name="Home",exact=True).click()
     gen.get_by_role("button", name="New test session").click()
     gen.get_by_role("button", name="Create session").click()
     # A rejected file is logged with its name and errors; a blank SKU is accepted but named before scanning (FR-04).

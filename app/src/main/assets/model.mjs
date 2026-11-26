@@ -106,13 +106,13 @@ export function outboundManifestConflict(manifest,inventory,sessions,currentId) 
   const expected = new Set(manifestCartons(manifest).map(carton => carton.epc));
   const shipped = new Set(inventory.filter(carton => carton.state === 'dispatched' && expected.has(carton.epc)).map(carton => carton.epc));
   if (shipped.size) {
-    const refs = sessions.filter(session => session.dispatchedAt && session.manifest?.cartons?.some(carton => shipped.has(carton.epc)))
+    const refs = sessions.filter(session => session.dispatchedAt && manifestCartons(session.manifest).some(carton => shipped.has(carton.epc)))
       .map(session => session.testId);
     return 'This manifest contains cartons already dispatched' + (refs.length ? ' under ' + refs.join(', ') : '') +
       '. Change the CSV to use cartons currently on hand.';
   }
   const assigned = sessions.filter(session => session.id !== currentId && !session.dispatchedAt &&
-    (session.identified ? session.manifest?.cartons ?? [] : manifestCartons(session.manifest)).some(carton => expected.has(carton.epc)))
+    manifestCartons(session.manifest).some(carton => expected.has(carton.epc)))
     .map(session => session.testId);
   if (assigned.length) return 'This manifest contains cartons assigned to ' + assigned.join(', ') +
     '. Open or reopen the existing session to continue verification, or change the CSV if the assignment is a mistake.';
@@ -160,6 +160,7 @@ export function skuBreakdown(manifest, result) {
 }
 // Section 9.3 lists "Unexpected reads" as its own state; FR-15 calls it Hold. Show both.
 export const statusLabel = status => status === 'Hold' ? 'Hold: unexpected reads' : status;
+export const pendingPallet = session => session.manifest?.pallets?.find(pallet => !session.palletMatches?.[pallet.palletEpc]);
 export const lockTo = (manifest, pallet) => ({...manifest, pallet:pallet.pallet, palletEpc:pallet.palletEpc, cartons:pallet.cartons});
 // The other loaded pallet an unexpected EPC belongs to, if any.
 export const otherPallet = (manifest, epc) =>
@@ -235,13 +236,16 @@ export function evidenceCsv(store) {
     const identity = [s.id,s.testId,s.manifest?.pallet];
     rows.push(['Session',...identity,'',s.createdAt,s.creator,s.closedAt ? 'Closed' : 'Open','','','','','','',JSON.stringify({...s, runs:undefined, logs:undefined, manifest:undefined})]);
     if (s.manifest) rows.push(['Manifest',...identity,'',s.manifest.importedAt,'','Revision ' + s.manifest.revision,'','','','','',s.manifest.palletEpc,s.manifest.source]);
-    for (const c of s.manifest?.cartons ?? []) rows.push(['Manifest carton',...identity,'','','','','','','','','',c.epc,JSON.stringify(c)]);
+    for (const pallet of palletsOf(s.manifest)) {
+      for (const c of pallet.cartons ?? []) rows.push(['Manifest carton',s.id,s.testId,pallet.pallet,'','','','','','','','','',c.epc,JSON.stringify(c)]);
+    }
     for (const run of s.runs) {
-      const r = run.result ?? {};
-      rows.push(['Run',...identity,run.id,run.endedAt,run.operator,run.state === 'Finished' ? r.status : run.state,r.expected,r.matched?.length,r.missing?.length,r.extra?.length,r.percent,'',JSON.stringify({...run, observations:undefined})]);
-      for (const [epc,read] of Object.entries(run.observations)) rows.push(['RFID observation',...identity,run.id,read.first,run.operator,
-        epc === s.manifest?.palletEpc ? 'Pallet' : (r.matched?.includes(epc) ? 'Matched' : 'Unexpected'),'','','','','',epc,JSON.stringify(read)]);
-      for (const epc of r.missing ?? []) rows.push(['Missing EPC',...identity,run.id,run.endedAt,run.operator,'Missing','','','','','',epc,'']);
+      const r = run.result ?? {}, m = manifestFor(s,run);
+      const runIdentity = [s.id,s.testId,m?.pallet];
+      rows.push(['Run',...runIdentity,run.id,run.endedAt,run.operator,run.state === 'Finished' ? r.status : run.state,r.expected,r.matched?.length,r.missing?.length,r.extra?.length,r.percent,'',JSON.stringify({...run, observations:undefined})]);
+      for (const [epc,read] of Object.entries(run.observations)) rows.push(['RFID observation',...runIdentity,run.id,read.first,run.operator,
+        epc === m?.palletEpc ? 'Pallet' : (r.matched?.includes(epc) ? 'Matched' : 'Unexpected'),'','','','','',epc,JSON.stringify(read)]);
+      for (const epc of r.missing ?? []) rows.push(['Missing EPC',...runIdentity,run.id,run.endedAt,run.operator,'Missing','','','','','',epc,'']);
     }
     for (const log of s.logs) rows.push(['Log',...identity,log.run ?? '',log.at,log.actor,'','','','','','','',log.action + ': ' + (log.detail ?? '')]);
   }
@@ -258,8 +262,12 @@ export const EXPORT_COLUMNS = ['SessionID','Mode','TransactionRef','PalletRef','
 export function specEvidenceCsv(store) {
   const rows = [EXPORT_COLUMNS];
   for (const s of store.sessions) {
-    s.runs.filter(run => run.result).forEach((run, index) => {
+    const firstPassByPallet = new Set();
+    s.runs.filter(run => run.result).forEach(run => {
       const r = run.result, p = run.profile ?? {}, m = manifestFor(s, run);
+      const key = m?.palletEpc;
+      const rescan = firstPassByPallet.has(key);
+      firstPassByPallet.add(key);
       const cartons = new Map((m?.cartons ?? []).map(c => [c.epc, c]));
       const notes = s.logs.filter(log => log.run === run.id && log.action === 'Run note').map(log => log.detail);
       // Latest investigation per EPC; the handheld logs "Unexpected EPC <outcome>" with "<epc> / <note>".
@@ -271,7 +279,7 @@ export function specEvidenceCsv(store) {
       }
       const row = (epc, classification, expected, observed, code, note) => {
         const c = cartons.get(epc), read = run.observations[epc], d = disposition.get(epc);
-        return [s.id, s.mode ?? 'POC', '', m?.pallet, s.testId, run.id, index ? 'Rescan' : 'First pass',
+        return [s.id, s.mode ?? 'POC', '', m?.pallet, s.testId, run.id, rescan ? 'Rescan' : 'First pass',
           run.startedAt, run.endedAt, run.elapsedSeconds, s.location, s.level, c?.sku, c?.carton,
           expected ? epc : '', observed ? epc : '', classification, p.model ?? p.name, p.deviceId, p.region, p.powerDbm,
           run.method ?? s.method, s.label, s.placement, s.shielding, r.percent,
@@ -343,8 +351,11 @@ function configResults(sessions) {
 }
 
 // A run is compared against the manifest revision that was current when it started (section 8 data rule).
-export const manifestFor = (s, run) =>
-  [...(s.manifestRevisions ?? []), s.manifest].find(m => m && m.revision === run.manifestRevision) ?? s.manifest;
+export function manifestFor(s, run) {
+  const manifest = [...(s.manifestRevisions ?? []), s.manifest].find(m => m && m.revision === run.manifestRevision) ?? s.manifest;
+  const pallet = manifest?.pallets?.find(entry => entry.palletEpc === run.palletEpc);
+  return pallet ? lockTo(manifest,pallet) : manifest;
+}
 
 // One PoC test plan for the day: "TEST-ID description" per line. Records link to it by Test ID.
 export function parsePlan(text) {
