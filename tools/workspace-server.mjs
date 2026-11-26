@@ -38,9 +38,9 @@ function authenticate(header = '',browserRole = 'operator') {
     if (i < 0 || decoded.slice(0,i) !== username || !same(password,decoded.slice(i + 1))) return null;
     role = browserRole;
   } else if (scheme === 'Bearer') {
-    const [id,signature,requested = 'operator',...extra] = input.split('.');
+    const [id,signature,requested,...extra] = input.split('.');
     if (extra.length || !same(token,id + '.' + signature)) return null;
-    role = requested;
+    role = ['admin','supervisor'].includes(requested) ? requested : 'operator';
   } else return null;
   return Object.hasOwn(demoRoles,role) ? {id:username,role,name:demoRoles[role],canSwitch:true} : null;
 }
@@ -108,7 +108,9 @@ const server = createServer(async (req,res) => {
             item.deviceId === deviceId && item.status === 'Awaiting pallet scan') : [];
         const managesManifests = !handheld && user.role === 'admin';
         return json(res,200,{user,generation:workspace.generation(),inventory:workspace.inventory(),palletManifests,
-          ...(managesManifests ? {assignedCartonEpcs:workspace.assignedCartonEpcs(),existingPallets:workspace.existingPallets()} : {}),
+          ...(managesManifests ? {assignedCartonEpcs:workspace.assignedCartonEpcs(),existingPallets:workspace.existingPallets(),
+            skuAvailability:workspace.skuAvailability()} : {}),
+          ...(!handheld ? {palletInventory:workspace.palletCatalog()} : {verificationClaims:workspace.verificationClaims()}),
           removedSessions:handheld ? workspace.removedSessions() : [],
           devices:!handheld ? workspace.devices() : [],
           controls:workspace.settings(),sessions,stockTasks,...workspace.outbound(user,sessions)});
@@ -150,7 +152,7 @@ const server = createServer(async (req,res) => {
       const body = await payload(req);
       if (path === '/api/login') {
         if (!req.headers.authorization?.startsWith('Basic ')) return json(res,401,{message:'Sign in with a password.'});
-        return json(res,200,{user,token});
+        return json(res,200,{user:{...user,role:'operator',name:demoRoles.operator,canSwitch:true},token});
       }
       if (path === '/api/reset') return json(res,200,workspace.reset(user,body));
       if ((body.generation ?? 0) !== workspace.generation()) {

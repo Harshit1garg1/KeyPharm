@@ -6,6 +6,7 @@ import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createWorkspace} from '../tools/workspace-store.mjs';
+import {compare, specEvidenceCsv} from '../app/src/main/assets/model.mjs';
 import {workspaceClient} from '../app/src/main/assets/workspace-client.mjs';
 
 const lead = {id:'lead',role:'admin',name:'Administrator'};
@@ -39,6 +40,7 @@ test('stock stays on hand until Supervisor dispatch after an independent clean r
     assert.throws(() => action(operator,'dispatch'),/role/);
     assert.throws(() => action(supervisor,'dispatch'),/verified/);
     assert.equal(db.inventory().filter(c => c.state === 'available').length,70);
+    assert.throws(() => action(operator,'physical'),/role/);
     s = action(supervisor,'physical');
     const observed = s.manifest.cartons.map(c => c.epc);
     const extra = db.inventory().find(c => !observed.includes(c.epc)).epc;
@@ -574,4 +576,71 @@ test('multi-table schema persists separate records, backfills legacy DBs, and ca
       assert.equal(cleared.devices().length,0);
     } finally { cleared.close(); }
   } finally { rmSync(dir,{recursive:true,force:true}); }
+});
+
+test('locations are shared by stock and outbound, with protected and in-use locations guarded', () => {
+  const db = createWorkspace(':memory:');
+  try {
+    const command = (action,fields = {},user = lead,dashboard = true) =>
+      db.stockCommand(user,{action,operationId:randomUUID(),...fields},dashboard);
+    assert.throws(() => command('add-location',{name:'Loading Dock'},operator),/cannot perform/);
+    assert.throws(() => command('add-location',{name:'Loading Dock'},lead,false),/on the dashboard/);
+    command('add-location',{name:'Loading Dock'});
+    assert.throws(() => command('add-location',{name:'loading dock'}),/already exists/);
+    const dock = db.stockTasks().locationRecords.find(row => row.name === 'Loading Dock');
+    const session = db.create(lead,{testId:'DOCK',location:dock.name,source:'Simulation'});
+    const carton = db.inventory().find(c => c.state === 'available');
+    command('transfer',{epc:carton.epc,from:carton.location,state:carton.state,location:dock.name,reason:'Move to dock'});
+    const count = command('count',{location:dock.name},operator);
+    assert.throws(() => command('archive-location',{locationId:dock.id}),/open|outbound/i);
+    command('rename-location',{locationId:dock.id,name:'Dock 2'});
+    assert.equal(db.inventory().find(c => c.epc === carton.epc).location,'Dock 2');
+    assert.equal(db.records().sessions.find(s => s.id === session.id).location,'Dock 2');
+    assert.equal(db.stockTasks().tasks.find(t => t.id === count.id).location,'Dock 2');
+    assert.throws(() => command('archive-location',{locationId:'Hold'}),/cannot be changed/);
+    command('add-location',{name:'Unused'});
+    const unused = db.stockTasks().locationRecords.find(row => row.name === 'Unused');
+    command('archive-location',{locationId:unused.id});
+    assert.equal(db.stockTasks().locations.includes('Unused'),false);
+    assert.throws(() => command('count',{location:'Unused'},operator),/Choose a working location/);
+    assert.throws(() => db.create(lead,{testId:'UNUSED',location:'Unused',source:'Simulation'}),/Choose a working location/);
+  } finally { db.close(); }
+});
+
+test('SKU manifest validates capacity and dispatches the actual received EPC', () => {
+  const db = createWorkspace(':memory:');
+  try {
+    const [first,substitute] = db.inventory().filter(c => c.sku === 'Physalis');
+    const command = (action,fields) => db.palletManifest(lead,{action,...fields},undefined,[]);
+    const imported = command('import-pallets',{csv:'pallet_ref,pallet_epc,sku,size,material\nPAL-SKU,ABCD,EUR-01,1200x800,Wood'});
+    assert.equal(imported.imported,1);
+    assert.equal(db.palletCatalog()[0].status,'On hand');
+    assert.throws(() => command('sku-pallet',{palletEpc:'ABCD',requirements:[{sku:'DEMO-PHY',quantity:21}]}),/Only 20/);
+    const draft = command('sku-pallet',{palletEpc:'ABCD',requirements:[{sku:'DEMO-PHY',quantity:1}]});
+    assert.ok(!draft.csv.includes(first.epc));
+    assert.equal(db.skuAvailability().Physalis,19);
+    const {sessionId} = command('session',{id:draft.id,testId:'BY-SKU',location:'Staging'});
+    let session = db.records().sessions.find(s => s.id === sessionId);
+    assert.equal(session.allocation.cartons,1);
+    const candidates = db.inventory();
+    assert.equal(compare(session.manifest,[first.epc],candidates).status,'Match');
+    assert.equal(compare(session.manifest,[substitute.epc,substitute.epc],candidates).status,'Match');
+    assert.equal(compare(session.manifest,[first.epc,substitute.epc],candidates).status,'Hold');
+    assert.equal(compare(session.manifest,['FFAA'],candidates).status,'Hold');
+    assert.equal(compare(session.manifest,[substitute.epc],[{...substitute,state:'dispatched'}]).status,'Hold');
+    session = db.action(supervisor,{id:sessionId,revision:session.workspaceRevision,action:'physical',confirmed:true});
+    const run = {id:randomUUID(),palletEpc:'ABCD',source:session.source,state:'Finished',manifestRevision:1,
+      observations:{[substitute.epc]:{count:1}}};
+    session = db.sync(operator,{revision:session.workspaceRevision,operationId:randomUUID(),session:{...session,
+      identified:true,palletAttempts:[{id:randomUUID(),observations:{ABCD:{count:1}}}],runs:[run],confirmedAt:'2026-11-26'}});
+    assert.deepEqual(session.runs[0].result.matched,[substitute.epc]);
+    assert.ok(specEvidenceCsv({sessions:[session]}).includes(substitute.epc));
+    assert.ok(session.confirmedAt);
+    db.action(lead,{id:sessionId,revision:session.workspaceRevision,action:'dispatch',confirmed:true},true);
+    assert.equal(db.inventory().find(c => c.epc === first.epc).state,'available');
+    assert.equal(db.inventory().find(c => c.epc === substitute.epc).state,'dispatched');
+    assert.equal(db.palletCatalog()[0].status,'Dispatched');
+    assert.throws(() => db.stockCommand(lead,{action:'transfer',operationId:randomUUID(),epc:first.epc,from:first.location,
+      state:first.state,location:'Receiving',reason:'Move to warehouse'},true),/warehouse destination/);
+  } finally { db.close(); }
 });

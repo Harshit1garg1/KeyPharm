@@ -1,13 +1,14 @@
 import {escapeHtml as escape} from './model.mjs';
 import {movementControls,receiptCartonDetails,reportsCard,stockPage} from './stock-dashboard.mjs';
+import {demoSku,displaySource,palletCartonCount} from './model.mjs';
 
 const nav = document.querySelector('#dashboard-nav');
 const workspaceSections = [
-  ['inventory','Inventory','nav-inventory','inventory,inbound,counts'],
+  ['inventory','Inventory','nav-inventory','inventory,inbound,counts,pallet-inventory'],
   ['manage','Outbound','nav-manage','manage,manifests'],
   ['devices','Devices & Setup','nav-pallets','devices']
 ];
-const allWorkspaceKeys = new Set(['inventory','inbound','counts','manage','manifests','devices']);
+const allWorkspaceKeys = new Set(['inventory','inbound','counts','pallet-inventory','manage','manifests','devices']);
 const section = () => location.hash.slice(1);
 const isWorkspace = () => allWorkspaceKeys.has(section());
 const roleNames = {admin:'Administrator',operator:'Operator',supervisor:'Supervisor',reviewer:'Reviewer'};
@@ -19,12 +20,7 @@ rolePicker.id = 'dashboard-role';
 rolePicker.setAttribute('aria-label','Role');
 for (const [value,label] of Object.entries(roleNames)) rolePicker.add(new Option(label,value));
 rolePicker.value = role;
-const devicePill = document.createElement('a');
-devicePill.id = 'workspace-device-pill';
-devicePill.href = '#devices';
-devicePill.className = 'status device-status';
-devicePill.hidden = true;
-document.querySelector('.dashboard-toolbar-actions').prepend(devicePill,rolePicker);
+document.querySelector('.dashboard-toolbar-actions').prepend(rolePicker);
 for (const [target,label,icon,aliases] of workspaceSections) {
   const link = document.createElement('a');
   link.href = '#' + target;
@@ -109,16 +105,29 @@ function inventoryTabs(current) {
   const tasks = stockData?.tasks.filter(item => item.status !== 'Cancelled') ?? [];
   const counts = {
     inventory:data.inventory.length,
+    'pallet-inventory':(data.palletInventory ?? []).length,
     inbound:tasks.filter(item => item.type === 'receipt').length,
     counts:tasks.filter(item => item.type === 'count').length
   };
   return '<nav class="workspace-subtabs" aria-label="Inventory views">' +
-    [['inventory','Stock'],['inbound','Inbound'],['counts','Stock counts']].map(([key,label]) =>
+    [['inventory','Stock'],['pallet-inventory','Pallets'],['inbound','Inbound'],['counts','Stock counts']].map(([key,label]) =>
       '<a href="#' + key + '"' + (current === key ? ' aria-current="page"' : '') + '>' + label +
       ' <span class="tab-count">' + counts[key] + '</span></a>').join('') +
     '</nav>';
 }
 
+function palletInventory() {
+  const importForm = data.user.role === 'admin' ? '<form class="stock-action" data-manifest-form="import-pallets">' +
+    '<label>Pallet inventory CSV<input type="file" name="csv" accept=".csv,text/csv" required></label>' +
+    '<button class="primary-button">Import pallets</button>' +
+    '<a href="data:text/csv;charset=utf-8,pallet_ref%2Cpallet_epc%2Csku%2Csize%2Cmaterial%0A" download="pallet-inventory-template.csv">Download template</a></form>' : '';
+  const rows = (data.palletInventory ?? []).map(pallet => '<tr><th scope="row">' + escape(pallet.reference) + '</th><td>' +
+    escape(pallet.sku) + '</td><td>' + escape(pallet.size) + '</td><td>' + escape(pallet.material) + '</td><td><code>' +
+    escape(pallet.epc) + '</code></td><td>' + statusBadge(pallet.status) + '</td></tr>').join('');
+  return '<h2>Pallet inventory</h2>' + importForm + (rows ? '<div class="workspace-table"><table aria-label="Pallet inventory">' +
+    '<thead><tr><th scope="col">Pallet</th><th scope="col">SKU</th><th scope="col">Size</th><th scope="col">Material</th>' +
+    '<th scope="col">EPC</th><th scope="col">Status</th></tr></thead><tbody>' + rows + '</tbody></table></div>' : '<p>No pallets imported.</p>');
+}
 function inventory() {
   const stock = inventoryLocation ? data.inventory.filter(c => c.location === inventoryLocation) : data.inventory;
   const products = ['Physalis','Tiger Balm','Biotona'];
@@ -151,7 +160,7 @@ function cartonDetails(sku,cartons) {
     (history.entries.length ? '<ul class="log">' + history.entries.map(entry => '<li><strong>' + escape(entry.action) + '</strong> · ' +
       escape(entry.ref) + ' · ' + escape(entry.actor) + ' · ' + escape(new Date(entry.at).toLocaleString()) +
       (entry.reason ? '<br>' + escape(entry.reason) : '') + '</li>').join('') + '</ul>' : '<p>No movements recorded.</p>') +
-    movementControls(active,data.user.role,stockData.locations) + '</div>' : '';
+    movementControls(active,data.user.role,stockData.warehouseLocations ?? []) + '</div>' : '';
   return '<h2 id="inventory-cartons-title">' + escape(sku) + ' cartons (' + cartons.length + ')</h2>' + events + '<div class="workspace-table"><table>' +
     '<thead><tr><th scope="col">Carton</th><th scope="col">EPC</th><th scope="col">Location</th><th scope="col">Tag source</th><th scope="col">Stock status</th></tr></thead><tbody>' +
     cartons.map(c => '<tr><th scope="row"><button type="button" data-carton="' + escape(c.epc) + '">' + escape(c.carton) +
@@ -161,7 +170,7 @@ function cartonDetails(sku,cartons) {
       '</td></tr>').join('') + '</tbody></table></div>';
 }
 function sourceLabel(session) {
-  if (session.source !== 'C72 hardware') return session.source;
+  if (session.source !== 'C72 hardware') return displaySource(session.source);
   const scans = [...(session.palletAttempts ?? []), ...session.runs];
   const latest = scans.filter(scan => scan.profile?.deviceId).sort((a,b) =>
     (b.startedAt ?? '').localeCompare(a.startedAt ?? ''))[0];
@@ -206,68 +215,57 @@ function outboundTable() {
       '<th scope="col">Actions</th><th scope="col" aria-label="More actions"></th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table></div>' : '<p class="muted">No sessions yet.</p>');
 }
-let manifestSelected, manifestPreview;
+let manifestSelected;
+function outboundLocation() {
+  return '<label>Location<select name="location" required>' + (stockData?.locations ?? []).filter(name => name !== 'Hold').map(name =>
+    '<option value="' + escape(name) + '"' + (name === stockData.stagingLocation ? ' selected' : '') +
+    '>' + escape(name) + '</option>').join('') + '</select></label>';
+}
 function manifestSettings() {
   if (data.user.role !== 'admin') return '<p>Administrator access required.</p>';
   const drafts = data.palletManifests ?? [];
   const draft = drafts.find(item => item.id === manifestSelected) ?? drafts[0];
-  const esc = escape;
   const form = (action,body) => '<form class="stock-action manifest-form" data-manifest-form="' + action + '">' + body + '</form>';
-  const hiddenId = draft ? '<input type="hidden" name="id" value="' + esc(draft.id) + '">' : '';
+  const hiddenId = draft ? '<input type="hidden" name="id" value="' + escape(draft.id) + '">' : '';
   const submit = label => '<button class="primary-button">' + label + '</button>';
-  const devices = (data.devices ?? []).filter(device => Date.now() - Date.parse(device.lastContact) < 60_000);
-  const request = devices.length ? form('request','<label>Pallet reference<input name="reference" required maxlength="80"></label>' +
-    '<label>Handheld<select name="deviceId">' + devices.map(device => '<option value="' + esc(device.deviceId) + '">RFID handheld ' +
-      esc(device.deviceId) + '</option>').join('') + '</select></label>' + submit('Request pallet scan')) : '<p>No handheld is connected.</p>';
-  const chooser = drafts.length ? '<label>Manifest requests (' + drafts.length + ')<select id="manifest-selection">' + drafts.map(item =>
-    '<option value="' + esc(item.id) + '"' + (draft.id === item.id ? ' selected' : '') + '>' +
-    esc(item.reference + ' · ' + item.status) + '</option>').join('') + '</select></label>' : '';
-  const table = (rows,selectable) => '<div class="workspace-table"><table><thead><tr>' + (selectable ? '<th scope="col">Select</th>' : '') +
-    '<th scope="col">Product</th><th scope="col">Carton</th><th scope="col">EPC</th><th scope="col">Pickup location</th></tr></thead><tbody>' +
-    rows.map(carton => '<tr>' + (selectable ? '<td><input type="checkbox" name="epc" value="' + esc(carton.epc) +
-      '" aria-label="Select ' + esc(carton.carton) + '"></td>' : '') + '<td>' + esc(carton.sku) + '</td><td>' + esc(carton.carton) +
-      '</td><td><code>' + esc(carton.epc) + '</code></td><td>' + esc(carton.location) + '</td></tr>').join('') + '</tbody></table></div>';
-  const pallets = draft?.pallets ?? (draft?.csv ? [{pallet:draft.reference,palletEpc:draft.palletEpc,cartons:draft.cartons}] : []);
-  const assigned = new Set(data.assignedCartonEpcs ?? []);
-  const palletList = pallets.map(pallet => '<details class="dashboard-fold"><summary><span>' + esc(pallet.pallet) + ' · ' +
-    pallet.cartons.length + ' cartons</span></summary><div class="dashboard-fold-body"><p><code>' + esc(pallet.palletEpc) +
-    '</code></p>' + table(pallet.cartons,false) + '</div></details>').join('');
-  const existing = (data.existingPallets ?? []).filter(pallet => pallet.draftId !== draft?.id);
-  const addPallet = draft?.status === 'Manifest ready' ? '<details class="dashboard-fold"' +
-    (panel.querySelector('#add-manifest-pallet[open]')?.dataset.draft === draft.id ? ' open' : '') +
-    ' id="add-manifest-pallet" data-draft="' + esc(draft.id) + '"><summary><span>Add another pallet</span></summary>' +
-    '<div class="dashboard-fold-body">' +
-    (existing.length ? form('add-existing',hiddenId +
-      '<label>Existing pallet<select name="palletEpc" required><option value="">Choose a pallet</option>' +
-      existing.map(pallet => '<option value="' + esc(pallet.palletEpc) + '">' +
-        esc(pallet.pallet + ' · ' + pallet.cartons.length + (pallet.cartons.length === 1 ? ' carton' : ' cartons')) +
-        '</option>').join('') + '</select></label>' + submit('Add existing pallet')) : '<p>No existing pallets are available.</p>') +
-    form('add-pallet',hiddenId + '<label>Next pallet reference<input name="reference" required maxlength="80"></label>' +
-      submit('Request new pallet scan')) + '</div></details>' : '';
-  let detail = '';
-  if (draft?.status === 'Pallet scanned') {
-    const available = data.inventory.filter(carton => carton.state === 'available' && !assigned.has(carton.epc));
-    const preview = manifestPreview?.id === draft.id ? manifestPreview.epcs.map(epc => available.find(item => item.epc === epc)) : [];
-    detail = preview.length && preview.every(Boolean) ?
-      '<h3>Preview pickup list (' + preview.length + ')</h3>' + table(preview,false) + form('generate',hiddenId +
-        preview.map(carton => '<input type="hidden" name="epc" value="' + esc(carton.epc) + '"><input type="hidden" name="locationAtPreview" value="' + esc(carton.location) + '">').join('') +
-        submit('Generate manifest') + '<button type="button" data-edit-manifest>Edit selection</button>') :
-      '<h3>Available cartons (' + available.length + ')</h3>' + (available.length ? form('preview',hiddenId + table(available,true) + submit('Preview manifest')) :
-        '<p>No cartons are available.</p>');
-  } else if (draft?.csv) {
-    detail = '<p><a href="api/pallet-manifest.csv?id=' + encodeURIComponent(draft.id) + '" download data-manifest-download>Download CSV</a></p>' +
-      (draft.sessionId ? (draft.sessionRemovedAt ? '<p class="muted">Session removed.</p>' :
-        '<p><a href="#sessions/' + encodeURIComponent(draft.sessionId) + '">Open session</a></p>') : form('session',hiddenId +
-        '<label>Test ID<input name="testId" required maxlength="80" value="' + esc(draft.reference) + '"></label>' +
-        '<label>Location<input name="location" required value="Staging" maxlength="100"></label>' + submit('Create session from manifest')) +
-      addPallet);
+  const onHand = (data.palletInventory ?? []).filter(pallet => pallet.status === 'On hand');
+  function choosePallet(add) {
+    if (!onHand.length) return '<p>No pallets on hand. <a href="#pallet-inventory">Open pallet inventory</a>.</p>';
+    const options = onHand.map(pallet => '<option value="' + escape(pallet.epc) + '">' +
+      escape([pallet.reference,pallet.sku,pallet.size,pallet.material].join(' / ')) + '</option>').join('');
+    const quantities = Object.entries(data.skuAvailability ?? {}).map(([sku,count]) => {
+      const max = Math.max(0,count);
+      return '<label>' + escape(sku + ' / ' + demoSku(sku) + ' (' + max + ' available)') + '<input type="number" min="0" max="' +
+        max + '" step="1" name="sku:' + escape(sku) + '" value="0"' + (max ? '' : ' disabled') + '></label>';
+    }).join('');
+    return form('sku-pallet',(add ? hiddenId : '') + '<label>Pallet<select name="palletEpc" required><option value="">Choose a pallet</option>' +
+      options + '</select></label>' + quantities + submit(add ? 'Add pallet to manifest' : 'Generate manifest'));
   }
-  return request + chooser + (draft ?
-    '<section class="line"><h3>' + esc(draft.reference) + '</h3><p>' + esc(draft.status) + ' · RFID handheld ' + esc(draft.deviceId) +
-    (draft.scanReference ? ' · ' + esc(draft.scanReference) : '') +
-    (draft.palletEpc ? ' · <code>' + esc(draft.palletEpc) + '</code>' : '') + '</p>' + palletList + detail +
-    form('cancel',hiddenId + '<button>Remove pallet manifest</button>') + '</section>' : '');
+  const chooser = drafts.length ? '<label>Manifests (' + drafts.length + ')<select id="manifest-selection">' + drafts.map(item =>
+    '<option value="' + escape(item.id) + '"' + (draft.id === item.id ? ' selected' : '') + '>' +
+    escape(item.reference + ' · ' + item.status) + '</option>').join('') + '</select></label>' : '';
+  if (!draft) return choosePallet(false);
+  const pallets = draft.pallets ?? (draft.csv ? [{pallet:draft.reference,palletEpc:draft.palletEpc,cartons:draft.cartons}] : []);
+  const details = pallets.map(pallet => '<details class="dashboard-fold"><summary><span>' + escape(pallet.pallet) + ' · ' +
+    palletCartonCount(pallet) + (palletCartonCount(pallet) === 1 ? ' carton' : ' cartons') + '</span></summary><div class="dashboard-fold-body"><p><code>' + escape(pallet.palletEpc) +
+    '</code></p><ul class="log">' + (pallet.requirements ? pallet.requirements.map(({sku,quantity}) =>
+      '<li>' + escape(sku + ' / ' + demoSku(sku)) + ' · ' + quantity + '</li>') : pallet.cartons.map(carton =>
+      '<li>' + escape(carton.carton + ' / ' + carton.sku + ' / ' + carton.epc) + '</li>')).join('') + '</ul></div></details>').join('');
+  const download = draft.csv ? '<p><a href="api/pallet-manifest.csv?id=' + encodeURIComponent(draft.id) +
+    '" download data-manifest-download>Download CSV</a></p>' : '';
+  const session = draft.sessionId ? (draft.sessionRemovedAt ? '<p>Session removed.</p>' :
+    '<p><a href="#sessions/' + encodeURIComponent(draft.sessionId) + '">Open session</a></p>') : draft.csv ?
+    form('session',hiddenId + '<label>Test ID<input name="testId" required maxlength="80" value="' + escape(draft.reference) +
+      '"></label>' + outboundLocation() + submit('Create session from manifest')) : '';
+  const add = draft.matchBy === 'sku' && draft.status === 'Manifest ready' ?
+    '<details class="dashboard-fold"><summary><span>Add another pallet</span></summary><div class="dashboard-fold-body">' +
+    choosePallet(true) + '</div></details>' : '';
+  return '<details class="dashboard-fold"><summary><span>New manifest</span></summary><div class="dashboard-fold-body">' +
+    choosePallet(false) + '</div></details>' + chooser + '<section class="line"><h3>' + escape(draft.reference) + '</h3><p>' +
+    escape(draft.status) + '</p>' + details + add + download + session +
+    form('cancel',hiddenId + '<button>Remove pallet manifest</button>') + '</section>';
 }
+
 function adminSettings() {
   if (data.user.role !== 'admin') return '';
   const setting = data.controls;
@@ -285,19 +283,41 @@ function adminSettings() {
     '<label>LookUp Power (dBm)<input name="lookupPower" type="number" min="5" max="30" step="1" placeholder="Use session power" value="' +
     escape(setting.lookupPower ?? '') + '"></label></div>' +
     '<div class="row workspace-actions"><button class="primary-button">Save test settings</button></div></form>' +
-    '<div class="workspace-reset-row"><button type="button" data-action="reset">Reset demo data</button></div></div></details>';
+    '<div class="workspace-reset-row"><button type="button" data-action="reset">Reset data *</button></div></div></details>';
 }
 
+function locationSettings() {
+  const list = stockData?.locationRecords ?? [];
+  const open = panel.querySelector('#workspace-locations[open]') ? ' open' : '';
+  const admin = data.user.role === 'admin';
+  const nameField = (label,value = '') => '<label>' + label + '<input name="name" maxlength="100" required value="' +
+    escape(value) + '"></label>';
+  const add = admin ? '<form class="stock-action" data-stock-action="add-location">' + nameField('New location name') +
+    '<button class="primary-button">Add location</button></form>' : '';
+  const rows = list.map(location => {
+    const name = escape(location.name);
+    const controls = admin && !location.archived && location.id !== 'Hold' ?
+      '<form class="stock-action" data-stock-action="rename-location"><input type="hidden" name="locationId" value="' + escape(location.id) + '">' +
+      nameField('Rename ' + name,location.name) + '<button>Save name</button>' +
+      '<button type="submit" formnovalidate data-location-archive>Archive</button></form>' :
+      statusBadge(location.archived ? 'Archived' : location.id === 'Hold' ? 'Protected' : 'Active');
+    return '<tr><th scope="row">' + name + '</th><td>' + controls + '</td></tr>';
+  }).join('');
+  return '<details id="workspace-locations" class="dashboard-fold"' + open + '><summary><span>Locations</span></summary>' +
+    '<div class="dashboard-fold-body">' + add + '<div class="workspace-table"><table aria-label="Locations"><thead><tr>' +
+    '<th scope="col">Location</th><th scope="col">' + (admin ? 'Manage' : 'Status') + '</th></tr></thead><tbody>' +
+    rows + '</tbody></table></div></div></details>';
+}
 function manage() {
   const adminTools = data.user.role === 'admin' ? '<div class="workspace-section-actions">' +
     '<button type="button" data-outbound-panel="create" aria-pressed="' + (outboundPanel === 'create') + '">+ New session</button>' +
     '<button type="button" data-outbound-panel="manifest" aria-pressed="' + (outboundPanel === 'manifest') + '">+ Build manifest</button></div>' +
     (outboundPanel === 'create' ? '<div class="workspace-outbound-tools"><form id="workspace-create"><h2>New session</h2><div class="workspace-fields">' +
-      '<label>Test ID<input name="testId" maxlength="80" required></label><label>Location<input name="location" maxlength="100" value="Staging" required></label>' +
-      '<label>Reader source<select name="source"><option>Simulation</option><option value="C72 hardware">RFID handheld</option></select></label></div>' +
+      '<label>Test ID<input name="testId" maxlength="80" required></label>' + outboundLocation() +
+      '<label>Reader source<select name="source"><option value="Simulation">Scan *</option><option value="C72 hardware">RFID handheld</option></select></label></div>' +
       '<div class="workspace-create-actions"><div class="workspace-csv-choice">' + csvPicker('create-csv-status') +
       '<span class="workspace-csv-divider" aria-hidden="true">&#92;</span>' +
-      '<button type="button" data-action="sample" aria-pressed="false">Use Sample CSV</button></div>' +
+      '<button type="button" data-action="sample" aria-pressed="false">Use CSV *</button></div>' +
       '<button class="primary-button">Create session</button></div></form></div>' :
     outboundPanel === 'manifest' ? '<div class="workspace-outbound-tools">' + manifestSettings() + '</div>' : '') : '';
   return adminTools + outboundTable();
@@ -312,7 +332,7 @@ const milestones = {
   review:['Count reviewed','Scan evidence is saved.'],
   'cancel-count':['Count cancelled','You can open a fresh count for this location.'],
   outbound:['Pallet prepared','Open it in Outbound.'],
-  reset:['Demo data reset','Starting inventory restored.']
+  reset:['Data reset *','Starting inventory restored.']
 };
 const confirmation = document.createElement('dialog');
 confirmation.className = 'workflow-dialog';
@@ -320,19 +340,7 @@ confirmation.setAttribute('aria-labelledby','workspace-confirm-title');
 confirmation.innerHTML = '<span class="workflow-tick" aria-hidden="true"></span><h2 id="workspace-confirm-title"></h2>' +
   '<p></p><form method="dialog"><button>Done</button></form>';
 panel.after(confirmation);
-function updateDevicePill() {
-  const devices = stockData?.devices ?? data?.devices ?? (stockData?.device ? [stockData.device] : []);
-  if (!data && !stockData) { devicePill.hidden = true; return; }
-  const live = devices.filter(device => device?.lastContact && Date.now() - Date.parse(device.lastContact) < 60_000);
-  const label = live.length === 1 ? 'Handheld · ' + (live[0].deviceId || 'Live') :
-    live.length > 1 ? live.length + ' handhelds live' : devices.length ? 'Handheld · Offline' : 'No handheld';
-  devicePill.hidden = false;
-  devicePill.className = 'status device-status' + (live.length ? ' live' : '');
-  devicePill.textContent = label;
-  devicePill.title = label;
-}
 const render = () => {
-  updateDevicePill();
   if (overviewReports) {
     if (stockData) {
       if (!overviewReports.hasChildNodes()) overviewReports.innerHTML = reportsCard();
@@ -344,9 +352,10 @@ const render = () => {
   if (!data) { panel.textContent = message || 'Loading workspace…'; return; }
   const current = section();
   const body = current === 'inventory' ? inventoryTabs(current) + inventory() :
+    current === 'pallet-inventory' ? inventoryTabs(current) + palletInventory() :
     ['inbound','counts'].includes(current) ? inventoryTabs(current) + stockPage(current,data,stockData,stockSelection,receiptPreview) :
     ['manage','manifests'].includes(current) ? manage() :
-    current === 'devices' ? adminSettings() + stockPage('devices',data,stockData,stockSelection,receiptPreview) :
+    current === 'devices' ? adminSettings() + locationSettings() + stockPage('devices',data,stockData,stockSelection,receiptPreview) :
     stockPage(current,data,stockData,stockSelection,receiptPreview);
   panel.innerHTML = '<p id="workspace-message" role="status">' + escape(message) + '</p>' + body +
     '<dialog id="workspace-dialog" aria-labelledby="workspace-dialog-title"><form method="dialog" id="workspace-dialog-form">' +
@@ -415,7 +424,7 @@ async function mutate(path, payload) {
   let result;
   try {
     result = await readApi(path,{...payload,generation:data.generation});
-    if (path === 'api/pallet-manifest') { manifestSelected = result.id; manifestPreview = undefined; }
+    if (path === 'api/pallet-manifest') { if (result.id) manifestSelected = result.id; }
     if (path === 'api/session') outboundPanel = '';
     if (['count','receipt'].includes(payload.action) && result.id) stockSelection = result.id;
     if (payload.action === 'receipt') { receiptPreview = receiptCsv = undefined; }
@@ -457,10 +466,10 @@ async function mutate(path, payload) {
 panel.addEventListener('change', event => {
   if (event.target.id !== 'manifest-selection') return;
   manifestSelected = event.target.value;
-  manifestPreview = undefined;
   message = '';
   render();
 });
+
 panel.addEventListener('click', async event => {
   const link = event.target.closest('[data-manifest-download]');
   if (link) {
@@ -485,25 +494,25 @@ panel.addEventListener('click', async event => {
     render();
     return;
   }
-  if (!event.target.closest('[data-edit-manifest]')) return;
-  const epcs = manifestPreview?.epcs ?? [];
-  manifestPreview = undefined;
-  render();
-  for (const option of panel.querySelectorAll('input[name="epc"]')) option.checked = epcs.includes(option.value);
 });
 panel.addEventListener('submit', async event => {
   if (event.target.dataset.manifestForm) {
     event.preventDefault();
     const action = event.target.dataset.manifestForm;
     const values = new FormData(event.target);
-    const epcs = values.getAll('epc');
-    if (action === 'preview') {
-      if (!epcs.length) { panel.querySelector('#workspace-message').textContent = 'Select at least one carton.'; return; }
-      manifestPreview = {id:values.get('id'),epcs};
-      render();
+    if (action === 'import-pallets') {
+      const file = values.get('csv');
+      if (!file?.size || file.size > 512000) {
+        panel.querySelector('#workspace-message').textContent = 'Choose a CSV up to 512 KB.';
+        return;
+      }
+      try { await mutate('api/pallet-manifest',{action,csv:await file.text()}); }
+      catch (error) { panel.querySelector('#workspace-message').textContent = error.message; }
       return;
     }
-    const payload = {...Object.fromEntries(values),action,epcs,locations:values.getAll('locationAtPreview')};
+    const payload = {...Object.fromEntries(values),action};
+    if (action === 'sku-pallet') payload.requirements = [...values].filter(([key,value]) => key.startsWith('sku:') && Number(value) > 0)
+      .map(([key,value]) => ({sku:key.slice(4),quantity:Number(value)}));
     if (action === 'cancel') {
       const dialog = panel.querySelector('dialog');
       dialog.returnValue = 'cancel';
@@ -522,7 +531,7 @@ panel.addEventListener('submit', async event => {
   if (event.target.dataset.stockAction) {
     event.preventDefault();
     const values = new FormData(event.target);
-    const requestedAction = event.target.dataset.stockAction;
+    const requestedAction = event.submitter?.hasAttribute('data-location-archive') ? 'archive-location' : event.target.dataset.stockAction;
     const action = requestedAction === 'transfer' && values.get('location') === 'Hold' ? 'hold' : requestedAction;
     const record = event.target.closest('[data-stock-record]');
     const dialog = panel.querySelector('dialog');
@@ -544,12 +553,13 @@ panel.addEventListener('submit', async event => {
     }
     if (action === 'receipt') change.csv = receiptCsv;
     if (values.has('epcs')) change.epcs = values.get('epcs').trim().split(/[\s,;]+/).filter(Boolean);
-    if (['count','scan','receipt'].includes(action)) { await mutate('api/stock-action',change); return; }
+    if (['count','scan','receipt','add-location','rename-location'].includes(action)) { await mutate('api/stock-action',change); return; }
     dialog.returnValue = 'cancel';
     dialog.querySelector('h2').textContent = action === 'hold' ? 'Place on hold' :
-    action === 'cancel-count' ? 'Cancel count?' : event.submitter.textContent;
+    action === 'cancel-count' ? 'Cancel count?' : action === 'archive-location' ? 'Archive location?' : event.submitter.textContent;
     dialog.querySelector('p').textContent = action === 'untag' ? 'Remove this EPC from the receipt and return the carton to outstanding.' :
-    action === 'cancel-count' ? 'Remove this count from the list and keep its scan history. Inventory stays the same.' : '';
+    action === 'cancel-count' ? 'Remove this count from the list and keep its scan history. Inventory stays the same.' :
+    action === 'archive-location' ? 'Remove this location from new work. Existing history is kept.' : '';
     dialog.querySelector('.workspace-dialog-fields').replaceChildren();
     dialog.addEventListener('close',() => {
       if (dialog.returnValue === 'confirm') void mutate('api/stock-action',change);
@@ -579,7 +589,7 @@ panel.addEventListener('submit', async event => {
   const file = form.get('csv');
   const sample = event.target.querySelector('[data-action="sample"]').getAttribute('aria-pressed') === 'true';
   if (!sample && !file?.size) {
-    panel.querySelector('#workspace-message').textContent = 'Choose a CSV or use the sample.';
+    panel.querySelector('#workspace-message').textContent = 'Choose a CSV or select Use CSV *.';
     return;
   }
   await mutate('api/session',{testId:form.get('testId'),location:form.get('location'),source:form.get('source'),

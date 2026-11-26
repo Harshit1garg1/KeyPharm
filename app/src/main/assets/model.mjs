@@ -12,9 +12,12 @@ const csvLine = sep => new RegExp('(?:^|' + sep + ')(?:"((?:[^"]|"")*)"|([^"' + 
 export const normalizeEpc = value => String(value ?? '').trim().toUpperCase();
 export const productSku = value => value === 'Juice' ? 'Physalis' : value;
 export const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]);
-export const displaySource = value => value == null ? value : value === 'C72 hardware' ? 'RFID handheld' : String(value).replace(/\bC72\b/gi, 'UHF');
+export const displaySource = value => value == null ? value : value === 'C72 hardware' ? 'RFID handheld' : ['Simulation','Simulated','Simulator'].includes(value) ? 'Scan *' :
+  ['Sample CSV','Demo sample CSV'].includes(value) ? 'CSV *' : String(value).replace(/\bC72\b/gi, 'UHF');
 
-export const demoSku = sku => ({Physalis:'DEMO-PHY','Tiger Balm':'DEMO-TB',Biotona:'DEMO-BIO'})[sku] ?? sku;
+const productCodes = {Physalis:'DEMO-PHY','Tiger Balm':'DEMO-TB',Biotona:'DEMO-BIO'};
+export const demoSku = sku => productCodes[sku] ?? sku;
+export const skuProduct = sku => Object.keys(productCodes).find(product => productCodes[product] === sku) ?? productSku(sku);
 
 export function receiptProducts(task) {
   const quantities = task.quantities ?? Object.fromEntries([...new Set(task.expected.map(carton => carton.sku))]
@@ -55,9 +58,41 @@ export function manifestCsv(palletRef, palletEpc, epcs, sku = '') {
   return ['pallet_ref,pallet_epc,carton_ref,carton_epc,sku', ...cartons.map((epc,i) =>
     [ref, pallet, 'Carton ' + String(i + 1).padStart(2,'0'), epc, item].join(','))].join('\n') + '\n';
 }
+const skuColumns = ['pallet_ref','pallet_epc','sku','quantity'];
+export function skuManifestCsv(pallets) {
+  return [skuColumns.join(','),...pallets.flatMap(pallet => pallet.requirements.map(({sku,quantity}) =>
+    [pallet.pallet,pallet.palletEpc,demoSku(sku),quantity].map(csvCell).join(',')))].join('\n');
+}
+export const palletCartonCount = pallet => pallet.requirements?.reduce((sum,row) => sum + row.quantity,0) ?? pallet.cartons.length;
+
+function parseSkuManifest(text) {
+  const pallets = new Map(), tags = new Set();
+  let labels = 0;
+  for (const [pallet,tag,code,value] of parseCsvRows(text,skuColumns)) {
+    const palletEpc = normalizeEpc(tag), sku = skuProduct(code), quantity = Number(value);
+    if (!pallet || pallet.length > 80 || /^[=+@-]/.test(pallet) || !validEpc(palletEpc) || !sku ||
+        !Number.isInteger(quantity) || quantity < 1 || quantity > 499) throw new Error('Enter a pallet reference, EPC, SKU and whole carton quantity.');
+    let row = pallets.get(pallet);
+    if (!row) {
+      if (tags.has(palletEpc)) throw new Error('A pallet EPC can appear under one pallet reference only.');
+      tags.add(palletEpc);
+      row = {pallet,palletEpc,cartons:[],requirements:[]};
+      pallets.set(pallet,row);
+      labels++;
+    }
+    if (row.palletEpc !== palletEpc || row.requirements.some(item => item.sku === sku)) throw new Error('Use one quantity per SKU on each pallet.');
+    row.requirements.push({sku,quantity});
+    labels += quantity;
+    if (labels > 500) throw new Error('A manifest can use up to 500 labels.');
+  }
+  const list = [...pallets.values()];
+  return {...(list.length === 1 ? list[0] : {pallet:list.length + ' pallets',palletEpc:'',cartons:[]}),
+    matchBy:'sku',pallets:list};
+}
 export function parseManifest(text) {
   const lines = text.replace(/^\uFEFF/, '').trim().split(/\r?\n/);
   const header = lines.shift().toLowerCase();
+  if ([',',';'].some(separator => header.split(separator).map(field => field.trim()).join() === skuColumns.join())) return parseSkuManifest(text);
   const sep = [',', ';'].find(s => header.split(s).map(h => h.trim()).join() === columns.join());
   if (!sep) throw new Error('Use the five headers from the sample CSV, separated by commas or semicolons.');
   if (!lines.length) throw new Error('Manifest needs at least one carton.');
@@ -153,6 +188,10 @@ export function matchesQuery(s, query, status = '') {
 }
 // AT-02: expected, matched and missing cartons per SKU for one run; SKU never replaces the EPC identity.
 export function skuBreakdown(manifest, result) {
+  if (manifest.requirements) return manifest.requirements.map(({sku,quantity:expected}) => {
+    const missing = result.missing.filter(product => product === sku).length;
+    return {sku,expected,matched:expected - missing,missing};
+  });
   const matched = new Set(result.matched), rows = new Map();
   for (const c of manifest.cartons) {
     const sku = c.sku || 'No SKU', row = rows.get(sku) ?? {sku, expected:0, matched:0, missing:0};
@@ -165,12 +204,29 @@ export function skuBreakdown(manifest, result) {
 // Section 9.3 lists "Unexpected reads" as its own state; FR-15 calls it Hold. Show both.
 export const statusLabel = status => status === 'Hold' ? 'Hold: unexpected reads' : status;
 export const pendingPallet = session => session.manifest?.pallets?.find(pallet => !session.palletMatches?.[pallet.palletEpc]);
-export const lockTo = (manifest, pallet) => ({...manifest, pallet:pallet.pallet, palletEpc:pallet.palletEpc, cartons:pallet.cartons});
+export const lockTo = (manifest, pallet) => ({...manifest, pallet:pallet.pallet, palletEpc:pallet.palletEpc, cartons:pallet.cartons, requirements:pallet.requirements});
 // The other loaded pallet an unexpected EPC belongs to, if any.
 export const otherPallet = (manifest, epc) =>
   palletsOf(manifest).find(p => p.palletEpc !== manifest.palletEpc && tagsOf(p).includes(epc))?.pallet;
 
-export function compare(manifest, observed) {
+export function compare(manifest, observed, inventory = []) {
+  if (manifest.requirements) {
+    const remaining = new Map(manifest.requirements.map(({sku,quantity}) => [sku,quantity]));
+    const catalog = new Map(inventory.filter(carton => carton.state === 'available').map(carton => [carton.epc,carton]));
+    const matched = [], extra = [], matchedCartons = [];
+    for (const epc of new Set(observed.map(normalizeEpc))) {
+      if (!epc || epc === manifest.palletEpc) continue;
+      const carton = catalog.get(epc);
+      if (!carton || !remaining.get(carton.sku)) { extra.push(epc); continue; }
+      remaining.set(carton.sku,remaining.get(carton.sku) - 1);
+      matched.push(epc);
+      matchedCartons.push({epc,sku:carton.sku,carton:carton.carton});
+    }
+    const expected = palletCartonCount(manifest);
+    const missing = [...remaining].flatMap(([sku,quantity]) => Array(quantity).fill(sku));
+    return {expected,matched,missing,extra,matchedCartons,percent:Math.round(matched.length * 1000 / expected) / 10,
+      status:extra.length ? 'Hold' : missing.length ? 'Incomplete' : 'Match'};
+  }
   const expected = new Set(manifest.cartons.map(c => c.epc));
   const seen = new Set(observed.map(normalizeEpc).filter(epc => epc && epc !== manifest.palletEpc));
   const matched = [...expected].filter(epc => seen.has(epc));
@@ -272,7 +328,7 @@ export function specEvidenceCsv(store) {
       const key = m?.palletEpc;
       const rescan = firstPassByPallet.has(key);
       firstPassByPallet.add(key);
-      const cartons = new Map((m?.cartons ?? []).map(c => [c.epc, c]));
+      const cartons = new Map((r.matchedCartons ?? m?.cartons ?? []).map(c => [c.epc, c]));
       const notes = s.logs.filter(log => log.run === run.id && log.action === 'Run note').map(log => log.detail);
       // Latest investigation per EPC; the handheld logs "Unexpected EPC <outcome>" with "<epc> / <note>".
       const disposition = new Map();
@@ -291,7 +347,14 @@ export function specEvidenceCsv(store) {
           [note, run.reason && 'Rescan reason: ' + run.reason, d?.note, ...notes].filter(Boolean).join(' | '),
           read?.count, read?.first, read?.last, read?.rssi, p.version];
       };
-      for (const c of m?.cartons ?? []) {
+      if (m?.requirements) {
+        for (const epc of r.matched) rows.push(row(epc,'Matched',false,true,''));
+        for (const sku of r.missing) {
+          const missing = row('','Missing',false,false,'MISSING_CARTON');
+          missing[12] = sku;
+          rows.push(missing);
+        }
+      } else for (const c of m?.cartons ?? []) {
         const seen = r.matched.includes(c.epc);
         rows.push(row(c.epc, seen ? 'Matched' : 'Missing', true, seen, seen ? '' : 'MISSING_CARTON'));
       }

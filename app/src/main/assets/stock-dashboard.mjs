@@ -89,14 +89,14 @@ export function movementControls(carton,role,locations) {
   const actions = [];
   if (state === 'available' && ['admin','operator'].includes(role)) actions.push('transfer');
   if (['admin','supervisor'].includes(role)) {
-    if (state === 'available' && role === 'supervisor') actions.push('hold');
+    if (state === 'available') actions.push('hold');
     if (state === 'held') actions.push('release');
   }
   const fields = [['epc',epc],['from',location],['state',state]].map(([key,value]) =>
     '<input type="hidden" name="' + key + '" value="' + esc(value) + '">').join('');
   return actions.map(action => {
     const destination = action === 'hold' ? '' : '<label>Destination<select name="location">' +
-      locations.filter(value => role === 'admin' || (value !== location && value !== 'Hold')).map(value =>
+      locations.filter(value => role === 'admin' || value !== location).map(value =>
         value === location ? option(value,value + ' (current)',true) : option(value)).join('') + '</select></label>';
     return form(action,fields + destination + '<label>Reason<input name="reason" required maxlength="240"></label>' +
       button({transfer:'Move carton',hold:'Place on hold',release:'Release from hold'}[action]));
@@ -117,10 +117,10 @@ export function reportsCard() {
   const cards = reportTypes.map(([key,label,description,path]) => '<li class="report-card"><div class="report-description">' +
     '<span class="report-icon">' + cardIcon(path) + '</span><div><h3>' + label + '</h3><p>' + description + '</p></div></div>' +
     '<a class="report-download" href="api/' + key + '.csv" download aria-label="Download ' + label + ' CSV">' + downloadIcon + 'Download CSV</a></li>');
-  return '<div class="panel-heading"><h2>Reports</h2></div><ul class="report-grid report-grid-compact" aria-label="CSV reports">' +
-    cards.join('') + '</ul><div class="report-integration"><span class="report-icon">' +
+  return '<div class="panel-heading row spread"><h2>Reports</h2><div class="report-integration"><span class="report-icon">' +
     cardIcon('M8 4v5m8-5v5M6 9h12v3a6 6 0 0 1-12 0zm6 9v3') +
-    '</span><h2>ERP/WMS</h2><span class="dashboard-badge">Not configured</span></div>';
+    '</span><span>ERP/WMS</span><span class="dashboard-badge">Not configured</span></div></div>' +
+    '<ul class="report-grid report-grid-compact" aria-label="CSV reports">' + cards.join('') + '</ul>';
 }
 
 function devicesPage(devices) {

@@ -1,6 +1,6 @@
 # Keypharm RFID POC
 
-KeyPharm RFID PoC for the C72 and a local PC dashboard. The Android app is version 0.9.21 (version code 42). Use Simulation to rehearse with sample data or RFID handheld to scan physical tags from a matching manifest. See [context.md](context.md) for the latest handoff.
+KeyPharm RFID PoC for the C72 and a local PC dashboard. The Android app is version 0.9.24 (version code 45). Use Simulation to rehearse with sample data or RFID handheld to scan physical tags from a matching manifest. See [context.md](context.md) for the latest handoff.
 
 ## Run the connected demo
 

@@ -143,7 +143,7 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .home .title-row {align-items:baseline}
 
 /* Session steps: a real sequence, so an ordered strip. */
-.steps {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;list-style:none;margin:0 0 12px;padding:0;counter-reset:step}
+.steps {display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:4px;list-style:none;margin:0 0 12px;padding:0;counter-reset:step}
 .steps li {counter-increment:step;display:flex;align-items:center;justify-content:center;gap:4px;min-height:36px;padding:4px;border-radius:7px;background:var(--paper);border:1px solid var(--line);color:var(--subtle);font-size:13px;font-weight:650;text-align:center}
 .steps li::before {content:counter(step)}
 .steps li[data-state=done] {background:var(--leaf);border-color:var(--leaf);color:var(--match)}

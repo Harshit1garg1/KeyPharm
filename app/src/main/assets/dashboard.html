@@ -5,37 +5,45 @@
 <body>
 <a class="dashboard-skip" href="#content">Skip to dashboard</a>
 <div class="dashboard-shell">
-<aside class="dashboard-rail">
+<header class="dashboard-rail">
   <a class="dashboard-brand" href="#overview">
     <img src="keypharm-logo-hd.png" alt="KeyPharm Laboratories">
   </a>
   <button type="button" class="secondary dashboard-toggle" id="menu-toggle" aria-expanded="false" aria-controls="dashboard-nav">Sections</button>
+  <form class="dashboard-find" role="search" aria-label="Find a session" hidden>
+    <label class="dashboard-find-field">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+      <input id="dashboard-query" type="search" aria-label="Search sessions, pallets or EPCs" placeholder="Search sessions, pallets or EPCs" autocomplete="off" maxlength="120" aria-controls="dashboard-find-results">
+    </label>
+    <div id="dashboard-find-results" class="dashboard-find-results" hidden>
+      <p id="dashboard-find-status" role="status"></p>
+      <ul id="dashboard-find-links"></ul>
+    </div>
+  </form>
+  <div class="row dashboard-toolbar-actions">
+    <button type="button" id="dashboard-theme" aria-label="Light mode" title="Light mode" hidden>
+      <svg class="theme-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg>
+      <svg class="theme-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.9 13.2A9 9 0 1 1 10.8 3.1a7 7 0 0 0 10.1 10.1Z"/></svg>
+    </button>
+    <button type="button" id="refresh" aria-label="Refresh records" title="Refresh records">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 10a8 8 0 1 0-.9 6M20 4v6h-6"/></svg>
+    </button>
+  </div>
   <nav id="dashboard-nav" aria-label="Dashboard sections">
     <a href="#overview" aria-current="page"><span class="nav-icon nav-overview" aria-hidden="true"></span>Overview</a>
     <a href="#sessions"><span class="nav-icon nav-sessions" aria-hidden="true"></span>Scan logs</a>
     <a href="#activity"><span class="nav-icon nav-activity" aria-hidden="true"></span>Activity</a>
   </nav>
-</aside>
+</header>
 <main id="content" class="dashboard-content" tabindex="-1">
-  <div class="row spread dashboard-toolbar">
-    <p id="connection" class="status" role="status">Loading records…</p>
-    <div class="row dashboard-toolbar-actions">
-      <button type="button" id="dashboard-theme" aria-label="Light mode" title="Light mode" hidden>
-        <svg class="theme-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg>
-        <svg class="theme-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.9 13.2A9 9 0 1 1 10.8 3.1a7 7 0 0 0 10.1 10.1Z"/></svg>
-      </button>
-      <button type="button" id="refresh" aria-label="Refresh records" title="Refresh records">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 10a8 8 0 1 0-.9 6M20 4v6h-6"/></svg>
-      </button>
-    </div>
-  </div>
+  <p id="connection" class="status" role="status">Loading records…</p>
   <header id="page-heading" class="dashboard-heading" data-overview="true">
     <div><h1 id="page-title" tabindex="-1">Overview</h1>
       <p id="section-description"></p></div>
-    <div class="dashboard-signal" aria-hidden="true"><span></span></div>
   </header>
   <div id="overview">
     <div id="totals" class="dashboard-totals" aria-label="Record totals"></div>
+    <div class="dashboard-overview-records">
       <section class="panel dashboard-sessions">
         <div class="panel-heading row spread"><div class="row"><h2>Recent sessions</h2><span id="recent-sessions-count" class="count-pill" hidden></span></div><a href="#sessions">View all sessions</a></div>
         <table>
@@ -44,13 +52,12 @@
         </table>
         <p id="sessions-empty" class="muted">Waiting for records…</p>
       </section>
-      <div class="dashboard-overview-side">
         <section class="panel dashboard-outcomes">
           <div class="panel-heading"><h2>Carton scan outcomes</h2></div>
           <div id="outcomes"></div>
         </section>
-        <section id="overview-reports" class="panel dashboard-reports" aria-label="Reports" hidden></section>
-      </div>
+    </div>
+    <section id="overview-reports" class="panel dashboard-reports" aria-label="Reports" hidden></section>
   </div>
   <div id="catalog" class="dashboard-catalog" hidden>
     <nav id="catalog-tabs" class="workspace-subtabs" aria-label="Scan log sections" hidden>

@@ -51,7 +51,7 @@ def as_person(page, role, name):
 
 
 def hold(page):
-    trigger = page.get_by_role("button", name="Hold demo trigger")
+    trigger = page.get_by_role("button", name="Hold trigger *")
     trigger.focus()
     page.keyboard.down("Space")
     expect(page.locator("#scan-results")).to_contain_text("Reading")
@@ -79,9 +79,9 @@ with sync_playwright() as playwright:
     expect(device.locator("#notice")).to_contain_text("Enter your name")
     as_person(device, "operator", "Operator C")
     device.get_by_role("button", name="Create session").click()
-    expect(device.get_by_role("button", name="Use sample manifest")).to_have_count(0)
+    expect(device.get_by_role("button", name="Use CSV *")).to_have_count(0)
     as_person(device, "admin", "Lead A")
-    device.get_by_role("button", name="Use sample manifest").click()
+    device.get_by_role("button", name="Use CSV *").click()
     device.get_by_role("button", name="Save manifest").click()
     as_person(device, "supervisor", "Verifier B")
     device.get_by_label("Contents and label assignment verified").check()
@@ -98,11 +98,11 @@ with sync_playwright() as playwright:
     expect(device.get_by_role("heading", name="Scan cartons")).to_be_visible()
     expect(device.get_by_text("Pallet verified by UHF EPC.")).to_be_visible()
     expect(device.get_by_label("Rescan reason")).to_have_count(0)
-    expect(device.get_by_label("Demo reads")).to_have_value("Clean match")
+    expect(device.get_by_label("Reads *")).to_have_value("Clean match")
     expect(device.get_by_role("dialog")).to_have_count(0)
     proceed = device.get_by_role("button", name="Continue", exact=True)
 
-    device.get_by_label("Demo reads").select_option("Missing one")
+    device.get_by_label("Reads *").select_option("Missing one")
     hold(device)
     expect(proceed).to_be_disabled()
     expect(device.locator("#scan-results")).to_contain_text("Incomplete")
@@ -122,11 +122,11 @@ with sync_playwright() as playwright:
     # Manifest revision after a scan: needs a reason, then verification and pallet identification again.
     as_person(device, "admin", "Lead A")
     device.locator("summary", has_text="Expected cartons").click()
-    device.get_by_role("button", name="Use sample manifest").click()
+    device.get_by_role("button", name="Use CSV *").click()
     device.get_by_label("Revision reason").fill("Wrong carton list exported")
     device.get_by_role("button", name="Save manifest").click()
-    expect(device.locator(".next").get_by_text("KP-DEMO-01 / 4 cartons / Revision 2")).to_be_visible()
     as_person(device, "supervisor", "Verifier B")
+    expect(device.locator(".next").get_by_text("KP-DEMO-01 / 4 cartons / Revision 2")).to_be_visible()
     device.get_by_label("Contents and label assignment verified").check()
     device.get_by_role("button", name="Record verification").click()
     as_person(device, "operator", "Operator C")
@@ -134,7 +134,7 @@ with sync_playwright() as playwright:
     hold(device)
     expect(device.get_by_role("heading", name="Scan cartons")).to_be_visible()
 
-    device.get_by_label("Demo reads").select_option("Unexpected extra")
+    device.get_by_label("Reads *").select_option("Unexpected extra")
     expect(device.get_by_label("Rescan reason")).to_have_count(0)
     expect(device.locator("#scan-results")).to_contain_text("Ready to scan")
     hold(device)
@@ -149,8 +149,8 @@ with sync_playwright() as playwright:
     device.get_by_role("button", name="Open carton scanner").click()
     expect(proceed).to_be_disabled()
 
-    device.get_by_label("Demo reads").select_option("Clean match")
-    trigger = device.get_by_role("button", name="Hold demo trigger")
+    device.get_by_label("Reads *").select_option("Clean match")
+    trigger = device.get_by_role("button", name="Hold trigger *")
     trigger.scroll_into_view_if_needed()
     box = trigger.bounding_box()
     x = box["x"] + box["width"] / 2
@@ -310,7 +310,7 @@ with sync_playwright() as playwright:
     c72.get_by_role("button", name="New test session").click()
     c72.get_by_label("Reader source").select_option("C72 hardware")
     c72.get_by_role("button", name="Create session").click()
-    c72.get_by_role("button", name="Use live sample").click()
+    c72.get_by_role("button", name="Use RFID CSV *").click()
     c72.get_by_role("button", name="Save manifest").click()
     as_person(c72, "supervisor", "Verifier B")
     c72.get_by_label("Contents and label assignment verified").check()
@@ -360,12 +360,13 @@ with sync_playwright() as playwright:
     dashboard.route("https://dashboard.test/records", records)
     dashboard.goto("https://dashboard.test/dashboard.html")
     assert dashboard.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth > 339")
-    assert dashboard.locator(".dashboard-brand").evaluate("(logo) => getComputedStyle(logo).backgroundColor === 'rgb(8, 9, 10)'")
+    assert dashboard.locator(".dashboard-brand").evaluate("(logo) => getComputedStyle(logo).backgroundColor === 'rgba(0, 0, 0, 0)'")
     assert dashboard.evaluate("getComputedStyle(document.documentElement).colorScheme") == "dark"
     dashboard.get_by_role("button", name="Light mode", exact=True).click()
     assert dashboard.evaluate("getComputedStyle(document.documentElement).colorScheme") == "light"
     assert dashboard.get_by_role("img", name="KeyPharm Laboratories").evaluate(
         "(logo) => logo.naturalWidth > 339 && getComputedStyle(logo).filter === 'none'")
+    assert dashboard.locator(".dashboard-brand").evaluate("(logo) => getComputedStyle(logo).backgroundColor === 'rgba(0, 0, 0, 0)'")
     dashboard.reload()
     expect(dashboard.get_by_role("button", name="Dark mode", exact=True)).to_be_visible()
     assert dashboard.evaluate("getComputedStyle(document.documentElement).colorScheme") == "light"
@@ -375,13 +376,21 @@ with sync_playwright() as playwright:
     expect(dashboard.get_by_role("heading", name="Overview")).to_be_visible(timeout=3000)
     expect(dashboard.locator("[data-total=sessions]")).to_have_text("1")
     expect(dashboard.locator("[data-total=scans]")).to_have_text("3")
+    expect(dashboard.locator(".outcome-chart strong")).to_have_text("3")
+    outcome_counts = dashboard.locator(".outcome-counts dd").all_text_contents()
+    assert len(outcome_counts) == 4 and sum(map(int,outcome_counts)) == 3
+    assert dashboard.locator(".outcome-chart").evaluate("(chart) => getComputedStyle(chart).backgroundImage.startsWith('conic-gradient')")
     expect(dashboard.locator("[data-total=exceptions]")).to_have_text("2")
     expect(dashboard.locator("[data-total=activity]")).to_be_visible()
     expect(dashboard.locator("#recent-sessions-count")).to_have_text("1")
     expect(dashboard.get_by_role("heading", name="Recent sessions")).to_be_visible()
     expect(dashboard.get_by_role("heading", name="Recent activity")).to_have_count(0)
-    assert dashboard.locator(".dashboard-rail").bounding_box()["x"] < dashboard.locator(".dashboard-heading").bounding_box()["x"]
-    assert dashboard.locator(".dashboard-outcomes").bounding_box()["x"] > dashboard.locator(".dashboard-heading").bounding_box()["x"]
+    rail_box = dashboard.locator(".dashboard-rail").bounding_box()
+    heading_box = dashboard.locator(".dashboard-heading").bounding_box()
+    nav_box = dashboard.locator("#dashboard-nav").bounding_box()
+    assert rail_box["y"] < heading_box["y"]
+    assert abs((nav_box["x"] + nav_box["width"] / 2) - 640) < 120
+    assert dashboard.locator(".dashboard-outcomes").bounding_box()["x"] > heading_box["x"]
     expect(dashboard.locator(".dashboard-rail nav a")).to_have_count(3)
     expect(dashboard.locator(".dashboard-rail nav a").last).to_have_text("Activity")
     assert "C72" not in dashboard.locator("#content").inner_text()
@@ -417,10 +426,22 @@ with sync_playwright() as playwright:
     expect(dashboard.get_by_text("Showing 50 of 56 records.")).to_be_visible()
     expect(dashboard.locator("#records button[data-id]")).to_have_count(50)
     expect(dashboard.get_by_role("button", name="Earlier session 00",exact=False)).to_have_count(0)
+    global_search = dashboard.get_by_role("searchbox", name="Search sessions, pallets or EPCs")
+    global_search.fill("Earlier session 00")
+    expect(dashboard.locator("#dashboard-find-results").get_by_role("link",name="Earlier session 00",exact=False)).to_be_visible()
+    global_search.press("Escape")
+    expect(dashboard.locator("#dashboard-find-results")).to_be_hidden()
+    global_search.press("Tab")
+    global_search.focus()
+    global_search.press("Enter")
+    expect(dashboard.locator("#detail").get_by_role("heading",name="Earlier session 00")).to_be_visible()
+    global_search.fill("does not exist")
+    expect(dashboard.locator("#dashboard-find-status")).to_have_text("No matching sessions.")
+    global_search.press("Escape")
     rail = dashboard.locator(".dashboard-rail")
     pane = dashboard.locator("#content")
     bounds = rail.bounding_box()
-    assert bounds["height"] == 800
+    assert bounds["width"] == 1280 and bounds["height"] < 140
     pane.evaluate("(pane) => pane.scrollTop = 650")
     assert pane.evaluate("(pane) => pane.scrollTop") > 0
     assert rail.bounding_box() == bounds
@@ -521,9 +542,8 @@ with sync_playwright() as playwright:
     hardware.get_by_role("button", name="Create session").click()
     expect(hardware.get_by_role("button", name="Set power")).to_have_count(0)
     pick_role(hardware, "admin")
-    hardware.get_by_role("button", name="Use live sample").click(timeout=3000)
+    hardware.get_by_role("button", name="Use RFID CSV *").click(timeout=3000)
     hardware.get_by_role("button", name="Save manifest").click()
-    expect(hardware.locator(".next").get_by_text("KP-LIVE-SORTED-01 / 1 cartons", exact=False)).to_be_visible()
     assert hardware.evaluate("JSON.parse(localStorage.getItem('keypharm-poc-v1')).sessions[0].manifest.demo") is False
     hardware.locator("summary", has_text="Reader settings: ETSI / 25 dBm").click(timeout=3000)
     hardware.get_by_label("Output power (dBm)").fill("18")
@@ -536,6 +556,7 @@ with sync_playwright() as playwright:
     expect(hardware.get_by_role("button", name="Set power")).to_have_count(0)
     expect(hardware.get_by_text("ETSI / 18 dBm")).to_be_visible()
     pick_role(hardware, "supervisor")
+    expect(hardware.locator(".next").get_by_text("KP-LIVE-SORTED-01 / 1 cartons", exact=False)).to_be_visible()
     hardware.get_by_label("Contents and label assignment verified").check()
     hardware.get_by_role("button", name="Record verification").click()
     pick_role(hardware, "operator")
@@ -575,11 +596,11 @@ with sync_playwright() as playwright:
     as_person(multi, "admin", "Lead A")
     multi.get_by_role("button", name="New test session").click()
     multi.get_by_role("button", name="Create session").click()
-    multi.get_by_role("button", name="Use live sample").click()
+    multi.get_by_role("button", name="Use RFID CSV *").click()
     expect(multi.get_by_text("2 pallet(s) / 4 cartons", exact=False)).to_be_visible()
     multi.get_by_role("button", name="Save manifest").click()
-    expect(multi.locator(".next").get_by_text("2 pallets / 4 cartons", exact=False)).to_be_visible()
     as_person(multi, "supervisor", "Verifier B")
+    expect(multi.locator(".next").get_by_text("2 pallets / 4 cartons", exact=False)).to_be_visible()
     multi.get_by_label("Contents and label assignment verified").check()
     multi.get_by_role("button", name="Record verification").click()
     as_person(multi, "operator", "Operator C")
@@ -674,7 +695,7 @@ with sync_playwright() as playwright:
     search.fill("level 2")
     expect(records.filter(visible=True)).to_have_count(1)
     expect(records.filter(visible=True)).to_contain_text("KP-PHYSALIS")
-    search.fill("2026-11-24 load cartons")
+    search.fill("2026-11-24 waiting for setup")
     expect(records.filter(visible=True)).to_contain_text("KP-GINGER")
     search.fill("nothing like this")
     expect(records.filter(visible=True)).to_have_count(0)

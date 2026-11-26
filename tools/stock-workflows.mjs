@@ -1,7 +1,7 @@
 import {randomInt,randomUUID} from 'node:crypto';
 import {compare,normalizeEpc,parseCsvRows,validEpc,productSku,receiptProducts,csvCell} from '../app/src/main/assets/model.mjs';
 
-export const locations = ['Receiving','Storage','Staging','Hold'];
+const defaultLocations = ['Receiving','Storage','Staging','Hold'];
 const receiptId = 'KP-IN-40';
 const outboundRef = 'KP-RECEIVED-40';
 const demoPallet = 'D60000000000000000000001';
@@ -35,6 +35,9 @@ export function stockWorkflows(db, products, onAudit = () => {}) {
   if (!cartonColumns.has('batch_lot')) db.exec('ALTER TABLE cartons ADD COLUMN batch_lot TEXT');
   if (!cartonColumns.has('units_per_carton')) db.exec('ALTER TABLE cartons ADD COLUMN units_per_carton INTEGER');
   db.exec(`
+    CREATE TABLE IF NOT EXISTS workspace_locations (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, archived INTEGER NOT NULL DEFAULT 0
+    );
     CREATE TABLE IF NOT EXISTS stock_tasks (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, body TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS stock_commands (id TEXT PRIMARY KEY, actor TEXT NOT NULL, body TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS stock_mappings (epc TEXT PRIMARY KEY);
@@ -58,6 +61,17 @@ export function stockWorkflows(db, products, onAudit = () => {}) {
       batch_lot TEXT, units_per_carton INTEGER
     );
   `);
+  const insertLocation = db.prepare('INSERT OR IGNORE INTO workspace_locations(id,name) VALUES (?,?)');
+  for (const name of defaultLocations) insertLocation.run(name,name);
+  const locationRecords = () => db.prepare(`SELECT id,name,archived FROM workspace_locations ORDER BY archived,
+    CASE id WHEN 'Receiving' THEN 0 WHEN 'Storage' THEN 1 WHEN 'Staging' THEN 2 WHEN 'Hold' THEN 4 ELSE 3 END,name`).all();
+  const locations = () => locationRecords().filter(row => !row.archived).map(row => row.name);
+  const warehouseLocations = () => locationRecords().filter(row => !row.archived && !['Receiving','Hold'].includes(row.id))
+    .map(row => row.name);
+  function preferredLocation(id) {
+    const saved = db.prepare('SELECT name FROM workspace_locations WHERE id=? AND archived=0').get(id);
+    return saved?.name ?? locations().find(name => name !== 'Hold');
+  }
   const carton = epc => db.prepare('SELECT * FROM cartons WHERE epc=?').get(epc);
   const read = row => ({...JSON.parse(row.body),revision:row.revision});
   const get = id => {
@@ -105,27 +119,27 @@ export function stockWorkflows(db, products, onAudit = () => {}) {
   }
   function seed() {
     if (get(receiptId)) return;
-    const insertCarton = db.prepare("INSERT INTO cartons(epc,carton,sku,physical,state,location) VALUES (?,?,?,0,'expected','Receiving')");
+    const insertCarton = db.prepare("INSERT INTO cartons(epc,carton,sku,physical,state,location) VALUES (?,?,?,0,'expected',?)");
     const expected = Array.from({length:40},(_,i) => {
       const epc = inboundEpc(i + 1);
       const sku = products[i % products.length].sku;
       const item = {epc,carton:nextCartonLabel(db,sku),sku};
-      insertCarton.run(item.epc,item.carton,item.sku);
+      insertCarton.run(item.epc,item.carton,item.sku,preferredLocation('Receiving'));
       return item;
     });
-    save({id:receiptId,type:'receipt',revision:0,location:'Storage',sourceRef:'Demo delivery',status:'Ready',
+    save({id:receiptId,type:'receipt',revision:0,location:preferredLocation('Storage'),sourceRef:'Demo delivery',status:'Ready',
       createdAt:now(),expected,received:[],runs:[]});
   }
   function reset() {
     db.exec(`DELETE FROM stock_events; DELETE FROM stock_commands; DELETE FROM stock_task_runs; DELETE FROM stock_tasks;
-      DELETE FROM carton_archive; DELETE FROM cartons WHERE epc IN (SELECT epc FROM stock_mappings); DELETE FROM stock_mappings;
-      UPDATE cartons SET location='Staging';`);
+      DELETE FROM carton_archive; DELETE FROM cartons WHERE epc IN (SELECT epc FROM stock_mappings); DELETE FROM stock_mappings;`);
+    db.prepare('UPDATE cartons SET location=?').run(preferredLocation('Staging'));
     const deleteCarton = db.prepare('DELETE FROM cartons WHERE epc=?');
     for (let number = 1; number <= 40; number++) deleteCarton.run(inboundEpc(number));
     seed();
   }
   function chooseLocation(input, allowHold = false) {
-    if (!locations.includes(input.location) || (!allowHold && input.location === 'Hold')) fail('Choose a working location.',400);
+    if (!locations().includes(input.location) || (!allowHold && input.location === 'Hold')) fail('Choose a working location.',400);
     return input.location;
   }
   function openCount(user,input) {
@@ -155,7 +169,7 @@ export function stockWorkflows(db, products, onAudit = () => {}) {
       const {product_identifier,batch_lot,units_per_carton} = Object.fromEntries(optional.map((name,i) => [name,values[i]]));
       const identifier = product_identifier || sku;
       if (!id || !sourceRef || id.length > 80 || sourceRef.length > 100 || ref !== id || source !== sourceRef || destination !== location ||
-          !locations.includes(location) || location === 'Hold') fail(row + 'use one receipt reference, source and destination.',400);
+          !locations().includes(location) || location === 'Hold') fail(row + 'use one receipt reference, source and destination.',400);
       const quantity = Number(count);
       if (!products.some(product => product.sku === sku) || !Number.isInteger(quantity) || quantity < 1 || quantity > 500) {
         fail(row + 'use a known SKU and a quantity from 1 to 500.',400);
@@ -200,8 +214,8 @@ export function stockWorkflows(db, products, onAudit = () => {}) {
       return known;
     }
     if (db.prepare('SELECT 1 FROM cartons WHERE lower(carton)=lower(?)').get(name)) fail('This carton reference already has an EPC.');
-    db.prepare("INSERT INTO cartons(epc,carton,sku,physical,state,location) VALUES (?,?,?,?,'expected','Receiving')")
-      .run(epc,name,input.sku,source === 'C72 hardware' ? 1 : 0);
+    db.prepare("INSERT INTO cartons(epc,carton,sku,physical,state,location) VALUES (?,?,?,?,'expected',?)")
+      .run(epc,name,input.sku,source === 'C72 hardware' ? 1 : 0,preferredLocation('Receiving'));
     db.prepare('INSERT INTO stock_mappings VALUES (?)').run(epc);
     const mapped = carton(epc);
     record(user,'Carton mapping',{},mapped,'EPC registered','',source);
@@ -323,7 +337,7 @@ export function stockWorkflows(db, products, onAudit = () => {}) {
     }
     const reason = field(input.reason,'an untag reason');
     const planned = task.expected.some(item => item.epc === epc);
-    if (planned) db.prepare("UPDATE cartons SET state='expected',location='Receiving' WHERE epc=?").run(epc);
+    if (planned) db.prepare("UPDATE cartons SET state='expected',location=? WHERE epc=?").run(preferredLocation('Receiving'),epc);
     else {
       db.prepare(`INSERT INTO carton_archive
         (archived_at,archived_by,task_id,reason,epc,carton,sku,physical,prior_state,prior_location,batch_lot,units_per_carton)
@@ -332,7 +346,7 @@ export function stockWorkflows(db, products, onAudit = () => {}) {
       db.prepare('DELETE FROM stock_mappings WHERE epc=?').run(epc);
       db.prepare('DELETE FROM cartons WHERE epc=?').run(epc);
     }
-    record(user,task.id,before,{epc,state:planned ? 'expected' : 'untagged',location:'Receiving'},'Carton untagged',reason,'Manual confirmation');
+    record(user,task.id,before,{epc,state:planned ? 'expected' : 'untagged',location:preferredLocation('Receiving')},'Carton untagged',reason,'Manual confirmation');
     const counted = task.receivedBySku?.[before.sku] ??
       task.expected.filter(item => item.sku === before.sku && task.received.includes(item.epc)).length;
     task.receivedBySku = {...task.receivedBySku,[before.sku]:Math.max(0,counted - 1)};
@@ -349,6 +363,7 @@ export function stockWorkflows(db, products, onAudit = () => {}) {
     }
     const hold = input.action === 'hold';
     const destination = hold ? 'Hold' : chooseLocation(input);
+    if (!hold && !warehouseLocations().includes(destination)) fail('Choose a warehouse destination.',400);
     const state = hold ? 'held' : 'available';
     if (hold ? before.state !== 'available' : (input.action === 'release' ? before.state !== 'held' : before.state !== 'available')) {
       fail('This movement is unavailable for the carton.');
@@ -392,9 +407,43 @@ export function stockWorkflows(db, products, onAudit = () => {}) {
     task.outbound = session.id;
     return save(task);
   }
-  const roles = {count:'operator',scan:'operator',receive:'operator','receive-carton':'operator',transfer:'operator',review:'supervisor','cancel-count':'supervisor',hold:'supervisor',
+  function manageLocation(input) {
+    const {action} = input;
+    const location = db.prepare('SELECT * FROM workspace_locations WHERE id=? AND archived=0').get(input.locationId ?? '');
+    if (action !== 'add-location' && (!location || location.id === 'Hold')) fail('This location cannot be changed.');
+    const name = action === 'archive-location' ? location.name : field(input.name,'a location name');
+    if (name.length > 100 || /^[=+@-]/.test(name) || /[\r\n]/.test(name)) fail('Enter a valid location name.',400);
+    const openTasks = location ? tasks().filter(task => task.location === location.name &&
+      !['Completed','Reviewed','Cancelled'].includes(task.status)) : [];
+    if (action === 'archive-location') {
+      if (locations().length <= 2) fail('Keep at least one working location.');
+      if (warehouseLocations().length === 1 && warehouseLocations().includes(name)) fail('Keep at least one warehouse destination.');
+      if (openTasks.length || db.prepare("SELECT 1 FROM cartons WHERE location=? AND state<>'dispatched'").get(name)) {
+        fail('Move stock out of this location and complete its open tasks before archiving.');
+      }
+      db.prepare('UPDATE workspace_locations SET archived=1 WHERE id=?').run(location.id);
+    } else {
+      const duplicate = db.prepare('SELECT id FROM workspace_locations WHERE name=?').get(name);
+      if (duplicate && duplicate.id !== location?.id) fail('A location with that name already exists.');
+      if (action === 'add-location') insertLocation.run(randomUUID(),name);
+      else if (name !== location.name) {
+        db.prepare('UPDATE workspace_locations SET name=? WHERE id=?').run(name,location.id);
+        db.prepare("UPDATE cartons SET location=? WHERE location=? AND state<>'dispatched'").run(name,location.name);
+        for (const task of openTasks) {
+          task.location = name;
+          if (task.type === 'count') task.reference = 'Count ' + name;
+          for (const item of task.expected ?? []) if (item.location === location.name) item.location = name;
+          save(task);
+        }
+      }
+    }
+    return {reference:name};
+  }
+  const locationActions = ['add-location','rename-location','archive-location'];
+  const roles = {'add-location':'admin','rename-location':'admin','archive-location':'admin',count:'operator',scan:'operator',receive:'operator','receive-carton':'operator',transfer:'operator',review:'supervisor','cancel-count':'supervisor',hold:'supervisor',
     release:'supervisor',outbound:'admin',register:'admin',receipt:'admin',preview:'admin',untag:'admin'};
   function command(user,input,create,dashboard,usedInOutbound) {
+    if (locationActions.includes(input.action) && !dashboard) fail('Configure locations on the dashboard.',403);
     const operatorCancel = input.action === 'cancel-count' && user.role === 'operator';
     if (!Object.hasOwn(roles,input.action) || (user.role !== roles[input.action] && !operatorCancel && !(dashboard && user.role === 'admin'))) {
       fail('This role cannot perform that action.',403);
@@ -408,7 +457,8 @@ export function stockWorkflows(db, products, onAudit = () => {}) {
       return ['receive-carton','untag'].includes(input.action) ? tagged(get(input.id)) : {saved:true};
     }
     let result;
-    if (input.action === 'receipt') {
+    if (locationActions.includes(input.action)) result = manageLocation(input);
+    else if (input.action === 'receipt') {
       const task = prepareReceipt(input.csv);
       if (get(task.id)) fail('This receipt reference already exists.');
       for (const item of task.expected) register(user,item);
@@ -439,7 +489,7 @@ export function stockWorkflows(db, products, onAudit = () => {}) {
     db.prepare('SELECT * FROM stock_events ORDER BY id DESC LIMIT 50').all();
   function report(type) {
     if (type === 'receipt-template') return csv([...receiptHeaders,...receiptOptionalHeaders],
-      [['KP-IN-CSV','Demo delivery','Storage',products[0].sku,2,'','',products[0].sku,'LOT-DEMO-01',10]]);
+      [['KP-IN-CSV','Demo delivery',preferredLocation('Storage'),products[0].sku,2,'','',products[0].sku,'LOT-DEMO-01',10]]);
     if (type === 'stock') return csv(['carton','epc','sku','location','stock_state','batch_lot','units_per_carton'],
       inventory().map(c => [c.carton,c.epc,c.sku,c.location,c.state,c.batch_lot,c.units_per_carton]));
     if (type === 'movements') return csv(['reference','epc','action','actor','time_utc','before','after','reason','input_source'],
@@ -450,6 +500,6 @@ export function stockWorkflows(db, products, onAudit = () => {}) {
         ['found','missing','unexpected','unknown'].flatMap(status => run[status].map(epc =>
           [t.type === 'count' ? t.reference : t.id,t.location,run.id,run.at,run.actor,run.source,epc,status,run.observations[epc] ?? 0])))));
   }
-  return {seed,reset,inventory,tasks,tagged,events,command,report,locations,
+  return {seed,reset,inventory,tasks,tagged,events,command,report,locations,locationRecords,warehouseLocations,preferredLocation,chooseLocation,
     dispatch:(user,session,before,after) => record(user,session.testId,before,after,'Dispatched','',session.source)};
 }

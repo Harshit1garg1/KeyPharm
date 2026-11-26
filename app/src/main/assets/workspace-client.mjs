@@ -15,13 +15,13 @@ export function workspaceClient(bridge) {
   const pending = new Map();
   const client = {auth:read('-auth',null), samples:read('-samples',{}), stock:read('-stock',[]), state:'Unsynced'};
   client.stockTasks = [];
+  client.verificationClaims = read('-verification-claims',{});
   client.palletTasks = [];
   client.removedSessions = new Set(read('-removed-sessions',[]));
-  const demoRoles = {admin:'Administrator',operator:'Operator',supervisor:'Supervisor',reviewer:'Reviewer'};
-  if (client.auth?.user.canSwitch && Object.hasOwn(demoRoles,client.auth.user.role)) {
-    client.auth.user.name = demoRoles[client.auth.user.role];
-  }
-  let selectedRole = client.auth?.user.role ?? read('-role','operator');
+  const demoRoles = {admin:'Administrator',operator:'Operator',supervisor:'Supervisor'};
+  const storedRole = client.auth?.user.role ?? read('-role','operator');
+  let selectedRole = Object.hasOwn(demoRoles,storedRole) ? storedRole : 'operator';
+  if (client.auth) client.auth.user = {...client.auth.user,role:selectedRole,name:demoRoles[selectedRole],canSwitch:true};
   client.controls = read('-controls',{revision:0,plan:[],power:null});
   let base = read('-base',{});
   let queue = read('-queue',{});
@@ -35,6 +35,8 @@ export function workspaceClient(bridge) {
     queue = {};
     controlsChange = null;
     client.stock = [];
+    client.verificationClaims = {};
+    write('-verification-claims',{});
     client.stockTasks = [];
     client.removedSessions.clear();
     write('-removed-sessions',[]);
@@ -214,6 +216,8 @@ export function workspaceClient(bridge) {
       client.controls = workspace.controls;
       write('-controls',client.controls);
       client.stock = workspace.inventory;
+      client.verificationClaims = workspace.verificationClaims ?? {};
+      write('-verification-claims',client.verificationClaims);
       write('-stock',client.stock);
       client.stockTasks = workspace.stockTasks ?? [];
       client.palletTasks = workspace.palletManifests ?? [];

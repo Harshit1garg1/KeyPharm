@@ -30,6 +30,7 @@ theme.addEventListener('click',() => {
 let data = indexRecords([]);
 let section = 'overview';
 let selected;
+let linkedSession;
 let previousBody;
 let inFlight = false;
 let stockOverview;
@@ -69,11 +70,22 @@ function updateOverview() {
     sessionsCount.hidden = previousBody === undefined;
     sessionsCount.textContent = count.format(data.rows.sessions.length);
   }
-  const scans = data.rows.scans.length;
-  find('#outcomes').innerHTML = Object.entries(data.results).map(([state,total]) =>
-    '<div class="outcome-row" data-state="' + state.toLowerCase() + '"><div class="row spread"><strong>' + state +
-    '</strong><span>' + displayCount(total) + '</span></div>' +
-    '<progress aria-label="' + state + ' scans" value="' + total + '" max="' + (scans || 1) + '"></progress></div>').join('');
+  const outcomes = Object.entries(data.results);
+  const scans = outcomes.reduce((sum,[,total]) => sum + total,0);
+  let start = 0;
+  const slices = outcomes.flatMap(([state,total]) => {
+    if (!total) return [];
+    const end = start + total;
+    const slice = 'var(--outcome-' + state.toLowerCase() + ') ' + (start / scans * 100) + '% ' + (end / scans * 100) + '%';
+    start = end;
+    return [slice];
+  });
+  const chart = slices.length ? 'conic-gradient(' + slices.join(',') + ')' : 'var(--raised)';
+  find('#outcomes').innerHTML = '<div class="outcome-chart" style="--outcome-chart:' + chart +
+    '"><span><strong>' + displayCount(scans) + '</strong><small>Total scans</small></span></div>' +
+    '<dl class="outcome-counts" aria-label="Scan counts by outcome">' + outcomes.map(([state,total]) =>
+      '<div class="outcome-row" data-state="' + state.toLowerCase() + '"><dt>' + state +
+      '</dt><dd>' + displayCount(total) + '</dd></div>').join('') + '</dl>';
   const sessions = data.rows.sessions.slice(0,6);
   find('#recent-sessions').innerHTML = sessions.map(row =>
     '<tr><th scope="row"><a href="#sessions/' + escape(encodeURIComponent(row.id)) + '">' + escape(row.title) +
@@ -97,7 +109,7 @@ function runEvidence(run) {
     ['Expected',r?.expected],['Matched',r?.matched?.length],['Completeness',r?.percent == null ? null : r.percent + '%'],
     ['Reader profile',displaySource(run.profile?.name)],['Profile version',displaySource(run.profile?.version)],['Region / power',readerPower(run.profile)],['Reader build',run.profile?.build],
     ['Rescan reason',run.reason],['Notes',run.note ?? run.notes],['Error',run.error]) +
-    fold('Missing EPCs (' + (r?.missing?.length ?? 0) + ')',list(r?.missing,code)) +
+    fold((r?.matchedCartons ? 'Missing cartons by SKU (' : 'Missing EPCs (') + (r?.missing?.length ?? 0) + ')',list(r?.missing,code)) +
     fold('Unexpected EPCs (' + (r?.extra?.length ?? 0) + ')',list(r?.extra,code)) +
     observationDetails(run.observations);
 }
@@ -112,6 +124,8 @@ function sessionEvidence(s) {
     ['Scan method',s.method],['Created',time(s.createdAt)],['Created by',s.creator],['Verified by',s.verifiedBy],
     ['Sign-off',s.closure?.actor],['Coverage',s.closure?.coverage],['Setup notes',s.notes]) +
     fold('Manifest and planned evidence',facts(['Source',displaySource(m?.source)],['Revision',m?.revision],['Planned test',s.planned]) +
+      (m?.matchBy === 'sku' ? list(pallets.flatMap(pallet => pallet.requirements.map(requirement => ({...requirement,pallet:pallet.pallet}))),
+        row => escape(row.pallet + ' / ' + row.sku + ' / ' + row.quantity + ' cartons')) : '') +
       pallets.map(p => '<h3>' + escape(p.pallet) + '</h3>' +
         list(p.cartons,c => escape(joined(c.carton,c.sku)) + '<br>' + code(c.epc))).join('')) +
     '<h3 class="line">Recent carton scans</h3>' + (scans.map(row =>
@@ -177,10 +191,60 @@ function matches(row, query) {
   return [row.title,row.description,row.status,row.epc,row.log?.detail,row.session.product,manifest?.palletEpc,...sku]
     .some(value => String(value ?? '').toLowerCase().includes(query));
 }
+const dashboardFind = find('.dashboard-find');
+const dashboardQuery = find('#dashboard-query');
+const dashboardResults = find('#dashboard-find-results');
+const dashboardFindLinks = find('#dashboard-find-links');
+function renderDashboardSearch() {
+  const terms = dashboardQuery.value.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  dashboardResults.hidden = !terms.length;
+  if (!terms.length) return;
+  const results = data.rows.sessions.filter(row => {
+    const {manifest,location} = row.session;
+    const pallets = manifest?.pallets?.length ? manifest.pallets : manifest ? [manifest] : [];
+    const fields = [row.title,location,row.status,...pallets.flatMap(pallet =>
+      [pallet.pallet,pallet.palletEpc,...(pallet.requirements ?? []).map(row => row.sku),...(pallet.cartons ?? []).flatMap(carton => [carton.carton,carton.epc,carton.sku])])];
+    const searchable = fields.join(' ').toLowerCase();
+    return terms.every(term => searchable.includes(term));
+  });
+  find('#dashboard-find-status').textContent = previousBody === undefined ? 'Waiting for records…' :
+    results.length ? 'Showing ' + Math.min(results.length,8) + ' of ' + results.length + ' sessions' : 'No matching sessions.';
+  dashboardFindLinks.innerHTML = results.slice(0,8).map(row => '<li><a href="#sessions/' +
+    encodeURIComponent(row.id) + '"><strong>' + escape(row.title) + '</strong><small>' +
+    escape(joined(row.session.location,row.status)) + '</small></a></li>').join('');
+}
+dashboardFind.hidden = false;
+dashboardQuery.addEventListener('input',renderDashboardSearch);
+dashboardQuery.addEventListener('focus',renderDashboardSearch);
+dashboardFind.addEventListener('submit',event => {
+  event.preventDefault();
+  dashboardFindLinks.querySelector('a')?.click();
+});
+dashboardFind.addEventListener('keydown',event => {
+  if (event.key !== 'Escape' || dashboardResults.hidden) return;
+  event.preventDefault();
+  dashboardQuery.focus();
+  dashboardResults.hidden = true;
+});
+dashboardFind.addEventListener('focusout',event => {
+  if (!dashboardFind.contains(event.relatedTarget)) dashboardResults.hidden = true;
+});
+dashboardFindLinks.addEventListener('click',event => {
+  const link = event.target.closest('a');
+  if (!link) return;
+  dashboardQuery.value = '';
+  dashboardResults.hidden = true;
+  if (window.location.hash === link.hash) navigate(true);
+});
+
 function renderRecords() {
   const grouped = section === 'exceptions';
   const all = grouped ? data.exceptionSessions : data.rows[section];
   const recent = all.slice(0,RECENT_LIMIT);
+  if (section === 'sessions' && linkedSession && !recent.some(row => row.id === linkedSession)) {
+    const linked = all.find(row => row.id === linkedSession);
+    if (linked) recent.splice(RECENT_LIMIT - 1,1,linked);
+  }
   const query = search.value.trim().toLowerCase();
   const found = query ? recent.filter(row => matches(row,query) ||
     row.exceptions?.slice(0,RECENT_LIMIT).some(item => matches(item,query))) : recent;
@@ -208,8 +272,10 @@ function navigate(focusTitle = false) {
   const next = workspaceSection || Object.hasOwn(sections,requested) ? requested : 'overview';
   if (section !== next) { selected = undefined; search.value = ''; }
   section = next;
+  linkedSession = section === 'sessions' && sessionId ?
+    data.rows.sessions.find(row => encodeURIComponent(row.id) === sessionId)?.id : undefined;
   if (section === 'sessions' && sessionId) {
-    selected = data.rows.sessions.find(row => encodeURIComponent(row.id) === sessionId)?.id;
+    selected = linkedSession;
     search.value = '';
   }
   for (const link of nav.querySelectorAll('a')) {
@@ -230,7 +296,8 @@ function navigate(focusTitle = false) {
   find('#page-title').textContent = workspaceSection ? workspaceSection.dataset.workspaceTitle :
     sections[section]?.title ?? 'Overview';
   find('#page-heading').dataset.overview = String(section === 'overview');
-  find('#section-description').textContent = workspaceSection ? '' : (sections[section]?.description ?? '');
+  find('#section-description').textContent = workspaceSection ? '' :
+    (sections[section]?.description ?? (section === 'overview' ? 'Session verification, stock movement, and handheld sync.' : ''));
   find('#overview').hidden = section !== 'overview';
   catalog.hidden = section === 'overview' || Boolean(workspaceSection);
   if (workspace) workspace.hidden = !workspaceSection;
@@ -257,6 +324,7 @@ async function fetchRecords() {
       data = indexRecords(store.sessions);
       previousBody = body;
       updateOverview();
+      if (!dashboardResults.hidden) renderDashboardSearch();
       if (!catalog.hidden) {
         if (section === 'sessions' && !selected && window.location.hash.startsWith('#sessions/')) navigate();
         else renderRecords();
@@ -274,7 +342,7 @@ async function fetchRecords() {
   }
 }
 
-search.addEventListener('input',renderRecords);
+search.addEventListener('input',() => { linkedSession = undefined; renderRecords(); });
 records.addEventListener('click',event => {
   const button = event.target.closest('button[data-id]');
   if (!button) return;
