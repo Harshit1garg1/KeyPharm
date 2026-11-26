@@ -1,7 +1,7 @@
 import {SAMPLE, EXTRA_EPC, normalizeEpc, validEpc, parseManifest, compare, scanDelta, canContinue, canClose, isCurrentManifestRun,
   roles, permits, allocationTotal, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary,
   parsePlan, planCoverage, closePlanErrors, lockPallet, lockTo, pendingPallet, otherPallet, inManifest, manifestCsv, missingSku, unexported,
-  displaySource, matchesQuery, skuBreakdown, statusLabel, manifestFor, outboundManifestConflict, receiptProducts, demoSku, palletCartonCount} from './model.mjs';
+  displaySource, matchesQuery, skuBreakdown, statusLabel, manifestFor, outboundManifestConflict, receiptProducts, demoSku, palletCartonCount, describeTag, actionLabel} from './model.mjs';
 import qrcode from './qrcode-generator.mjs';
 import {workspaceClient} from './workspace-client.mjs';
 
@@ -100,7 +100,9 @@ let view = 'sessions';
 let stockTaskId = '', stockScenario = 'match', stockScanBusy = false, countUpload;
 let receiptProduct = '', receiptCapture, receiptRead, receiptUpload;
 let demoBarcode = true, pendingBarcode;
-let palletTask, palletRead, utilityScan, lookupSessionId, lookupTarget, lookupRead, lookupTimer;
+// The Search tab keeps the internal name 'lookup'; the Lookup tab is 'identify'.
+let palletTask, palletRead, utilityScan, lookupSessionId, lookupTarget, lookupRead, lookupTimer, identifyRead;
+const identifyPower = 10; // dBm: low, so the tag held close wins. ponytail: fixed, add an admin setting if a site needs another.
 let pendingImport;
 let rescanReason = '';
 const defaultScenario = 'Clean match';
@@ -220,14 +222,14 @@ function subbar() {
     'class="back" ' + (active || powerRequest ? 'disabled' : '')) + '</nav>';
 }
 // The session moves through four steps; the screen always leads with the one step that is due now.
-const STEPS = [['manifest','Cartons'],['verify','Physical check'],['scan','Scan'],['close','Close']];
+const STEPS = [['manifest','Cartons'],['verify','Verify'],['scan','Scan'],['close','Close']];
 const STEP_ROLE = {manifest:['admin','manifest'], verify:['supervisor','verify'], scan:['operator','scan'], close:['operator','close']};
 const stepOf = s => s.closedAt ? 'done' : !s.manifest ? 'manifest' : !s.verifiedBy ? 'verify' : !s.confirmedAt ? 'scan' : 'close';
 function nextLabel(s) {
   const step = stepOf(s), run = latestCurrentRun(s);
   if (step === 'done') return 'Closed';
   if (step === 'manifest') return role === 'operator' ? 'Waiting for setup' : 'Load cartons';
-  if (step === 'verify') return role === 'operator' ? 'Waiting for setup' : role === 'supervisor' ? 'Check by hand' : 'Waiting for Supervisor';
+  if (step === 'verify') return role === 'operator' ? 'Waiting for setup' : role === 'supervisor' ? 'Verify pallet' : 'Waiting for Supervisor';
   if (step === 'close') return 'Ready to close';
   if (!s.identified) return 'Scan pallet';
   return run?.state === 'Finished' && run.result.status !== 'Match' ? run.result.status + ', rescan' : 'Scan cartons';
@@ -248,10 +250,10 @@ function render() {
   if (view === 'build' && (!s || !builder)) view = 'session';
   if (view === 'stock' && (!connected?.auth || !['operator','admin'].includes(role))) view = 'sessions';
   const screen = view === 'scan' ? scanPanel(s) : view === 'build' ? buildPanel(s) : view === 'new' ? subbar() + creation() :
-    view === 'pallet-task' ? subbar() + palletTaskPanel() : view === 'lookup' ? lookupPanel() :
+    view === 'pallet-task' ? subbar() + palletTaskPanel() : view === 'lookup' ? lookupPanel() : view === 'identify' ? identifyPanel() :
     view === 'settings' ? settingsPanel() : view === 'session' ? subbar() + showSession(s) :
     view === 'stock' ? subbar() + palletScanRequests() + stockPanel() : history();
-  root.innerHTML = screen + (!scanner && ['sessions','lookup','settings'].includes(view) ? bottomTabs() : '');
+  root.innerHTML = screen + (!scanner && ['sessions','lookup','identify','settings'].includes(view) ? bottomTabs() : '');
   for (const el of root.querySelectorAll('form[id] [name]')) {
     const k = draftable(el) && draftPrefix(el.form.id) + el.name;
     if (k && k in ui.drafts) el.value = ui.drafts[k];
@@ -268,9 +270,9 @@ function goBack() {
   if (root.querySelector('#untag-dialog[open]')) { root.querySelector('#untag-dialog').close(); return; }
   if (utilityScan) { stopUtilityScan(true); return; }
   if (stockScanBusy) return;
-  if (['lookup','settings','pallet-task'].includes(view)) {
+  if (['lookup','identify','settings','pallet-task'].includes(view)) {
     view = view === 'pallet-task' ? 'stock' : 'sessions';
-    lookupRead = undefined;
+    lookupRead = identifyRead = undefined;
     feedback('');
     render();
     return;
@@ -297,7 +299,8 @@ function goBack() {
 function bottomTabs() {
   return '<nav class="bottom-tabs" aria-label="Main menu"><div>' +
     [['sessions','Home','M3 10.5 12 3l9 7.5V21h-6v-6H9v6H3z'],
-      ['lookup','LookUp','M16 16l5 5M10.5 3.5a7 7 0 1 0 0 14 7 7 0 0 0 0-14z'],
+      ['lookup','Search','M16 16l5 5M10.5 3.5a7 7 0 1 0 0 14 7 7 0 0 0 0-14z'],
+      ['identify','Lookup','M3 3h8l10 10-8 8L3 11zM7.5 7.5h.01'],
       ['settings','Settings','M10 3h4l.6 2.4 2 .9 2.2-1.1 2.8 2.8-1.1 2.2.9 2L24 13v4l-2.6.6-.9 2 1.1 2.2-2.8 2.8-2.2-1.1-2 .9-.6 2.6h-4l-.6-2.6-2-.9-2.2 1.1-2.8-2.8 1.1-2.2-.9-2L0 17v-4l2.6-.8.9-2L2.4 8l2.8-2.8 2.2 1.1 2-.9zM12 11a4 4 0 1 0 0 8 4 4 0 0 0 0-8z']]
       .map(([page,label,path]) => button('tab','<svg aria-hidden="true" viewBox="' + (page === 'settings' ? '-2 1 28 28' : '0 0 24 24') +
         '"><path d="' + path + '"/></svg>','data-page="' + page + '" aria-label="' + label + '" title="' + label + '"' +
@@ -445,7 +448,7 @@ function palletTaskPanel() {
 function lookupPanel() {
   const s = lookupSession();
   const sessions = visibleSessions().filter(entry => entry.manifest).reverse();
-  const title = '<section class="panel stack"><h1>Look up a tag</h1>';
+  const title = '<section class="panel stack"><h1>Search for a tag</h1>';
   if (!sessions.length) return title + '<p>No sessions with a manifest yet.</p></section>';
   const picker = '<label>Session<select id="lookup-session" aria-label="Session"' + (utilityScan || powerRequest ? ' disabled' : '') + '>' +
     '<option value="">Choose a session</option>' + sessions.map(entry => '<option value="' + escape(entry.id) + '"' +
@@ -462,8 +465,18 @@ function lookupPanel() {
       (epc === lookupTarget ? ' selected' : '') + '>' + escape(label) + '</option>').join('') + '</select></label>' +
     '<code>' + escape(lookupTarget) + '</code><div class="lookup-indicator" data-signal="idle" aria-hidden="true"></div>' +
     '<p id="lookup-label" class="lookup-label" role="status">Ready to search</p><small id="lookup-rssi" class="lookup-label muted">RSSI —</small>' +
-    button('utility-scan',utilityScan ? utilityScan.ending ? 'Finishing…' : 'Stop lookup' : 'Start lookup',
+    button('utility-scan',utilityScan ? utilityScan.ending ? 'Finishing…' : 'Stop search' : 'Start search',
       'class="scan-cta" ' + (!bridge?.startReader || !reader.ready || utilityScan?.ending || powerRequest ? 'disabled' : '')) + '</section>';
+}
+function identifyPanel() {
+  const tag = identifyRead && describeTag(identifyRead.epc,visibleSessions(),connected?.stock);
+  const result = !tag ? '' : '<div class="tag-result" role="status"><h2>' + escape(tag.title) + '</h2><dl>' +
+    tag.rows.map(([label,value]) => '<dt>' + escape(label) + '</dt><dd>' + escape(value) + '</dd>').join('') +
+    '<dt>EPC</dt><dd><code>' + escape(identifyRead.epc) + '</code></dd></dl>' +
+    (Number.isFinite(identifyRead.rssi) ? '<small class="muted">RSSI ' + identifyRead.rssi.toFixed(0) + ' dBm</small>' : '') + '</div>';
+  return '<section class="panel stack"><h1>Look up a tag</h1><p>Hold the reader close to one tag.</p>' + result +
+    button('utility-scan',utilityScan ? 'Scanning\u2026' : tag ? 'Scan another tag' : 'Scan tag',
+      'class="scan-cta" ' + (!bridge?.startStockReader || !reader.ready || utilityScan || powerRequest ? 'disabled' : '')) + '</section>';
 }
 function updateLookup() {
   const looking = utilityScan?.kind === 'lookup' && !utilityScan.ending;
@@ -489,7 +502,7 @@ function lookupPulse() {
 }
 function startUtilityScan() {
   if (utilityScan || stockScanBusy || powerRequest || !reader.ready) return;
-  const kind = view === 'lookup' ? 'lookup' : 'pallet';
+  const kind = ['lookup','identify'].includes(view) ? view : 'pallet';
   const lookupPower = connected?.controls.lookupPower;
   if (kind === 'lookup') {
     if (!bridge?.startReader || !lookupTarget) return;
@@ -497,11 +510,12 @@ function startUtilityScan() {
       feedback('Wait for reader power before searching.',true);
       return;
     }
-  } else if (role !== 'operator' || !palletTask || palletRead || !bridge?.startStockReader) return;
+  } else if (!bridge?.startStockReader || (kind === 'pallet' && (role !== 'operator' || !palletTask || palletRead))) return;
   utilityScan = {id:id(),kind,epcs:new Map()};
-  lookupRead = undefined;
+  lookupRead = identifyRead = undefined;
   feedback('');
   if (kind === 'pallet') bridge.startStockReader(utilityScan.id,connected.controls.palletPower ?? 15);
+  else if (kind === 'identify') bridge.startStockReader(utilityScan.id,identifyPower);
   else if (lookupPower != null && bridge.startStockReader) bridge.startStockReader(utilityScan.id,lookupPower);
   else bridge.startReader(utilityScan.id);
   render();
@@ -699,7 +713,7 @@ function nextCard(s, step) {
     return '<section class="panel next"><h2>Ready for Operator</h2><p>Switch to Operator to scan the pallet.</p></section>';
   }
   const [needRole, needAction] = STEP_ROLE[step];
-  const title = {manifest:'Load the expected cartons', verify:'Check the pallet by hand', close:'Review and close the test',
+  const title = {manifest:'Load the expected cartons', verify:'Verify the pallet', close:'Review and close the test',
     scan:!s.identified ? 'Scan the pallet' : latestCurrentRun(s)?.result ? 'Rescan the cartons' : 'Scan the cartons'}[step];
   let body = step === 'verify' ? '<p><strong>' + escape(manifestSummary(s.manifest)) + '</strong></p>' + skuNote(s.manifest) : '';
   if (!permits(role,needAction)) {
@@ -740,7 +754,7 @@ function detailsPanel(s, step) {
       '<li><strong>' + escape(v) + '</strong> ' + escape(s[k] || '—') + '</li>').join('') + '</ul></details>' +
     (m ? '<details' + (pendingImport ? ' open' : '') + '><summary>Expected cartons</summary>' + manifestList(m) +
       (step !== 'manifest' ? manifestControls(s,m) : '') + '</details>' : '') +
-    (role === 'supervisor' && s.verifiedBy ? '<details><summary>Physical verification</summary><p>Verified by ' + escape(s.verifiedBy) +
+    (role === 'supervisor' && s.verifiedBy ? '<details><summary>Verification</summary><p>Verified by ' + escape(s.verifiedBy) +
       ' on ' + escape(time(s.verifiedAt)) + '.</p></details>' : '') +
     (s.source === 'C72 hardware' ? readerSettings(s) : '') + sessionLog(s) + sessionExport() + '</section>';
 }
@@ -749,7 +763,7 @@ function sessionLog(s,includeRunNote = false) {
   const logs = role === 'operator' ? s.logs.filter(entry => entry.action !== 'Physical verification') : s.logs;
   return '<details id="session-log" data-session="' + escape(s.id) + '"' +
     (open?.open && open.dataset.session === s.id ? ' open' : '') + '><summary>Session log (' + logs.length + ')</summary><ul class="log">' +
-    logs.slice().reverse().map(e => '<li><strong>' + escape(e.action) + '</strong><br>' + escape(e.detail) +
+    logs.slice().reverse().map(e => '<li><strong>' + escape(actionLabel(e.action)) + '</strong><br>' + escape(e.detail) +
       '<br><small>' + escape(e.actor) + ' / ' + escape(time(e.at)) + '</small></li>').join('') + '</ul>' +
     (includeRunNote ? runNote(s) : '') + '</details>';
 }
@@ -775,7 +789,7 @@ function manifestList(m) {
 function manifestControls(s,m) {
   if (s.closedAt || s.confirmedAt || active || !permits(role,'manifest')) return '';
   const hardware = s.source === 'C72 hardware';
-  let result = (s.runs.length ? '<p class="muted">A CSV change requires a new physical check and scan.</p>' : '') +
+  let result = (s.runs.length ? '<p class="muted">A CSV change requires a new verification and scan.</p>' : '') +
     '<div class="row manifest-options">' +
     (connected ? button('csv','Choose a CSV','class="secondary"') +
       button('sample','Use CSV *','class="secondary" ' + (connected.samples[s.source] ? '' : 'disabled')) :
@@ -1213,13 +1227,13 @@ function action(fn) {
 window.keypharmEvent = (name,data) => action(() => {
   if (name === 'back') { goBack(); return; }
   if (utilityScan?.id === data?.id && utilityScan) {
-    if (name === 'started' && utilityScan.kind === 'pallet' && !utilityScan.ending) {
+    if (name === 'started' && utilityScan.kind !== 'lookup' && !utilityScan.ending) {
       utilityScan.timer = setTimeout(() => stopUtilityScan(),850);
     }
     if (name === 'reads' || name === 'ended') {
       for (const read of data.reads ?? []) {
         const epc = normalizeEpc(read.epc);
-        if (utilityScan.kind === 'pallet' && validEpc(epc)) {
+        if (utilityScan.kind !== 'lookup' && validEpc(epc)) {
           const rssi = Number.parseFloat(read.rssi);
           const strength = Number.isFinite(rssi) ? rssi : -Infinity;
           utilityScan.epcs.set(epc,Math.max(utilityScan.epcs.get(epc) ?? -Infinity,strength));
@@ -1236,18 +1250,20 @@ window.keypharmEvent = (name,data) => action(() => {
         utilityScan = undefined;
         clearTimeout(lookupTimer);
         if (data.interrupted) feedback(data.message || 'Scan interrupted.',true);
-        else if (kind === 'pallet') {
+        else if (kind !== 'lookup') {
           const [strongest] = [...epcs].sort((a,b) => b[1]-a[1]);
+          const noun = kind === 'pallet' ? 'pallet tag' : 'tag';
           if (strongest && (epcs.size === 1 || Number.isFinite(strongest[1]))) {
-            palletRead = {epc:strongest[0],rssi:strongest[1]};
-          } else feedback(strongest ? 'Signal strength unavailable. Move closer to the pallet tag and retry.' : 'No pallet tag read.',true);
+            const read = {epc:strongest[0],rssi:strongest[1]};
+            if (kind === 'pallet') palletRead = read; else identifyRead = read;
+          } else feedback(strongest ? 'Signal strength unavailable. Move closer to the ' + noun + ' and retry.' : 'No ' + noun + ' read.',true);
         }
         render();
       }
     }
     return;
   }
-  if (['lookup','pallet-task'].includes(view) && ['press','release','cancel'].includes(name)) {
+  if (['lookup','identify','pallet-task'].includes(view) && ['press','release','cancel'].includes(name)) {
     if (name === 'press') startUtilityScan();
     else if (name === 'cancel' || view === 'lookup') stopUtilityScan(name === 'cancel');
     return;
@@ -1327,7 +1343,7 @@ window.keypharmEvent = (name,data) => action(() => {
     reader = data;
     if (!reader.ready) appliedSessionPower = undefined;
     if (becameReady && ['session','scan'].includes(view)) applySessionPower(session());
-    if (!active && !powerRequest && !receiptCapture && !utilityScan && (['scan','sessions','stock','lookup','settings','pallet-task'].includes(view) || (view === 'session' && session()?.source === 'C72 hardware'))) render();
+    if (!active && !powerRequest && !receiptCapture && !utilityScan && (['scan','sessions','stock','lookup','identify','settings','pallet-task'].includes(view) || (view === 'session' && session()?.source === 'C72 hardware'))) render();
   }
   if (name === 'reader-power' && powerRequest?.id === data.id) {
     const {session:target, actor:changedBy, automatic} = powerRequest;
@@ -1486,11 +1502,11 @@ document.addEventListener('click', event => action(() => {
     palletTask = connected.palletTasks.find(task => task.id === control.dataset.task);
     if (palletTask) view = 'pallet-task';
   }
-  if (command === 'tab' && ['sessions','lookup','settings'].includes(control.dataset.page)) {
+  if (command === 'tab' && ['sessions','lookup','identify','settings'].includes(control.dataset.page)) {
     if (view === control.dataset.page) return;
     view = control.dataset.page;
     selected = undefined;
-    lookupRead = undefined;
+    lookupRead = identifyRead = undefined;
     feedback('');
     window.scrollTo(0,0);
   }
@@ -1766,7 +1782,7 @@ root.addEventListener('submit', event => action(() => {
   }
   if (form.id === 'verify' && s?.manifest && !s.verifiedBy && !s.closedAt && data.checked && permits(role,'verify')) {
     commit(() => { s.verifiedBy = actor(); s.verifiedAt = now(); log(s,'Physical verification','Pallet contents and unique label assignment confirmed'); });
-    confirmWorkflow('Physical check recorded','The confirmation is saved on this handheld and will sync to the dashboard.');
+    confirmWorkflow('Verification recorded','The confirmation is saved on this handheld and will sync to the dashboard.');
   }
   if (form.id === 'investigate' && s && !s.closedAt && permits(role,'investigate') && latest(s)?.result?.extra.includes(data.epc)) {
     if (!data.note.trim()) throw new Error('Enter the investigation note.');
@@ -1911,7 +1927,7 @@ if (connected) {
     scenario = defaultScenario;
     receiptProduct = '';
     receiptUpload = receiptRead = countUpload = undefined;
-    palletTask = palletRead = utilityScan = lookupSessionId = lookupTarget = lookupRead = undefined;
+    palletTask = palletRead = utilityScan = lookupSessionId = lookupTarget = lookupRead = identifyRead = undefined;
     pendingRecordRender = true;
     publish();
   };
@@ -1927,7 +1943,7 @@ if (connected) {
     if (index < 0) store.sessions.push(updated);
     else store.sessions[index] = updated;
     localStorage.setItem(key,JSON.stringify(store));
-    if (['sessions','lookup'].includes(view) || selected === updated.id) pendingRecordRender = true;
+    if (['sessions','lookup','identify'].includes(view) || selected === updated.id) pendingRecordRender = true;
     renderReceivedRecord();
   };
   let controlsRevision = connected.controls.revision;

@@ -342,7 +342,7 @@ test('one generated manifest verifies two pallets in sequence before dispatching
   } finally { db.close(); }
 });
 
-test('operator sync skips unchanged sessions but requires a physical check for new scan evidence', () => {
+test('operator sync skips unchanged sessions but requires verification for new scan evidence', () => {
   const db = createWorkspace(':memory:');
   try {
     const session = db.create(lead,sample);
@@ -350,8 +350,8 @@ test('operator sync skips unchanged sessions but requires a physical check for n
       revision:session.workspaceRevision,operationId:randomUUID(),session:{...session,...fields}
     });
     assert.equal(sync({}).workspaceRevision,session.workspaceRevision);
-    assert.throws(() => sync({palletAttempts:[{id:randomUUID(),observations:{}}]}),/physical check before scanning/);
-    assert.throws(() => sync({runs:[{id:randomUUID(),state:'Finished'}]}),/physical check before scanning/);
+    assert.throws(() => sync({palletAttempts:[{id:randomUUID(),observations:{}}]}),/requires verification before scanning/);
+    assert.throws(() => sync({runs:[{id:randomUUID(),state:'Finished'}]}),/requires verification before scanning/);
     assert.equal(db.records().sessions[0].runs.length,0);
   } finally { db.close(); }
 });

@@ -661,7 +661,7 @@ export function createWorkspace(path, hardwareCsv = '') {
       s.verifiedAt = time();
       audit(s,user,'Physical verification',String(input.note ?? '').slice(0,320));
     } else if (input.action === 'approve' && input.confirmed === true) {
-      if (!hasVerifiedMatch(s)) fail('A clean result and physical check are required.');
+      if (!hasVerifiedMatch(s)) fail('A clean result and verification are required.');
       if (s.dispatchApproval) return s;
       approveDispatch(s,user);
     } else if (input.action === 'dispatch' && input.confirmed === true) {
@@ -718,7 +718,7 @@ export function createWorkspace(path, hardwareCsv = '') {
       const newRuns = (incoming.runs ?? []).filter(run => run.state !== 'Reading' && !runIds.has(run.id));
       if (!s.verifiedAt || !s.manifest) {
         if (extraAttempts.length || newRuns.length || incoming.confirmedAt || Object.keys(incoming.palletMatches ?? {}).length) {
-          fail('The server requires a physical check before scanning.');
+          fail('The server requires verification before scanning.');
         }
         return s;
       }

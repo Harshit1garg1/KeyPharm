@@ -182,7 +182,7 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 
 /* Primary action in the thumb zone, always reachable. */
 .bottom-tabs {position:fixed;inset:auto 0 0;z-index:6;padding:4px 12px calc(4px + env(safe-area-inset-bottom));background:var(--paper);border-top:1px solid var(--line)}
-.bottom-tabs > div {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;max-width:672px;margin:auto}
+.bottom-tabs > div {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;max-width:672px;margin:auto}
 .bottom-tabs button {min-height:48px;padding:8px 4px;border:0;background:transparent;color:var(--muted);font-size:.9rem}
 .bottom-tabs button svg {display:block;width:24px;height:24px;margin:auto;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .bottom-tabs button[aria-current="page"] {background:var(--sky);color:var(--action);font-weight:700}
@@ -229,6 +229,11 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .lookup-indicator[data-signal="medium"] {animation-duration:.9s}
 .lookup-indicator[data-signal="strong"] {animation-duration:.5s}
 .lookup-label {text-align:center;margin:0}
+.tag-result {border-top:1px solid var(--line);padding-top:12px}
+.tag-result h2 {margin:0 0 8px;overflow-wrap:anywhere}
+.tag-result dl {display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 12px;margin:0 0 8px}
+.tag-result dt {color:var(--muted)}
+.tag-result dd {margin:0;overflow-wrap:anywhere}
 @keyframes lookup-breathe {0%,100% {transform:scale(.84);opacity:.65} 50% {transform:scale(1.07);opacity:1}}
 @media (prefers-reduced-motion:reduce) {.lookup-indicator:not([data-signal="idle"]) {animation:none}}
 .tagged-cartons {min-width:0;overflow-wrap:anywhere}

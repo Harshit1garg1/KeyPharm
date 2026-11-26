@@ -175,11 +175,11 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 supervisor = dashboard("supervisor")
                 supervisor.goto(base + "/#manage")
                 lead.get_by_role("row",name="KP-OUT-40",exact=False).get_by_role("button",name="More actions").click()
-                lead.get_by_role("button",name="Record physical check").click()
+                lead.get_by_role("button",name="Record verification").click()
                 lead.get_by_label("Check notes").fill("Simulated pallet check for demonstration")
                 lead.get_by_role("dialog").get_by_role("button",name="Confirm").click()
                 expect(lead.get_by_role("cell",name="Ready to scan")).to_be_visible()
-                expect(lead.get_by_role("dialog",name="Physical check recorded")).to_be_visible()
+                expect(lead.get_by_role("dialog",name="Verification recorded")).to_be_visible()
                 lead.get_by_role("button",name="Done").click()
 
                 mobile = browser.new_page(viewport={"width":360,"height":740},has_touch=True)
@@ -279,8 +279,8 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 expect(mobile.get_by_label("Role",exact=True).get_by_role("option")).to_have_text(["Operator","Administrator","Supervisor"])
                 expect(mobile.locator("#who")).to_have_text("Operator")
                 nav = mobile.get_by_role("navigation",name="Main menu")
-                expect(nav.locator("button svg")).to_have_count(3)
-                for tab in ("Home","LookUp","Settings"):
+                expect(nav.locator("button svg")).to_have_count(4)
+                for tab in ("Home","Search","Lookup","Settings"):
                     expect(nav.get_by_role("button",name=tab,exact=True)).to_be_visible()
                 expect(mobile.get_by_role("heading",name="PoC test plan")).to_be_hidden()
                 heights = [mobile.locator(selector).bounding_box()["height"] for selector in
@@ -703,7 +703,7 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 expect(mobile.locator("#who")).to_have_text("Supervisor")
                 mobile.get_by_label("Contents and label assignment verified").check()
                 mobile.get_by_role("button",name="Record verification").click()
-                mobile.get_by_role("dialog",name="Physical check recorded").get_by_role("button",name="Done").click()
+                mobile.get_by_role("dialog",name="Verification recorded").get_by_role("button",name="Done").click()
                 expect(mobile.locator('#workspace-connection [role="status"]')).to_have_text("Synced",timeout=15000)
                 picker.select_option("operator")
                 expect(mobile.get_by_role("button",name="Open pallet scanner",exact=True)).to_be_visible(timeout=15000)

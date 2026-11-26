@@ -186,6 +186,35 @@ export function matchesQuery(s, query, status = '') {
     ...s.runs.map(run => run.operator)].join(' ').toLowerCase();
   return String(query ?? '').toLowerCase().split(/\s+/).filter(Boolean).every(term => text.includes(term));
 }
+// "Carton 01" already says what it is; "ST-9" needs the word in front.
+const named = (kind, ref) => String(ref).toLowerCase().startsWith(kind.toLowerCase() + ' ') ? String(ref) : kind + ' ' + ref;
+// Lookup tab: say what one scanned tag is, from records already on the handheld. Read-only.
+export function describeTag(epc, sessions, stock = []) {
+  const item = stock.find(carton => carton.epc === epc);
+  const uses = [];
+  for (const s of [...sessions].reverse()) {
+    // A SKU manifest lists no carton EPCs; a carton belongs to it once a confirmed run matched it.
+    const confirmed = new Set(Object.values(s.palletMatches ?? {}));
+    const runs = s.manifest?.matchBy !== 'sku' ? [] : s.runs.filter(run =>
+      confirmed.has(run.id) || (!s.palletMatches && s.confirmedAt && run === s.runs.at(-1)));
+    for (const pallet of palletsOf(s.manifest)) {
+      const carton = pallet.cartons?.find(c => c.epc === epc) ?? runs.filter(run => run.palletEpc === pallet.palletEpc)
+        .flatMap(run => run.result?.matchedCartons ?? []).find(c => c.epc === epc);
+      if (pallet.palletEpc !== epc && !carton) continue;
+      uses.push({pallet, carton, session:[s.testId, s.location, 'pallet ' + pallet.pallet,
+        s.dispatchedAt ? 'dispatched' : s.closedAt ? 'closed' : ''].filter(Boolean).join(' · ')});
+    }
+  }
+  const carton = item ?? uses.find(use => use.carton)?.carton;
+  if (!carton && !uses.length) return {kind:'unknown', title:'Not in records', rows:[]};
+  const state = item?.state ?? '';
+  const rows = carton ? [['SKU', carton.sku], ['Location', item?.location],
+    ['State', state.charAt(0).toUpperCase() + state.slice(1)], ['Batch', item?.batch_lot],
+    ['Units per carton', item?.units_per_carton]] : [['Cartons expected', palletCartonCount(uses[0].pallet)]];
+  return {kind:carton ? 'carton' : 'pallet', title:carton ? named('Carton', carton.carton) : named('Pallet', uses[0].pallet.pallet),
+    rows:[...rows, ...uses.map(use => ['Session', use.session])]
+      .filter(([, value]) => value || value === 0).map(([label, value]) => [label, String(value)])};
+}
 // AT-02: expected, matched and missing cartons per SKU for one run; SKU never replaces the EPC identity.
 export function skuBreakdown(manifest, result) {
   if (manifest.requirements) return manifest.requirements.map(({sku,quantity:expected}) => {
@@ -201,6 +230,8 @@ export function skuBreakdown(manifest, result) {
   }
   return [...rows.values()];
 }
+// Records keep the original action name; screens show the current word for it.
+export const actionLabel = action => action === 'Physical verification' ? 'Verification' : action;
 // Section 9.3 lists "Unexpected reads" as its own state; FR-15 calls it Hold. Show both.
 export const statusLabel = status => status === 'Hold' ? 'Hold: unexpected reads' : status;
 export const pendingPallet = session => session.manifest?.pallets?.find(pallet => !session.palletMatches?.[pallet.palletEpc]);

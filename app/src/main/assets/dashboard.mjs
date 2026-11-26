@@ -1,4 +1,4 @@
-import {displaySource, escapeHtml as escape, manifestFor} from './model.mjs';
+import {actionLabel, displaySource, escapeHtml as escape, manifestFor} from './model.mjs';
 import {indexRecords, RECENT_LIMIT, sections} from './dashboard-model.mjs';
 
 const find = selector => document.querySelector(selector);
@@ -48,7 +48,7 @@ const fold = (label,body,status) => '<details class="dashboard-fold"><summary><s
   badge(status) + '</summary><div class="dashboard-fold-body">' + body + '</div></details>';
 const joined = (...items) => items.filter(Boolean).join(' / ');
 const readerPower = p => joined(p?.region,p?.powerDbm == null ? '' : p.powerDbm + ' dBm');
-const logBody = log => '<strong>' + escape(log.action) + '</strong><br>' + escape(log.detail) +
+const logBody = log => '<strong>' + escape(actionLabel(log.action)) + '</strong><br>' + escape(log.detail) +
   '<br><small>' + escape(joined(log.actor,time(log.at))) + '</small>';
 
 function updateOverview() {

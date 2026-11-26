@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {parseManifest, parseCsvRows, compare, scanDelta, canContinue, permits, allocationTotal, canClose, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary, EXPORT_COLUMNS, SAMPLE,
   parsePlan, planCoverage, closePlanErrors, manifestFor, lockPallet, lockTo, otherPallet, inManifest, manifestCsv,
-  missingSku, unexported, matchesQuery, skuBreakdown, statusLabel, displaySource} from '../app/src/main/assets/model.mjs';
+  missingSku, unexported, matchesQuery, skuBreakdown, statusLabel, displaySource, describeTag, actionLabel} from '../app/src/main/assets/model.mjs';
 
 // A finished carton run against the sample manifest; `seen` = how many of the 4 cartons were read.
 const sampleRun = (manifest, seen, at, extra = []) => {
@@ -310,4 +310,43 @@ test('parseCsvRows skips empty Excel separator rows and displaySource removes C7
   assert.equal(displaySource('C72 hardware'), 'RFID handheld');
   assert.equal(displaySource('C72 ETSI'), 'UHF ETSI');
   assert.equal(displaySource('C72-ETSI-1'), 'UHF-ETSI-1');
+});
+
+test('stored verification log entries show the new word', () => {
+  assert.equal(actionLabel('Physical verification'), 'Verification');
+  assert.equal(actionLabel('Run note'), 'Run note');
+});
+
+test('lookup describes a scanned tag from stock and session manifests', () => {
+  const manifest = {...parseManifest(SAMPLE), revision:1};
+  const carton = manifest.cartons[0];
+  const s = {testId:'KP-OUT-1', location:'Dock 3', manifest, runs:[]};
+  const pallet = describeTag(manifest.palletEpc, [s]);
+  assert.equal(pallet.kind, 'pallet');
+  assert.equal(pallet.title, 'Pallet ' + manifest.pallet);
+  assert.deepEqual(pallet.rows, [['Cartons expected', '4'], ['Session', 'KP-OUT-1 · Dock 3 · pallet ' + manifest.pallet]]);
+
+  // Without synced stock (standalone mode) the manifest still names the carton.
+  const listed = describeTag(carton.epc, [s]);
+  assert.equal(carton.carton, 'Carton 01');
+  assert.deepEqual([listed.kind, listed.title], ['carton', 'Carton 01']); // not "Carton Carton 01"
+  assert.deepEqual(listed.rows[0], ['SKU', carton.sku]);
+
+  const stock = [{epc:carton.epc, carton:'ST-9', sku:'Ginger', location:'Rack A', state:'dispatched', batch_lot:'B7', units_per_carton:12}];
+  assert.deepEqual(describeTag(carton.epc, [{...s, dispatchedAt:'2026-11-27T00:00:00.000Z'}], stock), {
+    kind:'carton', title:'Carton ST-9', rows:[['SKU', 'Ginger'], ['Location', 'Rack A'], ['State', 'Dispatched'],
+      ['Batch', 'B7'], ['Units per carton', '12'], ['Session', 'KP-OUT-1 · Dock 3 · pallet ' + manifest.pallet + ' · dispatched']]});
+
+  assert.deepEqual(describeTag('ABCDEF012345', [s], stock), {kind:'unknown', title:'Not in records', rows:[]});
+});
+
+test('lookup lists a SKU-matched carton only under a confirmed run', () => {
+  const manifest = {matchBy:'sku', pallet:'P1', palletEpc:'AA01', cartons:[], requirements:[{sku:'Ginger', quantity:1}], revision:1};
+  manifest.pallets = [{...manifest}];
+  const run = {id:'r1', palletEpc:'AA01', result:{matchedCartons:[{epc:'BB02', sku:'Ginger', carton:'C-2'}]}};
+  const s = {testId:'KP-SKU', location:'Dock 1', manifest, runs:[run]};
+  assert.equal(describeTag('BB02', [s]).kind, 'unknown');
+  const confirmed = describeTag('BB02', [{...s, palletMatches:{AA01:'r1'}}]);
+  assert.deepEqual(confirmed, {kind:'carton', title:'Carton C-2',
+    rows:[['SKU', 'Ginger'], ['Session', 'KP-SKU · Dock 1 · pallet P1']]});
 });

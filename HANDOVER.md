@@ -23,7 +23,7 @@ The branch preserves the strict carton acceptance rule and the evidence export f
 1. Use JDK 17, Android SDK 34, and the Chainway DeviceAPI AAR listed in the [README](README.md).
 2. For a hardware-sample build, copy the physical manifest to `app/src/main/assets/private-live-sample.csv`. The source XLS, confirmed EPC CSV and signed debug APK remain local. GitHub carries the source, converter, build tooling and documentation.
 3. Run `./tools/build-android.ps1`. The output is `build/keypharm-poc-0.3.3-debug.apk`. For an in-place upgrade on an existing test C72, build with the same private signing key and install with `adb install -r`.
-4. Open a C72 hardware session. As Test lead, select **Use live sample** or choose a manifest. Record the physical check as Supervisor, then open **Scan pallet** as Operator. Hold the reader near the marked pallet tag, and release the trigger. On **Scan cartons**, scan the carton set and inspect the result before continuing.
+4. Open a C72 hardware session. As Test lead, select **Use live sample** or choose a manifest. Record the verification as Supervisor, then open **Scan pallet** as Operator. Hold the reader near the marked pallet tag, and release the trigger. On **Scan cartons**, scan the carton set and inspect the result before continuing.
 
 ## Remaining decisions and acceptance
 

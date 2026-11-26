@@ -62,7 +62,7 @@ function stage(s) {
   const run = s.runs.findLast(item => item.manifestRevision === s.manifest?.revision);
   if (run?.state === 'Interrupted') return 'Interrupted';
   if (['Hold','Incomplete'].includes(run?.result?.status)) return run.result.status;
-  return s.verifiedAt ? 'Ready to scan' : s.manifest ? 'Physical check due' : 'Manifest needed';
+  return s.verifiedAt ? 'Ready to scan' : s.manifest ? 'Verification due' : 'Manifest needed';
 }
 const statusBadge = status => '<span class="dashboard-badge" data-state="' + escape(status.toLowerCase()) + '">' + escape(status) + '</span>';
 const actionButton = (key,label) => '<button type="button" data-action="' + key + '">' + label + '</button>';
@@ -74,7 +74,7 @@ const controls = (s, user) => {
   if (s.closedAt) return user.role === 'admin' ?
     actionButton('reopen','Reopen session') + actionButton('manifest','Change CSV') + approval + power + remove : '';
   return approval + power + remove + (user.role === 'admin' && !s.confirmedAt && !s.acceptedAt ? actionButton('manifest',s.manifest ? 'Change CSV' : 'Load CSV') : '') +
-    (['admin','supervisor'].includes(user.role) && s.manifest && !s.verifiedAt ? actionButton('physical','Record physical check') : '');
+    (['admin','supervisor'].includes(user.role) && s.manifest && !s.verifiedAt ? actionButton('physical','Record verification') : '');
 };
 const csvPicker = id => '<label class="workspace-upload" data-csv-drop>' +
   '<input class="workspace-file-input" name="csv" type="file" accept=".csv,text/csv" aria-label="Choose a CSV" aria-describedby="' + id + '">' +
@@ -280,7 +280,7 @@ function adminSettings() {
     (setting.stockPower ?? 10) + '"></label>' +
     '<label>Pallet Scan Power (dBm)<input name="palletPower" type="number" min="5" max="30" step="1" required value="' +
     (setting.palletPower ?? 15) + '"></label>' +
-    '<label>LookUp Power (dBm)<input name="lookupPower" type="number" min="5" max="30" step="1" placeholder="Use session power" value="' +
+    '<label>Search Power (dBm)<input name="lookupPower" type="number" min="5" max="30" step="1" placeholder="Use session power" value="' +
     escape(setting.lookupPower ?? '') + '"></label></div>' +
     '<div class="row workspace-actions"><button class="primary-button">Save test settings</button></div></form>' +
     '<div class="workspace-reset-row"><button type="button" data-action="reset">Reset data *</button></div></div></details>';
@@ -324,10 +324,10 @@ function manage() {
 }
 let message = '';
 const milestones = {
-  physical:['Physical check recorded','The Operator can open the session and scan the pallet.'],
+  physical:['Verification recorded','The Operator can open the session and scan the pallet.'],
   approve:['Dispatch approved','The session can now be selected for dispatch.'],
   dispatch:['Dispatch recorded','The dispatched cartons were deducted from on-hand stock.'],
-  reopen:['Session reopened','The session is ready for a new physical check.'],
+  reopen:['Session reopened','The session is ready for a new verification.'],
   receive:['Receipt confirmed','Inventory is updated.'],
   review:['Count reviewed','Scan evidence is saved.'],
   'cancel-count':['Count cancelled','You can open a fresh count for this location.'],
@@ -642,11 +642,11 @@ panel.addEventListener('click', async event => {
   dialog.returnValue = 'cancel';
   dialog.querySelector('h2').textContent = action === 'dispatch' ? 'Confirm dispatch' : action === 'approve' ? 'Approve dispatch' : button.textContent;
   dialog.querySelector('p').textContent = action === 'physical' ? 'Confirm you checked the actual pallet and its label assignments.' :
-    action === 'approve' ? 'Confirm dispatch approval for ' + record.testId + ' after reviewing the physical check and clean scan.' :
+    action === 'approve' ? 'Confirm dispatch approval for ' + record.testId + ' after reviewing the verification and clean scan.' :
     action === 'dispatch' ? (dispatch.some(s => !s.dispatchApproval) ?
       'This records approval and deducts the selected cartons from on-hand stock.' : 'This deducts the selected cartons from on-hand stock.') :
-    action === 'manifest' && record.closedAt ? 'Changing the CSV reopens the session and requires a new physical check.' :
-    action === 'manifest' && record.manifest ? 'Changing the CSV requires a new physical check.' :
+    action === 'manifest' && record.closedAt ? 'Changing the CSV reopens the session and requires a new verification.' :
+    action === 'manifest' && record.manifest ? 'Changing the CSV requires a new verification.' :
     action === 'remove' ? 'Remove this session from the dashboard and handheld lists. Scan history and inventory are retained.' :
     action === 'reopen' ? 'Keep the current CSV and start a new verification. Previous scans stay in the session history.' :
     action === 'reset' ? 'Clear sessions, scans and test settings from the shared workspace and the handheld. Restore starting stock.' :

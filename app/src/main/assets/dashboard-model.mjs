@@ -1,3 +1,4 @@
+import {actionLabel} from './model.mjs';
 export const RECENT_LIMIT = 50;
 
 export const sections = {
@@ -43,7 +44,7 @@ export function indexRecords(sessions) {
       }
     }
     for (const [i,log] of (session.logs ?? []).entries()) {
-      order('activity',{id:session.id + ':' + i, title:log.action || 'Activity event',
+      order('activity',{id:session.id + ':' + i, title:actionLabel(log.action) || 'Activity event',
         description:[test,log.actor].filter(Boolean).join(' / '), at:log.at, log});
     }
   }
