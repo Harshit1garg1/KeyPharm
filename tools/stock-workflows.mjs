@@ -1,5 +1,5 @@
 import {randomInt,randomUUID} from 'node:crypto';
-import {compare,normalizeEpc,parseCsvRows,validEpc,productSku,receiptProducts} from '../app/src/main/assets/model.mjs';
+import {compare,normalizeEpc,parseCsvRows,validEpc,productSku,receiptProducts,csvCell} from '../app/src/main/assets/model.mjs';
 
 export const locations = ['Receiving','Storage','Staging','Hold'];
 const receiptId = 'KP-IN-40';
@@ -14,11 +14,7 @@ const field = (value, label) => {
   if (typeof value !== 'string' || !value.trim() || value.length > 240) fail('Enter ' + label + '.',400);
   return value.trim();
 };
-const cell = value => {
-  const text = String(value ?? '');
-  return '"' + (/^[\s\uFEFF]*[=+@-]|^[\t\r\n]/.test(text) ? "'" : '') + text.replaceAll('"','""') + '"';
-};
-const csv = (header,rows) => [header.join(','),...rows.map(row => row.map(cell).join(','))].join('\r\n') + '\r\n';
+const csv = (header,rows) => [header.join(','),...rows.map(row => row.map(csvCell).join(','))].join('\r\n') + '\r\n';
 const demoSizes = ['XS','S','M','L'];
 const inboundEpc = number => 'D5' + number.toString(16).toUpperCase().padStart(22,'0');
 
@@ -31,7 +27,7 @@ export function nextCartonLabel(db,sku) {
   return sku + '-' + demoSizes[randomInt(demoSizes.length)] + '-' + String(highest + 1).padStart(2,'0');
 }
 
-export function stockWorkflows(db, products) {
+export function stockWorkflows(db, products, onAudit = () => {}) {
   const cartonColumns = new Set(db.prepare('PRAGMA table_info(cartons)').all().map(column => column.name));
   if (!cartonColumns.has('location')) {
     db.exec("ALTER TABLE cartons ADD COLUMN location TEXT NOT NULL DEFAULT 'Staging'");
@@ -47,6 +43,20 @@ export function stockWorkflows(db, products) {
       action TEXT NOT NULL, before_state TEXT NOT NULL, after_state TEXT NOT NULL, reason TEXT NOT NULL, source TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS stock_events_epc ON stock_events(epc);
+    CREATE TABLE IF NOT EXISTS stock_task_runs (
+      id TEXT PRIMARY KEY, task_id TEXT NOT NULL, task_type TEXT NOT NULL, actor TEXT, source TEXT,
+      identifier TEXT, expected_count INTEGER, matched_count INTEGER, missing_count INTEGER,
+      unexpected_count INTEGER, unknown_count INTEGER, outstanding INTEGER,
+      recorded_at TEXT, confirmed_at TEXT, confirmed_by TEXT, superseded_at TEXT, reason TEXT,
+      observations_json TEXT, result_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS stock_task_runs_task ON stock_task_runs(task_id);
+    CREATE TABLE IF NOT EXISTS carton_archive (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, archived_at TEXT NOT NULL, archived_by TEXT NOT NULL,
+      task_id TEXT NOT NULL, reason TEXT NOT NULL, epc TEXT NOT NULL, carton TEXT NOT NULL, sku TEXT NOT NULL,
+      physical INTEGER NOT NULL, prior_state TEXT NOT NULL, prior_location TEXT NOT NULL,
+      batch_lot TEXT, units_per_carton INTEGER
+    );
   `);
   const carton = epc => db.prepare('SELECT * FROM cartons WHERE epc=?').get(epc);
   const read = row => ({...JSON.parse(row.body),revision:row.revision});
@@ -60,10 +70,32 @@ export function stockWorkflows(db, products) {
   const tagged = task => task.type !== 'receipt' ? task : {...task,tagged:task.received.map(carton).filter(Boolean).map(
     ({epc,sku,carton:reference,state}) => ({epc,sku,reference,state}))};
   const stockVersion = () => db.prepare('SELECT COALESCE(MAX(id),0) AS version FROM stock_events').get().version;
+  const deleteTaskRuns = db.prepare('DELETE FROM stock_task_runs WHERE task_id=?');
+  const insertTaskRun = db.prepare(`INSERT INTO stock_task_runs
+    (id,task_id,task_type,actor,source,identifier,expected_count,matched_count,missing_count,unexpected_count,unknown_count,outstanding,recorded_at,confirmed_at,confirmed_by,superseded_at,reason,observations_json,result_json)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  function syncTaskRuns(task) {
+    deleteTaskRuns.run(task.id);
+    for (const [index,run] of (task.runs ?? []).entries()) {
+      const matched = run.found?.length ?? 0;
+      const missing = run.missing?.length ?? 0;
+      const unexpected = run.unexpected?.length ?? 0;
+      const unknown = run.unknown?.length ?? 0;
+      insertTaskRun.run(run.id ?? (task.id + ':run:' + index),task.id,task.type,run.actor ?? null,run.source ?? null,
+        run.identifier ?? null,matched + (run.outstanding ?? missing),matched,missing,unexpected,unknown,
+        run.outstanding ?? null,run.at ?? null,run.confirmedAt ?? null,run.confirmedBy ?? null,
+        run.supersededAt ?? null,run.reason ?? null,JSON.stringify(run.observations ?? {}),
+        JSON.stringify({found:run.found ?? [],missing:run.missing ?? [],unexpected:run.unexpected ?? [],unknown:run.unknown ?? [],bySku:run.bySku ?? {}}));
+    }
+  }
+  for (const row of db.prepare('SELECT body FROM stock_tasks WHERE NOT EXISTS (SELECT 1 FROM stock_task_runs WHERE stock_task_runs.task_id=stock_tasks.id)').all()) {
+    syncTaskRuns(JSON.parse(row.body));
+  }
   function save(task) {
     const {revision,...body} = task;
     db.prepare('INSERT INTO stock_tasks VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,body=excluded.body')
       .run(task.id,revision + 1,JSON.stringify(body));
+    syncTaskRuns(task);
     return get(task.id);
   }
   const insert = db.prepare('INSERT INTO stock_events(at,actor,ref,epc,action,before_state,after_state,reason,source) VALUES (?,?,?,?,?,?,?,?,?)');
@@ -85,8 +117,8 @@ export function stockWorkflows(db, products) {
       createdAt:now(),expected,received:[],runs:[]});
   }
   function reset() {
-    db.exec(`DELETE FROM stock_events; DELETE FROM stock_commands; DELETE FROM stock_tasks;
-      DELETE FROM cartons WHERE epc IN (SELECT epc FROM stock_mappings); DELETE FROM stock_mappings;
+    db.exec(`DELETE FROM stock_events; DELETE FROM stock_commands; DELETE FROM stock_task_runs; DELETE FROM stock_tasks;
+      DELETE FROM carton_archive; DELETE FROM cartons WHERE epc IN (SELECT epc FROM stock_mappings); DELETE FROM stock_mappings;
       UPDATE cartons SET location='Staging';`);
     const deleteCarton = db.prepare('DELETE FROM cartons WHERE epc=?');
     for (let number = 1; number <= 40; number++) deleteCarton.run(inboundEpc(number));
@@ -293,6 +325,10 @@ export function stockWorkflows(db, products) {
     const planned = task.expected.some(item => item.epc === epc);
     if (planned) db.prepare("UPDATE cartons SET state='expected',location='Receiving' WHERE epc=?").run(epc);
     else {
+      db.prepare(`INSERT INTO carton_archive
+        (archived_at,archived_by,task_id,reason,epc,carton,sku,physical,prior_state,prior_location,batch_lot,units_per_carton)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(now(),user.name,task.id,reason,before.epc,before.carton,before.sku,
+        before.physical ?? 0,before.state,before.location,before.batch_lot ?? null,before.units_per_carton ?? null);
       db.prepare('DELETE FROM stock_mappings WHERE epc=?').run(epc);
       db.prepare('DELETE FROM cartons WHERE epc=?').run(epc);
     }
@@ -396,6 +432,7 @@ export function stockWorkflows(db, products) {
       else fail('Action is unavailable for this record.');
     }
     db.prepare('INSERT INTO stock_commands VALUES (?,?,?)').run(input.operationId,user.id,body);
+    onAudit(user,'Stock ' + input.action,input.id ?? result?.id ?? 'stock',result?.reference ?? '');
     return result;
   }
   const events = epc => epc ? db.prepare('SELECT * FROM stock_events WHERE epc=? ORDER BY id DESC').all(epc) :

@@ -29,8 +29,11 @@ import java.util.concurrent.Executors;
 public final class CameraBarcodeActivity extends Activity implements SurfaceHolder.Callback {
     private static final int CAMERA_PERMISSION = 1;
     private final ExecutorService decoder = Executors.newSingleThreadExecutor();
+    private final MultiFormatReader reader = new MultiFormatReader();
     private SurfaceHolder preview;
     private Camera camera;
+    private int previewWidth;
+    private int previewHeight;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -84,6 +87,9 @@ public final class CameraBarcodeActivity extends Activity implements SurfaceHold
                 params.setFocusMode(Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE);
             }
             camera.setParameters(params);
+            Camera.Size size = camera.getParameters().getPreviewSize();
+            previewWidth = size.width;
+            previewHeight = size.height;
             camera.setDisplayOrientation(90);
             camera.setPreviewDisplay(preview);
             camera.startPreview();
@@ -95,19 +101,22 @@ public final class CameraBarcodeActivity extends Activity implements SurfaceHold
     }
 
     private void readFrame(byte[] frame, Camera source) {
-        if (source != camera || frame == null) return;
-        Camera.Size size = source.getParameters().getPreviewSize();
-        byte[] luminance = Arrays.copyOf(frame, size.width * size.height);
+        if (source != camera || frame == null || previewWidth <= 0 || previewHeight <= 0) return;
+        int width = previewWidth;
+        int height = previewHeight;
+        int expected = width * height;
+        if (frame.length < expected) return;
+        byte[] luminance = Arrays.copyOf(frame, expected);
         decoder.execute(() -> {
-            String value = decode(luminance, size.width, size.height);
+            String value = decode(luminance, width, height);
             if (value == null) {
                 byte[] rotated = new byte[luminance.length];
-                for (int y = 0; y < size.height; y++) {
-                    for (int x = 0; x < size.width; x++) {
-                        rotated[x * size.height + size.height - 1 - y] = luminance[y * size.width + x];
+                for (int y = 0; y < height; y++) {
+                    for (int x = 0; x < width; x++) {
+                        rotated[x * height + height - 1 - y] = luminance[y * width + x];
                     }
                 }
-                value = decode(rotated, size.height, size.width);
+                value = decode(rotated, height, width);
             }
             String result = value;
             runOnUiThread(() -> {
@@ -121,10 +130,10 @@ public final class CameraBarcodeActivity extends Activity implements SurfaceHold
         });
     }
 
-    private static String decode(byte[] pixels, int width, int height) {
+    private String decode(byte[] pixels, int width, int height) {
         PlanarYUVLuminanceSource image = new PlanarYUVLuminanceSource(pixels, width, height, 0, 0, width, height, false);
         try {
-            return new MultiFormatReader().decode(new BinaryBitmap(new HybridBinarizer(image))).getText();
+            return reader.decode(new BinaryBitmap(new HybridBinarizer(image))).getText();
         } catch (NotFoundException noBarcode) {
             return null;
         }

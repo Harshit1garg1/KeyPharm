@@ -11,6 +11,8 @@ const columns = ['pallet_ref', 'pallet_epc', 'carton_ref', 'carton_epc', 'sku'];
 const csvLine = sep => new RegExp('(?:^|' + sep + ')(?:"((?:[^"]|"")*)"|([^"' + sep + ']*))(?=' + sep + '|$)', 'g');
 export const normalizeEpc = value => String(value ?? '').trim().toUpperCase();
 export const productSku = value => value === 'Juice' ? 'Physalis' : value;
+export const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]);
+export const displaySource = value => value == null ? value : value === 'C72 hardware' ? 'RFID handheld' : String(value).replace(/\bC72\b/gi, 'UHF');
 
 export const demoSku = sku => ({Physalis:'DEMO-PHY','Tiger Balm':'DEMO-TB',Biotona:'DEMO-BIO'})[sku] ?? sku;
 
@@ -32,10 +34,12 @@ function cells(line, row, sep, size = columns.length) {
 
 export function parseCsvRows(text, headers) {
   if (typeof text !== 'string') throw new Error('Choose a CSV.');
-  const [header,...rows] = text.replace(/^\uFEFF/,'').trim().split(/\r?\n/);
+  const [header,...lines] = text.replace(/^\uFEFF/,'').trim().split(/\r?\n/);
   const sep = [',',';'].find(value => header.toLowerCase().split(value).map(col => col.trim()).join() === headers.join());
+  const rows = sep ? lines.flatMap((line,index) =>
+    !line.replace(new RegExp('[\\s"' + sep + ']', 'g'), '') ? [] : [cells(line,index + 2,sep,headers.length)]) : [];
   if (!sep || !rows.length) throw new Error('Use the template headers and at least one data row.');
-  return rows.map((line,index) => cells(line,index + 2,sep,headers.length));
+  return rows;
 }
 
 // Manifest built on the handheld from one scan: the chosen pallet tag, every other kept EPC as a numbered carton.
@@ -224,7 +228,7 @@ export function dashboardSnapshot(store, includeOtherRecords = false) {
   })};
 }
 
-const csvCell = value => {
+export const csvCell = value => {
   let str = String(value ?? '');
   // Plain numbers such as RSSI -55 are not formulas; keep them numeric for Excel.
   if (!/^-?\d+(\.\d+)?$/.test(str) && (/^[\s\u0000-\u001f]*[=+@-]/.test(str) || /^[\t\r\n]/.test(str))) str = "'" + str;

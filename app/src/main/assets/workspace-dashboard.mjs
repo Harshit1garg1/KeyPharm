@@ -1,14 +1,15 @@
-import {movementControls,receiptCartonDetails,stockPage} from './stock-dashboard.mjs';
+import {escapeHtml as escape} from './model.mjs';
+import {movementControls,receiptCartonDetails,reportsCard,stockPage} from './stock-dashboard.mjs';
 
-const escape = value => String(value ?? '').replace(/[&<>"']/g, ch =>
-  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]);
 const nav = document.querySelector('#dashboard-nav');
 const workspaceSections = [
-  ['inbound','Inbound','nav-inventory'],['inventory','Inventory','nav-inventory'],['counts','Stock counts','nav-scans'],
-  ['manage','Session controls','nav-manage'],['manifests','Generate manifest','nav-manage'],['devices','Devices','nav-pallets'],['reports','Reports','nav-sessions']
+  ['inventory','Inventory','nav-inventory','inventory,inbound,counts'],
+  ['manage','Outbound','nav-manage','manage,manifests'],
+  ['devices','Devices & Setup','nav-pallets','devices']
 ];
+const allWorkspaceKeys = new Set(['inventory','inbound','counts','manage','manifests','devices']);
 const section = () => location.hash.slice(1);
-const isWorkspace = () => workspaceSections.some(([key]) => key === section());
+const isWorkspace = () => allWorkspaceKeys.has(section());
 const roleNames = {admin:'Administrator',operator:'Operator',supervisor:'Supervisor',reviewer:'Reviewer'};
 const roleKey = 'keypharm-dashboard-role';
 let role = sessionStorage.getItem(roleKey);
@@ -18,24 +19,32 @@ rolePicker.id = 'dashboard-role';
 rolePicker.setAttribute('aria-label','Role');
 for (const [value,label] of Object.entries(roleNames)) rolePicker.add(new Option(label,value));
 rolePicker.value = role;
-document.querySelector('.dashboard-toolbar-actions').prepend(rolePicker);
-for (const [target,label,icon] of workspaceSections) {
+const devicePill = document.createElement('a');
+devicePill.id = 'workspace-device-pill';
+devicePill.href = '#devices';
+devicePill.className = 'status device-status';
+devicePill.hidden = true;
+document.querySelector('.dashboard-toolbar-actions').prepend(devicePill,rolePicker);
+for (const [target,label,icon,aliases] of workspaceSections) {
   const link = document.createElement('a');
   link.href = '#' + target;
   link.dataset.workspaceTitle = label;
+  link.dataset.workspaceAliases = aliases;
   const mark = document.createElement('span');
   mark.className = 'nav-icon ' + icon;
   mark.setAttribute('aria-hidden','true');
   link.append(mark,label);
-  nav.insertBefore(link,nav.querySelector('[href="#activity"]'));
+  const anchor = target === 'devices' ? '[href="#activity"]' : '[href="#sessions"]';
+  nav.insertBefore(link,nav.querySelector(anchor));
 }
 const panel = document.createElement('section');
 panel.id = 'workspace-panel';
 panel.className = 'panel workspace-panel';
 panel.hidden = true;
 document.querySelector('#catalog').after(panel);
+const overviewReports = document.querySelector('#overview-reports');
 let data, stockData, product = 'Physalis';
-let stockSelection = '', inventoryLocation = '', history, historyRequest = 0;
+let stockSelection = '', inventoryLocation = '', outboundPanel = '', history, historyRequest = 0;
 let receiptPreview, receiptCsv;
 const selectedSessions = new Set();
 let dispatchState = 'idle';
@@ -96,25 +105,43 @@ function validateCsvSelection(input) {
   showCsvSelection(input);
 }
 
+function inventoryTabs(current) {
+  const tasks = stockData?.tasks.filter(item => item.status !== 'Cancelled') ?? [];
+  const counts = {
+    inventory:data.inventory.length,
+    inbound:tasks.filter(item => item.type === 'receipt').length,
+    counts:tasks.filter(item => item.type === 'count').length
+  };
+  return '<nav class="workspace-subtabs" aria-label="Inventory views">' +
+    [['inventory','Stock'],['inbound','Inbound'],['counts','Stock counts']].map(([key,label]) =>
+      '<a href="#' + key + '"' + (current === key ? ' aria-current="page"' : '') + '>' + label +
+      ' <span class="tab-count">' + counts[key] + '</span></a>').join('') +
+    '</nav>';
+}
+
 function inventory() {
   const stock = inventoryLocation ? data.inventory.filter(c => c.location === inventoryLocation) : data.inventory;
   const products = ['Physalis','Tiger Balm','Biotona'];
+  let totalOnHand = 0, totalDispatched = 0;
   const rows = products.map(sku => {
     const set = stock.filter(c => c.sku === sku);
     const dispatched = set.filter(c => c.state === 'dispatched').length;
+    const onHand = set.length - dispatched;
+    totalOnHand += onHand;
+    totalDispatched += dispatched;
     const expanded = product === sku;
     return '<tr class="workspace-stock-row" data-product="' + escape(sku) + '"' + (expanded ? ' data-expanded' : '') +
       '><td class="workspace-stock-expand"><button class="workspace-row-arrow" type="button" aria-expanded="' + expanded +
       '" aria-controls="inventory-cartons" aria-label="' + (expanded ? 'Hide ' : 'View ') + escape(sku) +
-      ' cartons"></button></td><th scope="row">' + escape(sku) + '</th><td>' + (set.length - dispatched) + '</td><td>' + dispatched +
+      ' cartons"></button></td><th scope="row">' + escape(sku) + '</th><td>' + onHand + '</td><td>' + dispatched +
       '</td></tr>';
   }).join('');
   return '<label class="stock-filter">Location<select id="inventory-location"><option value="">All locations</option>' +
     (stockData?.locations ?? []).map(location => '<option' + (location === inventoryLocation ? ' selected' : '') + '>' + escape(location) + '</option>').join('') +
-    '</select></label><div class="workspace-inventory"><div class="workspace-table"><table><caption>Carton stock</caption><thead><tr>' +
+    '</select></label><div class="workspace-inventory"><div class="workspace-table"><table><caption>Carton stock (' + stock.length + ')</caption><thead><tr>' +
     '<th scope="col" aria-label="Carton details" class="workspace-stock-expand"></th><th scope="col">Product</th>' +
     '<th scope="col">On hand</th><th scope="col">Dispatched</th></tr></thead><tbody>' + rows +
-    '</tbody></table></div><section id="inventory-cartons" aria-labelledby="inventory-cartons-title"' +
+    '</tbody><tfoot><tr class="workspace-stock-total"><td></td><th scope="row">Total</th><td>' + totalOnHand + '</td><td>' + totalDispatched + '</td></tr></tfoot></table></div><section id="inventory-cartons" aria-labelledby="inventory-cartons-title"' +
     (product ? '>' + cartonDetails(product,stock.filter(c => c.sku === product)) : ' hidden>') + '</section></div>';
 }
 function cartonDetails(sku,cartons) {
@@ -125,7 +152,7 @@ function cartonDetails(sku,cartons) {
       escape(entry.ref) + ' · ' + escape(entry.actor) + ' · ' + escape(new Date(entry.at).toLocaleString()) +
       (entry.reason ? '<br>' + escape(entry.reason) : '') + '</li>').join('') + '</ul>' : '<p>No movements recorded.</p>') +
     movementControls(active,data.user.role,stockData.locations) + '</div>' : '';
-  return '<h2 id="inventory-cartons-title">' + escape(sku) + ' cartons</h2>' + events + '<div class="workspace-table"><table>' +
+  return '<h2 id="inventory-cartons-title">' + escape(sku) + ' cartons (' + cartons.length + ')</h2>' + events + '<div class="workspace-table"><table>' +
     '<thead><tr><th scope="col">Carton</th><th scope="col">EPC</th><th scope="col">Location</th><th scope="col">Tag source</th><th scope="col">Stock status</th></tr></thead><tbody>' +
     cartons.map(c => '<tr><th scope="row"><button type="button" data-carton="' + escape(c.epc) + '">' + escape(c.carton) +
       '</button></th><td><code>' + escape(c.epc) + '</code></td><td>' + escape(c.location) + '</td><td>' +
@@ -169,7 +196,7 @@ function outboundTable() {
       (pallets.length > 1 && !s.dispatchedAt ? '<small class="dispatch-block-reason">' + progress + ' of ' + pallets.length + ' pallets matched</small>' : '') +
       '</td><td>' + dispatchButton + '</td><td>' + more + '</td></tr>';
   }).join('');
-  return '<div class="row spread line"><h2>Outbound sessions</h2><div class="row">' +
+  return '<div class="row spread line"><h2>Outbound sessions (' + data.sessions.length + ')</h2><div class="row">' +
     (canConfirmDispatch ? '<button type="button" class="primary-button dispatch-button" data-action="dispatch" data-dispatch-batch disabled>' +
       '<span class="dispatch-indicator" aria-hidden="true"></span><span class="dispatch-label">Confirm dispatch</span></button>' : '') +
     (rows ? '<a href="api/evidence.csv" download>Export evidence CSV</a>' : '') + '</div></div>' +
@@ -192,7 +219,7 @@ function manifestSettings() {
   const request = devices.length ? form('request','<label>Pallet reference<input name="reference" required maxlength="80"></label>' +
     '<label>Handheld<select name="deviceId">' + devices.map(device => '<option value="' + esc(device.deviceId) + '">RFID handheld ' +
       esc(device.deviceId) + '</option>').join('') + '</select></label>' + submit('Request pallet scan')) : '<p>No handheld is connected.</p>';
-  const chooser = drafts.length ? '<label>Manifest requests<select id="manifest-selection">' + drafts.map(item =>
+  const chooser = drafts.length ? '<label>Manifest requests (' + drafts.length + ')<select id="manifest-selection">' + drafts.map(item =>
     '<option value="' + esc(item.id) + '"' + (draft.id === item.id ? ' selected' : '') + '>' +
     esc(item.reference + ' · ' + item.status) + '</option>').join('') + '</select></label>' : '';
   const table = (rows,selectable) => '<div class="workspace-table"><table><thead><tr>' + (selectable ? '<th scope="col">Select</th>' : '') +
@@ -222,30 +249,32 @@ function manifestSettings() {
     const available = data.inventory.filter(carton => carton.state === 'available' && !assigned.has(carton.epc));
     const preview = manifestPreview?.id === draft.id ? manifestPreview.epcs.map(epc => available.find(item => item.epc === epc)) : [];
     detail = preview.length && preview.every(Boolean) ?
-      '<h3>Preview pickup list</h3>' + table(preview,false) + form('generate',hiddenId +
+      '<h3>Preview pickup list (' + preview.length + ')</h3>' + table(preview,false) + form('generate',hiddenId +
         preview.map(carton => '<input type="hidden" name="epc" value="' + esc(carton.epc) + '"><input type="hidden" name="locationAtPreview" value="' + esc(carton.location) + '">').join('') +
         submit('Generate manifest') + '<button type="button" data-edit-manifest>Edit selection</button>') :
-      '<h3>Available cartons</h3>' + (available.length ? form('preview',hiddenId + table(available,true) + submit('Preview manifest')) :
+      '<h3>Available cartons (' + available.length + ')</h3>' + (available.length ? form('preview',hiddenId + table(available,true) + submit('Preview manifest')) :
         '<p>No cartons are available.</p>');
   } else if (draft?.csv) {
     detail = '<p><a href="api/pallet-manifest.csv?id=' + encodeURIComponent(draft.id) + '" download data-manifest-download>Download CSV</a></p>' +
-      (draft.sessionId ? '<p><a href="#sessions/' + encodeURIComponent(draft.sessionId) + '">Open session</a></p>' : form('session',hiddenId +
+      (draft.sessionId ? (draft.sessionRemovedAt ? '<p class="muted">Session removed.</p>' :
+        '<p><a href="#sessions/' + encodeURIComponent(draft.sessionId) + '">Open session</a></p>') : form('session',hiddenId +
         '<label>Test ID<input name="testId" required maxlength="80" value="' + esc(draft.reference) + '"></label>' +
         '<label>Location<input name="location" required value="Staging" maxlength="100"></label>' + submit('Create session from manifest')) +
       addPallet);
   }
-  return '<a href="#manage">Session controls</a>' + request + chooser + (draft ?
+  return request + chooser + (draft ?
     '<section class="line"><h3>' + esc(draft.reference) + '</h3><p>' + esc(draft.status) + ' · RFID handheld ' + esc(draft.deviceId) +
     (draft.scanReference ? ' · ' + esc(draft.scanReference) : '') +
     (draft.palletEpc ? ' · <code>' + esc(draft.palletEpc) + '</code>' : '') + '</p>' + palletList + detail +
     form('cancel',hiddenId + '<button>Remove pallet manifest</button>') + '</section>' : '');
 }
-function manage() {
+function adminSettings() {
+  if (data.user.role !== 'admin') return '';
   const setting = data.controls;
-  const controlsForm = '<details id="workspace-lead-settings" class="dashboard-fold"' +
+  return '<details id="workspace-lead-settings" class="dashboard-fold"' +
     (panel.querySelector('#workspace-lead-settings[open]') ? ' open' : '') + '><summary><span>Administrator settings</span></summary>' +
     '<div class="dashboard-fold-body"><form id="workspace-settings">' +
-    '<div class="workspace-fields"><label>Test plan<textarea name="plan" rows="3" placeholder="Test ID and description">' +
+    '<div class="workspace-fields"><label class="workspace-field-wide">Test plan<textarea name="plan" rows="3" placeholder="Test ID and description">' +
     escape(setting.plan.map(item => [item.id,item.title].filter(Boolean).join(' ')).join('\n')) + '</textarea></label>' +
     '<label>Requested Power (dBm)<input type="number" min="5" max="30" step="1" name="power" placeholder="30" value="' +
     escape(setting.power?.requested ?? '') + '"></label>' +
@@ -256,15 +285,22 @@ function manage() {
     '<label>LookUp Power (dBm)<input name="lookupPower" type="number" min="5" max="30" step="1" placeholder="Use session power" value="' +
     escape(setting.lookupPower ?? '') + '"></label></div>' +
     '<div class="row workspace-actions"><button class="primary-button">Save test settings</button></div></form>' +
-    '<div class="line"><button type="button" data-action="reset">Reset demo data</button></div></div></details>';
-  return (data.user.role === 'admin' ? '<p><a href="#manifests">Generate manifest</a></p><form id="workspace-create"><h2>New session</h2><div class="workspace-fields">' +
-    '<label>Test ID<input name="testId" maxlength="80" required></label><label>Location<input name="location" maxlength="100" value="Staging" required></label>' +
-    '<label>Reader source<select name="source"><option>Simulation</option><option value="C72 hardware">RFID handheld</option></select></label></div>' +
-    '<div class="workspace-create-actions"><div class="workspace-csv-choice">' + csvPicker('create-csv-status') +
-    '<span class="workspace-csv-divider" aria-hidden="true">&#92;</span>' +
-    '<button type="button" data-action="sample" aria-pressed="false">Use Sample CSV</button></div>' +
-    '<button class="primary-button">Create session</button></div></form>' +
-    controlsForm : '') + outboundTable();
+    '<div class="workspace-reset-row"><button type="button" data-action="reset">Reset demo data</button></div></div></details>';
+}
+
+function manage() {
+  const adminTools = data.user.role === 'admin' ? '<div class="workspace-section-actions">' +
+    '<button type="button" data-outbound-panel="create" aria-pressed="' + (outboundPanel === 'create') + '">+ New session</button>' +
+    '<button type="button" data-outbound-panel="manifest" aria-pressed="' + (outboundPanel === 'manifest') + '">+ Build manifest</button></div>' +
+    (outboundPanel === 'create' ? '<div class="workspace-outbound-tools"><form id="workspace-create"><h2>New session</h2><div class="workspace-fields">' +
+      '<label>Test ID<input name="testId" maxlength="80" required></label><label>Location<input name="location" maxlength="100" value="Staging" required></label>' +
+      '<label>Reader source<select name="source"><option>Simulation</option><option value="C72 hardware">RFID handheld</option></select></label></div>' +
+      '<div class="workspace-create-actions"><div class="workspace-csv-choice">' + csvPicker('create-csv-status') +
+      '<span class="workspace-csv-divider" aria-hidden="true">&#92;</span>' +
+      '<button type="button" data-action="sample" aria-pressed="false">Use Sample CSV</button></div>' +
+      '<button class="primary-button">Create session</button></div></form></div>' :
+    outboundPanel === 'manifest' ? '<div class="workspace-outbound-tools">' + manifestSettings() + '</div>' : '') : '';
+  return adminTools + outboundTable();
 }
 let message = '';
 const milestones = {
@@ -275,7 +311,7 @@ const milestones = {
   receive:['Receipt confirmed','Inventory is updated.'],
   review:['Count reviewed','Scan evidence is saved.'],
   'cancel-count':['Count cancelled','You can open a fresh count for this location.'],
-  outbound:['Pallet prepared','Open it in Session controls.'],
+  outbound:['Pallet prepared','Open it in Outbound.'],
   reset:['Demo data reset','Starting inventory restored.']
 };
 const confirmation = document.createElement('dialog');
@@ -284,10 +320,35 @@ confirmation.setAttribute('aria-labelledby','workspace-confirm-title');
 confirmation.innerHTML = '<span class="workflow-tick" aria-hidden="true"></span><h2 id="workspace-confirm-title"></h2>' +
   '<p></p><form method="dialog"><button>Done</button></form>';
 panel.after(confirmation);
+function updateDevicePill() {
+  const devices = stockData?.devices ?? data?.devices ?? (stockData?.device ? [stockData.device] : []);
+  if (!data && !stockData) { devicePill.hidden = true; return; }
+  const live = devices.filter(device => device?.lastContact && Date.now() - Date.parse(device.lastContact) < 60_000);
+  const label = live.length === 1 ? 'Handheld · ' + (live[0].deviceId || 'Live') :
+    live.length > 1 ? live.length + ' handhelds live' : devices.length ? 'Handheld · Offline' : 'No handheld';
+  devicePill.hidden = false;
+  devicePill.className = 'status device-status' + (live.length ? ' live' : '');
+  devicePill.textContent = label;
+  devicePill.title = label;
+}
 const render = () => {
+  updateDevicePill();
+  if (overviewReports) {
+    if (stockData) {
+      if (!overviewReports.hasChildNodes()) overviewReports.innerHTML = reportsCard();
+      overviewReports.hidden = false;
+    } else {
+      overviewReports.hidden = true;
+    }
+  }
   if (!data) { panel.textContent = message || 'Loading workspace…'; return; }
-  panel.innerHTML = '<p id="workspace-message" role="status">' + escape(message) + '</p>' +
-    (section() === 'inventory' ? inventory() : section() === 'manage' ? manage() : section() === 'manifests' ? manifestSettings() : stockPage(section(),data,stockData,stockSelection,receiptPreview)) +
+  const current = section();
+  const body = current === 'inventory' ? inventoryTabs(current) + inventory() :
+    ['inbound','counts'].includes(current) ? inventoryTabs(current) + stockPage(current,data,stockData,stockSelection,receiptPreview) :
+    ['manage','manifests'].includes(current) ? manage() :
+    current === 'devices' ? adminSettings() + stockPage('devices',data,stockData,stockSelection,receiptPreview) :
+    stockPage(current,data,stockData,stockSelection,receiptPreview);
+  panel.innerHTML = '<p id="workspace-message" role="status">' + escape(message) + '</p>' + body +
     '<dialog id="workspace-dialog" aria-labelledby="workspace-dialog-title"><form method="dialog" id="workspace-dialog-form">' +
     '<h2 id="workspace-dialog-title"></h2><p></p><div class="workspace-dialog-fields"></div>' +
     '<div class="row workspace-actions"><button value="cancel" formnovalidate>Cancel</button>' +
@@ -318,7 +379,8 @@ function canRefreshInBackground() {
   return !mutating && (isWorkspace() || ['','overview'].includes(section())) && !panel.contains(document.activeElement) &&
     !confirmation.open && !panel.querySelector('dialog[open], :popover-open') && !panel.querySelector('input[type=file]')?.files.length &&
     !panel.querySelector('[data-csv-drop][data-dragging], [data-csv-drop][data-error]') &&
-    ![...panel.querySelectorAll('input:not([type=file]),textarea')].some(input => input.value !== input.defaultValue) &&
+    ![...panel.querySelectorAll('input:not([type=file]),textarea')].some(input =>
+      input.type === 'checkbox' || input.type === 'radio' ? input.checked !== input.defaultChecked : input.value !== input.defaultValue) &&
     !panel.querySelector('[data-action="sample"][aria-pressed="true"]');
 }
 async function load(background = false) {
@@ -354,6 +416,7 @@ async function mutate(path, payload) {
   try {
     result = await readApi(path,{...payload,generation:data.generation});
     if (path === 'api/pallet-manifest') { manifestSelected = result.id; manifestPreview = undefined; }
+    if (path === 'api/session') outboundPanel = '';
     if (['count','receipt'].includes(payload.action) && result.id) stockSelection = result.id;
     if (payload.action === 'receipt') { receiptPreview = receiptCsv = undefined; }
     if (['transfer','hold','release'].includes(payload.action) && history?.epc === payload.epc) {
@@ -364,7 +427,7 @@ async function mutate(path, payload) {
   }
   catch (error) {
     message = error.message;
-    if (path === 'api/session' && section() === 'manage') {
+    if (path === 'api/session' && ['manage','manifests'].includes(section())) {
       panel.querySelector('#workspace-message').textContent = message;
       mutating = rolePicker.disabled = false;
       return;
@@ -412,6 +475,14 @@ panel.addEventListener('click', async event => {
       download.click();
       setTimeout(() => URL.revokeObjectURL(url),1000);
     } catch (error) { panel.querySelector('#workspace-message').textContent = error.message; }
+    return;
+  }
+  const togglePanel = event.target.closest('[data-outbound-panel]');
+  if (togglePanel) {
+    const next = togglePanel.dataset.outboundPanel;
+    outboundPanel = outboundPanel === next ? '' : next;
+    message = '';
+    render();
     return;
   }
   if (!event.target.closest('[data-edit-manifest]')) return;
@@ -652,7 +723,8 @@ panel.addEventListener('drop',event => {
 });
 window.addEventListener('hashchange',() => {
   message = '';
-  if (isWorkspace() || ['', 'overview'].includes(section())) void load();
+  if (section() === 'manifests') outboundPanel = 'manifest';
+  if (isWorkspace() || ['', 'overview', 'reports'].includes(section())) void load();
 });
 rolePicker.addEventListener('change',() => {
   role = rolePicker.value;

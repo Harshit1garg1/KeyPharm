@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
+import {DatabaseSync} from 'node:sqlite';
 import {randomUUID} from 'node:crypto';
 import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -435,4 +436,142 @@ test('saved pallets retain exclusive carton assignments when moved between manif
     db.action(lead,{id:sessionId,revision:session.workspaceRevision,action:'remove',confirmed:true});
     assert.equal(db.assignedCartonEpcs().length,0);
   } finally { db.close(); }
+});
+
+test('removing session unlinks draft, allows Test ID reuse, ready manifests lock cartons, and add-existing updates reference', () => {
+  const db = createWorkspace(':memory:');
+  try {
+    const [first,second] = db.inventory();
+    const device = 'demo-handheld';
+    const command = (action,fields) => db.palletManifest(lead,{action,...fields},undefined,[device]);
+    const scan = (id,epc,scanReference) => db.palletManifest(operator,{action:'scan',id,epc,scanReference},device,[device]);
+    const idA = command('request',{reference:'PAL-FIRST',deviceId:device}).id;
+    scan(idA,'AD0001');
+    command('generate',{id:idA,epcs:[first.epc],locations:[first.location]});
+    const receiptCsv = 'receipt_ref,source_ref,destination_location,sku,expected_cartons,carton_id,epc,product_identifier\nIN-LOCK,Supplier,Storage,Physalis,1,,,SUP-LOCK';
+    const receipt = db.stockCommand(lead,{action:'receipt',operationId:randomUUID(),csv:receiptCsv});
+    const tagged = db.stockCommand(operator,{action:'receive-carton',operationId:randomUUID(),id:receipt.id,revision:receipt.revision,identifier:'SUP-LOCK',epc:'AD0010'});
+    const idB = command('request',{reference:'PAL-SECOND',deviceId:device}).id;
+    scan(idB,'AD0002');
+    command('generate',{id:idB,epcs:['AD0010'],locations:['Storage']});
+    assert.throws(() => db.stockCommand(lead,{action:'untag',operationId:randomUUID(),id:tagged.id,revision:tagged.revision,epc:'AD0010',reason:'Blocked'}),/manifest|outbound/i);
+    assert.throws(() => db.create(lead,{testId:'MANUAL-DUP',location:'Staging',source:'Simulation',
+      csv:'pallet_ref,pallet_epc,carton_ref,carton_epc,sku\nP,AD0099,C1,AD0010,Physalis'}),/manifest/i);
+    command('add-pallet',{id:idB,reference:'PAL-KEEP'});
+    scan(idB,'AD0003','PAL-KEEP');
+    command('generate',{id:idB,epcs:[second.epc],locations:[second.location]});
+    command('add-existing',{id:idA,palletEpc:'AD0002'});
+    assert.equal(db.palletManifests().find(d => d.id === idB).reference,'PAL-KEEP');
+    const created = command('session',{id:idA,testId:'REUSE-ME',location:'Staging'});
+    const s = db.records().sessions.find(row => row.id === created.sessionId);
+    db.action(lead,{id:s.id,revision:s.workspaceRevision,action:'remove',confirmed:true});
+    const unlinked = db.palletManifests().find(d => d.id === idA);
+    assert.equal(unlinked.status,'Manifest ready');
+    assert.equal(unlinked.sessionId,undefined);
+    const createdAgain = command('session',{id:idA,testId:'REUSE-ME',location:'Staging'});
+    assert.equal(db.records().sessions.find(row => row.id === createdAgain.sessionId).testId,'REUSE-ME');
+  } finally { db.close(); }
+});
+
+test('workspaceClient unblocks role switching when settings save hits 409 conflict', async t => {
+  const prefix = 'keypharm-connected-v1';
+  const stored = new Map([
+    [prefix + '-generation','1'],
+    [prefix + '-auth',JSON.stringify({token:'demo',user:{...lead,canSwitch:true}})],
+    [prefix + '-samples',JSON.stringify({Simulation:'demo','C72 hardware':'demo'})],
+  ]);
+  const previous = Object.getOwnPropertyDescriptor(globalThis,'localStorage');
+  Object.defineProperty(globalThis,'localStorage',{configurable:true,value:{
+    getItem:key => stored.get(key) ?? null, setItem:(key,value) => stored.set(key,value)
+  }});
+  t.after(() => {
+    if (previous) Object.defineProperty(globalThis,'localStorage',previous);
+    else delete globalThis.localStorage;
+  });
+  const workspace = {generation:1,controls:{revision:2,plan:[{id:'KP-1',title:'Old'}]},inventory:[],sessions:[]};
+  const client = workspaceClient({workspaceRequest(id,path) {
+    queueMicrotask(() => {
+      if (path === 'settings') {
+        client.receive({id,status:409,body:JSON.stringify({message:'Test controls changed. Refresh and review them.'})});
+      } else client.receive({id,status:200,body:JSON.stringify(workspace)});
+    });
+  }});
+  client.updateControls({plan:'KP-NEW New test'});
+  await client.refresh(() => [],() => {},() => true,() => {},() => {});
+  assert.equal(client.switchTo('operator',[]).role,'operator');
+});
+
+test('multi-table schema persists separate records, backfills legacy DBs, and caps audit activity at 300 rows', () => {
+  const dir = mkdtempSync(join(tmpdir(),'keypharm-schema-'));
+  const file = join(dir,'workspace.sqlite');
+  try {
+    const legacy = new DatabaseSync(file);
+    legacy.exec(`
+      CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE cartons (epc TEXT PRIMARY KEY, carton TEXT NOT NULL, sku TEXT NOT NULL, physical INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'available', reservation TEXT, location TEXT NOT NULL DEFAULT 'Staging', batch_lot TEXT, units_per_carton INTEGER);
+      CREATE TABLE pallet_manifests (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+      CREATE TABLE sessions (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, body TEXT NOT NULL);
+      CREATE TABLE operations (id TEXT PRIMARY KEY, actor TEXT NOT NULL, session TEXT NOT NULL);
+      CREATE TABLE audit (id INTEGER PRIMARY KEY, at TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, session TEXT NOT NULL);
+      CREATE TABLE stock_tasks (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, body TEXT NOT NULL);
+      CREATE TABLE stock_commands (id TEXT PRIMARY KEY, actor TEXT NOT NULL, body TEXT NOT NULL);
+      CREATE TABLE stock_mappings (epc TEXT PRIMARY KEY);
+      CREATE TABLE stock_events (id INTEGER PRIMARY KEY, at TEXT NOT NULL, actor TEXT NOT NULL, ref TEXT NOT NULL, epc TEXT NOT NULL, action TEXT NOT NULL, before_state TEXT NOT NULL, after_state TEXT NOT NULL, reason TEXT NOT NULL, source TEXT NOT NULL);
+    `);
+    legacy.prepare('INSERT INTO settings VALUES (?,?)').run('sample','pallet_ref,pallet_epc,carton_ref,carton_epc,sku\nP,D401,Physalis-S-01,D30001,Physalis\n');
+    legacy.prepare('INSERT INTO settings VALUES (?,?)').run('physical','');
+    legacy.prepare('INSERT INTO cartons VALUES (?,?,?,?,?,?,?,?,?)').run('D30001','Physalis-S-01','Physalis',0,'available',null,'Staging',null,null);
+    const oldSession = {
+      id:'11111111-1111-4111-8111-111111111111', testId:'LEGACY-01', location:'Staging', source:'Simulation',
+      manifest:{revision:1,source:'Sample CSV',pallet:'P',palletEpc:'D401',cartons:[{epc:'D30001',carton:'Physalis-S-01',sku:'Physalis'}],pallets:[{pallet:'P',palletEpc:'D401',cartons:[{epc:'D30001',carton:'Physalis-S-01',sku:'Physalis'}]}]},
+      palletAttempts:[{id:'att-1',actor:'Operator',startedAt:'2026-11-26T08:00:00Z',endedAt:'2026-11-26T08:00:01Z',result:'Identified',lockedPallet:'P',palletEpc:'D401',manifestRevision:1,observations:{D401:{count:1,rssi:-50}}}],
+      runs:[{id:'run-1',palletEpc:'D401',manifestRevision:1,operator:'Operator',source:'Simulation',state:'Finished',startedAt:'2026-11-26T08:01:00Z',endedAt:'2026-11-26T08:01:02Z',elapsedSeconds:2,observations:{D30001:{count:2,rssi:-48}},result:{status:'Match',expected:1,matched:['D30001'],missing:[],extra:[],percent:100}}],
+      logs:[]
+    };
+    legacy.prepare('INSERT INTO sessions VALUES (?,?,?)').run(oldSession.id,1,JSON.stringify(oldSession));
+    legacy.prepare('INSERT INTO stock_tasks VALUES (?,?,?)').run('CNT-1',1,JSON.stringify({
+      id:'CNT-1',type:'count',reference:'Count Staging',location:'Staging',status:'In progress',expected:[{epc:'D30001'}],
+      runs:[{id:'srun-1',at:'2026-11-26T08:05:00Z',actor:'Operator',source:'Simulation',observations:{D30001:1},found:['D30001'],missing:[],unexpected:[],unknown:[]}]
+    }));
+    const insAudit = legacy.prepare('INSERT INTO audit (at,actor,action,session) VALUES (?,?,?,?)');
+    for (let i = 1; i <= 305; i++) insAudit.run('2026-11-26T08:00:00Z','testing','Old ' + i,oldSession.id);
+    legacy.close();
+
+    const db = createWorkspace(file);
+    try {
+      db.recordDevice('a01234',operator);
+    } finally { db.close(); }
+
+    const reopened = createWorkspace(file);
+    try {
+      assert.deepEqual(reopened.devices().map(d => d.deviceId),['a01234']);
+      const receiptCsv = 'receipt_ref,source_ref,destination_location,sku,expected_cartons,carton_id,epc,product_identifier\nIN-ARC,Supplier,Storage,Physalis,1,,,SUP-ARC';
+      const r = reopened.stockCommand(lead,{action:'receipt',operationId:randomUUID(),csv:receiptCsv});
+      const t = reopened.stockCommand(operator,{action:'receive-carton',operationId:randomUUID(),id:r.id,revision:r.revision,identifier:'SUP-ARC',epc:'AE0099'});
+      reopened.stockCommand(lead,{action:'untag',operationId:randomUUID(),id:t.id,revision:t.revision,epc:'AE0099',reason:'Archive check'});
+      for (let i = 1; i <= 10; i++) {
+        reopened.setControls(lead,{revision:reopened.settings().revision,operationId:randomUUID(),power:10 + (i % 15)});
+      }
+    } finally { reopened.close(); }
+
+    const raw = new DatabaseSync(file,{readOnly:true});
+    try {
+      assert.equal(raw.prepare('SELECT COUNT(*) AS n FROM manifest_revisions WHERE session_id=?').get('11111111-1111-4111-8111-111111111111').n,1);
+      assert.equal(raw.prepare('SELECT COUNT(*) AS n FROM pallet_attempts WHERE id=?').get('att-1').n,1);
+      assert.equal(raw.prepare('SELECT status, matched_count FROM scan_runs WHERE id=?').get('run-1').status,'Match');
+      assert.equal(raw.prepare('SELECT outcome, read_count FROM scan_observations WHERE run_id=? AND epc=?').get('run-1','D30001').outcome,'matched');
+      assert.equal(raw.prepare('SELECT COUNT(*) AS n FROM stock_task_runs WHERE id=?').get('srun-1').n,1);
+      assert.equal(raw.prepare('SELECT reason FROM carton_archive WHERE epc=?').get('AE0099').reason,'Archive check');
+      assert.equal(raw.prepare('SELECT COUNT(*) AS n FROM settings_history').get().n,10);
+      assert.equal(raw.prepare('SELECT COUNT(*) AS n FROM audit').get().n,300);
+      assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM audit WHERE action='Old 1'").get().n,0);
+      assert.ok(raw.prepare("SELECT role, actor_name FROM audit WHERE action='Settings updated' ORDER BY id DESC LIMIT 1").get().role === 'admin');
+    } finally { raw.close(); }
+
+    const cleared = createWorkspace(file);
+    try {
+      cleared.reset(lead,{confirm:'RESET',generation:cleared.generation()});
+      assert.equal(cleared.devices().length,0);
+    } finally { cleared.close(); }
+  } finally { rmSync(dir,{recursive:true,force:true}); }
 });

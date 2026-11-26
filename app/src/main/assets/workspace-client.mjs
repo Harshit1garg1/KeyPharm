@@ -194,11 +194,19 @@ export function workspaceClient(bridge) {
         const sent = controlsChange;
         const powerOnly = (sent.sessionPowers || sent.stockPower !== undefined) && sent.plan === undefined && sent.applied === undefined;
         const revision = powerOnly ? workspace.controls.revision : sent.revision;
-        client.controls = await request('settings',{...sent,revision,generation});
-        uploaded = true;
-        if (controlsChange === sent) controlsChange = null;
-        else controlsChange.revision = client.controls.revision;
-        write('-controls-change',controlsChange);
+        try {
+          client.controls = await request('settings',{...sent,revision,generation});
+          uploaded = true;
+          if (controlsChange === sent) controlsChange = null;
+          else controlsChange.revision = client.controls.revision;
+          write('-controls-change',controlsChange);
+        } catch (error) {
+          if (error.status === 409) {
+            if (controlsChange === sent) controlsChange = null;
+            write('-controls-change',controlsChange);
+          }
+          throw error;
+        }
       }
       if (uploaded) workspace = await request('workspace');
       if (!safe()) return;

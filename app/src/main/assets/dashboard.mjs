@@ -1,3 +1,4 @@
+import {displaySource, escapeHtml as escape, manifestFor} from './model.mjs';
 import {indexRecords, RECENT_LIMIT, sections} from './dashboard-model.mjs';
 
 const find = selector => document.querySelector(selector);
@@ -33,7 +34,6 @@ let previousBody;
 let inFlight = false;
 let stockOverview;
 
-const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]);
 const count = new Intl.NumberFormat();
 const formattedTime = new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short'});
 const time = value => Number.isFinite(Date.parse(value)) ? formattedTime.format(new Date(value)) : '';
@@ -52,7 +52,7 @@ const logBody = log => '<strong>' + escape(log.action) + '</strong><br>' + escap
 
 function updateOverview() {
   const displayCount = n => previousBody === undefined ? '—' : count.format(n);
-  find('#totals').innerHTML = ['sessions','pallets','scans','exceptions'].map(key =>
+  find('#totals').innerHTML = ['sessions','pallets','scans','exceptions','activity'].map(key =>
     '<a class="dashboard-total" href="#' + key + '"><span>' + sections[key].title + '</span><strong data-total="' +
     key + '">' + displayCount(data.rows[key].length) + '</strong>' +
     (key === 'sessions' && previousBody !== undefined ?
@@ -60,6 +60,15 @@ function updateOverview() {
     '</a>').join('') + (stockOverview ? [['inventory','Cartons on hand'],['inbound','Open receipts'],['counts','Counts to review']]
       .map(([key,label]) => '<a class="dashboard-total" href="#' + key + '"><span>' + label + '</span><strong data-total="' + key +
         '">' + count.format(stockOverview[key]) + '</strong></a>').join('') : '');
+  for (const chip of document.querySelectorAll('#catalog-tabs [data-tab-count]')) {
+    const key = chip.dataset.tabCount;
+    chip.textContent = displayCount(data.rows[key]?.length ?? 0);
+  }
+  const sessionsCount = find('#recent-sessions-count');
+  if (sessionsCount) {
+    sessionsCount.hidden = previousBody === undefined;
+    sessionsCount.textContent = count.format(data.rows.sessions.length);
+  }
   const scans = data.rows.scans.length;
   find('#outcomes').innerHTML = Object.entries(data.results).map(([state,total]) =>
     '<div class="outcome-row" data-state="' + state.toLowerCase() + '"><div class="row spread"><strong>' + state +
@@ -68,7 +77,7 @@ function updateOverview() {
   const sessions = data.rows.sessions.slice(0,6);
   find('#recent-sessions').innerHTML = sessions.map(row =>
     '<tr><th scope="row"><a href="#sessions/' + escape(encodeURIComponent(row.id)) + '">' + escape(row.title) +
-    '</a></th><td>' + escape(row.session.manifest?.pallet ?? '—') + '</td><td>' + escape(row.session.source ?? '—') +
+    '</a></th><td>' + escape(row.session.manifest?.pallet ?? '—') + '</td><td>' + escape(displaySource(row.session.source) ?? '—') +
     '</td><td>' + badge(row.status) + '</td></tr>').join('');
   const empty = find('#sessions-empty');
   empty.hidden = sessions.length > 0;
@@ -83,10 +92,10 @@ function observationDetails(observations) {
 }
 function runEvidence(run) {
   const r = run.result;
-  return facts(['Operator',run.operator],['Source',run.source],['Started',time(run.startedAt)],['Finished',time(run.endedAt)],
+  return facts(['Operator',run.operator],['Source',displaySource(run.source)],['Started',time(run.startedAt)],['Finished',time(run.endedAt)],
     ['Duration',run.elapsedSeconds == null ? null : run.elapsedSeconds + ' s'],['Manifest revision',run.manifestRevision],
     ['Expected',r?.expected],['Matched',r?.matched?.length],['Completeness',r?.percent == null ? null : r.percent + '%'],
-    ['Reader profile',run.profile?.name],['Profile version',run.profile?.version],['Region / power',readerPower(run.profile)],['Reader build',run.profile?.build],
+    ['Reader profile',displaySource(run.profile?.name)],['Profile version',displaySource(run.profile?.version)],['Region / power',readerPower(run.profile)],['Reader build',run.profile?.build],
     ['Rescan reason',run.reason],['Notes',run.note ?? run.notes],['Error',run.error]) +
     fold('Missing EPCs (' + (r?.missing?.length ?? 0) + ')',list(r?.missing,code)) +
     fold('Unexpected EPCs (' + (r?.extra?.length ?? 0) + ')',list(r?.extra,code)) +
@@ -102,7 +111,7 @@ function sessionEvidence(s) {
     ['Label setup',joined(s.label,s.placement)],['Wrapping / shielding',joined(s.wrapping,s.shielding)],
     ['Scan method',s.method],['Created',time(s.createdAt)],['Created by',s.creator],['Verified by',s.verifiedBy],
     ['Sign-off',s.closure?.actor],['Coverage',s.closure?.coverage],['Setup notes',s.notes]) +
-    fold('Manifest and planned evidence',facts(['Source',m?.source],['Revision',m?.revision],['Planned test',s.planned]) +
+    fold('Manifest and planned evidence',facts(['Source',displaySource(m?.source)],['Revision',m?.revision],['Planned test',s.planned]) +
       pallets.map(p => '<h3>' + escape(p.pallet) + '</h3>' +
         list(p.cartons,c => escape(joined(c.carton,c.sku)) + '<br>' + code(c.epc))).join('')) +
     '<h3 class="line">Recent carton scans</h3>' + (scans.map(row =>
@@ -152,8 +161,7 @@ function renderDetail(row) {
       observationDetails(a.observations);
   }
   if (section === 'scans') {
-    const manifest = [...(row.session.manifestRevisions ?? []),row.session.manifest]
-      .find(item => item && item.revision === row.run.manifestRevision) ?? row.session.manifest;
+    const manifest = manifestFor(row.session,row.run);
     evidence = facts(['Test',row.session.testId],['Pallet',manifest?.pallet]) + runEvidence(row.run);
   }
   if (section === 'exceptions') evidence = sessionExceptions(row);
@@ -189,11 +197,14 @@ function renderRecords() {
   renderDetail(found.find(row => row.id === selected));
 }
 
+const scanLogSections = new Set(['sessions','pallets','scans','exceptions']);
 function navigate(focusTitle = false) {
-  const [requested, sessionId] = window.location.hash.slice(1).split('/');
-  if (requested === 'content') return;
+  const [rawRequested, sessionId] = window.location.hash.slice(1).split('/');
+  if (rawRequested === 'content') return;
   const workspace = find('#workspace-panel');
-  const workspaceSection = workspace && [...nav.querySelectorAll('[data-workspace-title]')].find(link => link.hash === '#' + requested);
+  const requested = rawRequested === 'reports' && workspace ? 'overview' : rawRequested;
+  const workspaceSection = workspace && [...nav.querySelectorAll('[data-workspace-title]')].find(link =>
+    (link.dataset.workspaceAliases ?? link.hash.slice(1)).split(',').includes(requested));
   const next = workspaceSection || Object.hasOwn(sections,requested) ? requested : 'overview';
   if (section !== next) { selected = undefined; search.value = ''; }
   section = next;
@@ -202,18 +213,30 @@ function navigate(focusTitle = false) {
     search.value = '';
   }
   for (const link of nav.querySelectorAll('a')) {
-    if (link.hash === '#' + section) link.setAttribute('aria-current','page');
+    const active = link === workspaceSection ||
+      (link.hash === '#sessions' && scanLogSections.has(section)) ||
+      link.hash === '#' + section;
+    if (active) link.setAttribute('aria-current','page');
     else link.removeAttribute('aria-current');
+  }
+  const catalogTabs = find('#catalog-tabs');
+  if (catalogTabs) {
+    catalogTabs.hidden = !scanLogSections.has(section);
+    for (const tab of catalogTabs.querySelectorAll('a')) {
+      if (tab.hash === '#' + section) tab.setAttribute('aria-current','page');
+      else tab.removeAttribute('aria-current');
+    }
   }
   find('#page-title').textContent = workspaceSection ? workspaceSection.dataset.workspaceTitle :
     sections[section]?.title ?? 'Overview';
   find('#page-heading').dataset.overview = String(section === 'overview');
-  find('#section-description').textContent = sections[section]?.description ?? '';
+  find('#section-description').textContent = workspaceSection ? '' : (sections[section]?.description ?? '');
   find('#overview').hidden = section !== 'overview';
   catalog.hidden = section === 'overview' || Boolean(workspaceSection);
   if (workspace) workspace.hidden = !workspaceSection;
   menu.setAttribute('aria-expanded','false');
   if (!catalog.hidden) renderRecords();
+  if (rawRequested === 'reports' && workspace) find('#overview-reports')?.scrollIntoView({block:'nearest'});
   if (focusTitle) {
     find('#content').scrollTop = 0;
     find('#page-title').focus({preventScroll:true});

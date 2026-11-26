@@ -16,7 +16,7 @@ final class C72Reader {
     private static final int MAX_POWER_DBM = 30;
     // Functional design 9.1: stored with every run so runs are comparable. Bump it when the approved
     // profile rules change (region lock, power limits, SDK). Power itself is recorded per run.
-    private static final String PROFILE_VERSION = "C72-ETSI-1";
+    private static final String PROFILE_VERSION = "UHF-ETSI-1";
     private final Context context;
     private RFIDWithUHFUART sdk;
     private JSONObject profile;
@@ -133,7 +133,7 @@ final class C72Reader {
     }
 
     private JSONObject settings(int region, int power) {
-        return json("name", "C72 ETSI", "version", PROFILE_VERSION, "model", Build.MODEL, "build", Build.DISPLAY, "deviceId", deviceId(),
+        return json("name", "UHF ETSI", "version", PROFILE_VERSION, "model", Build.MODEL, "build", Build.DISPLAY, "deviceId", deviceId(),
                 "firmware", sdk.getVersion(), "region", region == ETSI ? "ETSI" : "Unverified (" + region + ")",
                 "powerDbm", power > 0 ? power : JSONObject.NULL, "antenna", "Not reported");
     }

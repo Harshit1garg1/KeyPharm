@@ -1,8 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {parseManifest, compare, scanDelta, canContinue, permits, allocationTotal, canClose, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary, EXPORT_COLUMNS, SAMPLE,
+import {parseManifest, parseCsvRows, compare, scanDelta, canContinue, permits, allocationTotal, canClose, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary, EXPORT_COLUMNS, SAMPLE,
   parsePlan, planCoverage, closePlanErrors, manifestFor, lockPallet, lockTo, otherPallet, inManifest, manifestCsv,
-  missingSku, unexported, matchesQuery, skuBreakdown, statusLabel} from '../app/src/main/assets/model.mjs';
+  missingSku, unexported, matchesQuery, skuBreakdown, statusLabel, displaySource} from '../app/src/main/assets/model.mjs';
 
 // A finished carton run against the sample manifest; `seen` = how many of the 4 cartons were read.
 const sampleRun = (manifest, seen, at, extra = []) => {
@@ -302,4 +302,12 @@ test('each export row carries the reader profile version of its run (section 9.1
     .map(line => line.split('","').map(cell => cell.replace(/^"|"$/g,'')));
   assert.equal(header.at(-1), 'ProfileVersion');
   assert.equal(row[header.indexOf('ProfileVersion')], 'C72-ETSI-1');
+});
+
+test('parseCsvRows skips empty Excel separator rows and displaySource removes C72 labels', () => {
+  const rows = parseCsvRows('a;b\r\n1;Physalis\r\n;;;;\r\n;\r\n', ['a','b']);
+  assert.deepEqual(rows, [['1','Physalis']]);
+  assert.equal(displaySource('C72 hardware'), 'RFID handheld');
+  assert.equal(displaySource('C72 ETSI'), 'UHF ETSI');
+  assert.equal(displaySource('C72-ETSI-1'), 'UHF-ETSI-1');
 });

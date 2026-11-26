@@ -4,7 +4,7 @@ KeyPharm RFID PoC for the C72 and a local PC dashboard. The Android app is versi
 
 ## Run the connected demo
 
-Run `node tools/workspace-server.mjs` with Node 24 and open the dashboard at `http://127.0.0.1:8790`. The [connected demo guide](docs/connected-poc.md) covers accounts, setup, C72 sync, session approval, batch dispatch, inventory, and reset.
+Run `node tools/workspace-server.mjs` with Node 24 and open the dashboard at `http://127.0.0.1:8790`. The [connected demo guide](docs/connected-poc.md) covers accounts, setup, handheld sync, session approval, batch dispatch, inventory, and reset. The compact dashboard sidebar has six items: **Overview** (with KPIs, recent sessions, outcomes, and right-side CSV **Reports**), **Inventory** (`Stock`, `Inbound`, `Stock counts`), **Outbound** (sessions + Administrator session/manifest tools), **Scan logs** (`Sessions`, `Pallet checks`, `Carton scans`, `Exceptions`), **Devices & Setup** (connected handhelds + Administrator settings), and **Activity** pinned at the bottom.
 
 ## Run the standalone handheld demo
 

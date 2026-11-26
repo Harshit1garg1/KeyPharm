@@ -85,7 +85,15 @@ resetDialog.innerHTML = '<form method="dialog" class="stack"><h2 id="reset-demo-
   field('confirm','Type RESET','','required pattern="RESET" autocomplete="off"') +
   '<div class="row"><button value="cancel" class="secondary" formnovalidate>Cancel</button>' +
   '<button value="reset">Reset demo data</button></div></form>';
-if (connected) document.body.append(resetDialog);
+const palletDialog = document.createElement('dialog');
+palletDialog.id = 'pallet-confirm-dialog';
+palletDialog.className = 'workflow-dialog';
+palletDialog.setAttribute('aria-labelledby','pallet-confirm-title');
+palletDialog.innerHTML = '<form method="dialog" class="stack"><h2 id="pallet-confirm-title">Send pallet scan</h2>' +
+  '<p>Send pallet tag <code id="pallet-confirm-epc"></code> to the dashboard for <strong id="pallet-confirm-ref"></strong>?</p>' +
+  '<div class="row"><button value="cancel" class="secondary" formnovalidate>Cancel</button>' +
+  '<button value="confirm">Confirm</button></div></form>';
+if (connected) document.body.append(resetDialog,palletDialog);
 let selected;
 let view = 'sessions';
 let stockTaskId = '', stockScenario = 'match', stockScanBusy = false, countUpload;
@@ -253,6 +261,7 @@ function render() {
 function goBack() {
   if (workflowDialog.open) { workflowDialog.close(); return; }
   if (resetDialog.open) { resetDialog.close('cancel'); return; }
+  if (palletDialog.open) { palletDialog.close('cancel'); return; }
   if (active) { end(true); return; }
   if (builder?.capture) { buildToggle(); return; }
   if (root.querySelector('#untag-dialog[open]')) { root.querySelector('#untag-dialog').close(); return; }
@@ -481,7 +490,7 @@ function startUtilityScan() {
   const lookupPower = connected?.controls.lookupPower;
   if (kind === 'lookup') {
     if (!bridge?.startReader || !lookupTarget) return;
-    if (lookupPower == null && !applySessionPower(lookupSession())) {
+    if (lookupPower == null && !applySessionPower(lookupSession(), true)) {
       feedback('Wait for reader power before searching.',true);
       return;
     }
@@ -636,11 +645,11 @@ function creation() {
       escape(t.title) + '</option>').join('') + '</datalist><button class="scan-cta">Create session</button></form>';
 }
 const sessionPower = s => connected.sessionPowerOverride(s?.id) ?? connected.controls.power?.requested ?? 30;
-function needsSessionPower(s) {
-  return Boolean(connected?.auth && s?.source === 'C72 hardware' && !s.closedAt && !s.dispatchedAt);
+function needsSessionPower(s, allowClosed = false) {
+  return Boolean(connected?.auth && s?.source === 'C72 hardware' && (allowClosed || (!s.closedAt && !s.dispatchedAt)));
 }
-function applySessionPower(s) {
-  if (!needsSessionPower(s)) return true;
+function applySessionPower(s, allowClosed = false) {
+  if (!needsSessionPower(s, allowClosed)) return true;
   const power = sessionPower(s);
   if (appliedSessionPower?.id === s.id && appliedSessionPower.power === power) return true;
   if (powerRequest || active || !reader.ready || !bridge?.setReaderPower) return false;
@@ -1378,7 +1387,7 @@ document.addEventListener('change', event => action(() => {
     lookupTarget = manifest?.pallets?.[0]?.palletEpc ?? manifest?.palletEpc;
     lookupRead = undefined;
     feedback('');
-    applySessionPower(lookupSession());
+    if (connected?.controls.lookupPower == null) applySessionPower(lookupSession(), true);
     render();
   }
   if (target.id === 'lookup-target') { lookupTarget = target.value; lookupRead = undefined; render(); }
@@ -1449,7 +1458,10 @@ document.addEventListener('click', event => action(() => {
     return;
   }
   if (view === 'pallet-task' && palletRead && !stockScanBusy && command === 'pallet-send') {
-    if (window.confirm('Send pallet tag ' + palletRead.epc + ' to the dashboard?')) void submitPalletScan(palletRead.epc);
+    palletDialog.querySelector('#pallet-confirm-epc').textContent = palletRead.epc;
+    palletDialog.querySelector('#pallet-confirm-ref').textContent = palletTask?.scanReference ?? palletTask?.reference ?? '';
+    palletDialog.returnValue = 'cancel';
+    palletDialog.showModal();
     return;
   }
   if (command === 'utility-scan') {
@@ -1845,7 +1857,7 @@ if (connected) {
       manualSync = false;
     }
   };
-  const safe = () => !active && !builder?.capture && !utilityScan && !receiptCapture && !pendingBarcode && !powerRequest && !stockScanBusy && !pendingImport && !resetDialog.open && !root.querySelector('#untag-dialog[open]');
+  const safe = () => !active && !builder?.capture && !utilityScan && !receiptCapture && !pendingBarcode && !powerRequest && !stockScanBusy && !pendingImport && !resetDialog.open && !palletDialog.open && !root.querySelector('#untag-dialog[open]');
   const clearConnectedRecords = () => {
     localStorage.removeItem(uiKey);
     localStorage.removeItem(key);
@@ -1857,6 +1869,7 @@ if (connected) {
     scenario = defaultScenario;
     receiptProduct = '';
     receiptUpload = receiptRead = countUpload = undefined;
+    palletTask = palletRead = utilityScan = lookupSessionId = lookupTarget = lookupRead = undefined;
     pendingRecordRender = true;
     publish();
   };
@@ -1914,6 +1927,11 @@ if (connected) {
       confirmWorkflow('Demo data reset','Starting inventory restored.');
     } catch (error) { feedback(error.message,true); }
   });
+  palletDialog.addEventListener('close',() => {
+    if (palletDialog.returnValue === 'confirm' && palletRead && palletTask && !stockScanBusy) {
+      void submitPalletScan(palletRead.epc);
+    }
+  });
   connectionPanel.addEventListener('submit',async event => {
     event.preventDefault();
     const fields = new FormData(event.target);
@@ -1934,7 +1952,12 @@ if (connected) {
   connectionPanel.addEventListener('click',event => {
     const command = event.target.closest('button')?.dataset.workspace;
     if (command === 'retry') { manualSync = true; void refreshConnected(); }
-    if (command === 'logout' && safe()) {
+    if (command === 'logout') {
+      if (!safe() || receiptUpload || countUpload) {
+        connected.message = 'Finish the current action before signing out.';
+        showConnection();
+        return;
+      }
       try { connected.signOut(store.sessions); connected.message = ''; render(); }
       catch (error) { connected.message = error.message; }
       showConnection();

@@ -376,17 +376,23 @@ with sync_playwright() as playwright:
     expect(dashboard.locator("[data-total=sessions]")).to_have_text("1")
     expect(dashboard.locator("[data-total=scans]")).to_have_text("3")
     expect(dashboard.locator("[data-total=exceptions]")).to_have_text("2")
+    expect(dashboard.locator("[data-total=activity]")).to_be_visible()
+    expect(dashboard.locator("#recent-sessions-count")).to_have_text("1")
     expect(dashboard.get_by_role("heading", name="Recent sessions")).to_be_visible()
     expect(dashboard.get_by_role("heading", name="Recent activity")).to_have_count(0)
     assert dashboard.locator(".dashboard-rail").bounding_box()["x"] < dashboard.locator(".dashboard-heading").bounding_box()["x"]
     assert dashboard.locator(".dashboard-outcomes").bounding_box()["x"] > dashboard.locator(".dashboard-heading").bounding_box()["x"]
+    expect(dashboard.locator(".dashboard-rail nav a")).to_have_count(3)
+    expect(dashboard.locator(".dashboard-rail nav a").last).to_have_text("Activity")
+    assert "C72" not in dashboard.locator("#content").inner_text()
     dashboard.screenshot(path="build/dashboard-smoke.png", full_page=True)
     dashboard.locator("#recent-sessions").get_by_role("link", name="KP-TEST-01").click()
     expect(dashboard.locator("#detail").get_by_role("heading", name="KP-TEST-01")).to_be_visible()
     dashboard.reload()
     expect(dashboard.locator("#detail").get_by_role("heading", name="KP-TEST-01")).to_be_visible()
-    dashboard.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Sessions").click()
+    dashboard.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Scan logs").click()
     expect(dashboard.get_by_role("heading", name="KP-TEST-01")).to_be_visible()
+    assert "C72" not in dashboard.locator("#detail").inner_text()
     expect(dashboard.locator("#detail").get_by_text("Unexpected EPC neighbouring tag",exact=True)).to_be_visible()
     service["online"] = False
     dashboard.get_by_role("button", name="Refresh records").click()
@@ -407,6 +413,7 @@ with sync_playwright() as playwright:
     })
     dashboard.get_by_role("button", name="Refresh records").click()
     expect(dashboard.locator("[data-total=sessions]")).to_have_text("56")
+    expect(dashboard.locator("#catalog-tabs [data-tab-count='sessions']")).to_have_text("56")
     expect(dashboard.get_by_text("Showing 50 of 56 records.")).to_be_visible()
     expect(dashboard.locator("#records button[data-id]")).to_have_count(50)
     expect(dashboard.get_by_role("button", name="Earlier session 00",exact=False)).to_have_count(0)
@@ -418,7 +425,8 @@ with sync_playwright() as playwright:
     assert pane.evaluate("(pane) => pane.scrollTop") > 0
     assert rail.bounding_box() == bounds
     assert dashboard.evaluate("window.scrollY") == 0
-    dashboard.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Exceptions").click()
+    dashboard.locator("#catalog-tabs").get_by_role("link", name="Exceptions").click()
+    expect(dashboard.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Scan logs")).to_have_attribute("aria-current", "page")
     expect(dashboard.locator("#records button[data-id]")).to_have_count(2)
     assert pane.evaluate("(pane) => pane.scrollTop") == 0
     expect(dashboard.get_by_text("Showing 2 of 2 sessions with exceptions.")).to_be_visible()
@@ -456,7 +464,7 @@ with sync_playwright() as playwright:
     expect(dashboard.get_by_role("navigation", name="Dashboard sections")).to_be_hidden()
     dashboard.screenshot(path="build/dashboard-mobile.png")
     dashboard.get_by_role("button", name="Sections").click()
-    dashboard.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Sessions").click()
+    dashboard.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Scan logs").click()
     expect(dashboard.get_by_role("heading", name="Sessions", exact=True)).to_be_visible()
     expect(dashboard.get_by_role("navigation", name="Dashboard sections")).to_be_hidden()
     bounds = rail.bounding_box()

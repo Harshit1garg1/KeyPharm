@@ -49,8 +49,6 @@ const hardware = await readFile(resolve(assets,'private-live-sample.csv'),'utf8'
   throw error;
 });
 const workspace = createWorkspace(resolve(storage,'workspace.sqlite'),hardware);
-let handheldContact;
-const handheldDevices = new Map();
 const pages = new Map([
   ['/','dashboard.html'], ['/dashboard.css','dashboard.css'], ['/dashboard.mjs','dashboard.mjs'],
   ['/dashboard-model.mjs','dashboard-model.mjs'], ['/workspace-dashboard.mjs','workspace-dashboard.mjs'],
@@ -91,17 +89,17 @@ const server = createServer(async (req,res) => {
     }
     if (req.method === 'GET') {
       if (path === '/records') return json(res,200,workspace.records());
-      if (path === '/api/stock-workflows') return json(res,200,{...workspace.stockTasks(),device:handheldContact});
+      if (path === '/api/stock-workflows') {
+        const devices = workspace.devices();
+        return json(res,200,{...workspace.stockTasks(),devices,device:devices.at(-1)});
+      }
       if (path === '/api/carton-history') {
         const epc = new URL(req.url,'http://localhost').searchParams.get('epc');
         if (!epc) return json(res,400,{message:'Choose a carton.'});
         return json(res,200,workspace.stockHistory(epc));
       }
       if (path === '/api/workspace') {
-        if (handheld) {
-          handheldContact = {lastContact:new Date().toISOString(),deviceId:deviceId ?? handheldContact?.deviceId};
-          if (deviceId) handheldDevices.set(deviceId,handheldContact);
-        }
+        if (handheld) workspace.recordDevice(deviceId ?? 'default',user);
         const {sessions} = workspace.records();
         const stockTasks = !handheld ? [] : workspace.stockTasks().tasks.filter(task =>
           (user.role === 'operator' && !['Reviewed','Cancelled'].includes(task.status)) || (user.role === 'admin' && task.type === 'receipt'));
@@ -112,7 +110,7 @@ const server = createServer(async (req,res) => {
         return json(res,200,{user,generation:workspace.generation(),inventory:workspace.inventory(),palletManifests,
           ...(managesManifests ? {assignedCartonEpcs:workspace.assignedCartonEpcs(),existingPallets:workspace.existingPallets()} : {}),
           removedSessions:handheld ? workspace.removedSessions() : [],
-          devices:!handheld && user.role === 'admin' ? [...handheldDevices.values()] : [],
+          devices:!handheld ? workspace.devices() : [],
           controls:workspace.settings(),sessions,stockTasks,...workspace.outbound(user,sessions)});
       }
       if (path === '/api/pallet-manifest.csv') {
@@ -160,8 +158,8 @@ const server = createServer(async (req,res) => {
       }
       if (path === '/api/pallet-manifest') {
         if (handheld && (!deviceId || body.action !== 'scan')) return json(res,403,{message:'A registered handheld is required for this scan.'});
-        return json(res,200,workspace.palletManifest(user,body,deviceId,[...handheldDevices.values()]
-          .filter(device => Date.now() - Date.parse(device.lastContact) < 60_000).map(device => device.deviceId)));
+        return json(res,200,workspace.palletManifest(user,body,deviceId,workspace.devices()
+          .filter(device => device.deviceId && Date.now() - Date.parse(device.lastContact) < 60_000).map(device => device.deviceId)));
       }
       if (path === '/api/session') return json(res,201,workspace.create(user,body));
       if (path === '/api/action') return json(res,200,workspace.action(user,body,!handheld));

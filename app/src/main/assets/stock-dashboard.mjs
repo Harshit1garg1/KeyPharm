@@ -1,4 +1,4 @@
-import {demoSku} from './model.mjs';
+import {demoSku, displaySource} from './model.mjs';
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]);
@@ -17,7 +17,7 @@ export function receiptCartonDetails(details) {
 
 function runDetails(run,open) {
   const total = run.found.length + (run.outstanding ?? run.missing.length);
-  return '<details class="dashboard-fold"' + (open ? ' open' : '') + '><summary><span>' + esc(time(run.at)) + ' · ' + esc(run.source) + '</span></summary>' +
+  return '<details class="dashboard-fold"' + (open ? ' open' : '') + '><summary><span>' + esc(time(run.at)) + ' · ' + esc(displaySource(run.source)) + '</span></summary>' +
     '<div class="dashboard-fold-body"><p>' + total + ' expected · ' + Object.keys(run.observations).length + ' observed · ' +
     run.found.length + ' matched</p><small>' + esc(run.actor) + '</small>' +
     [['Not observed',run.missing],['Unexpected',run.unexpected],['Unknown EPC',run.unknown]].map(([name,epcs]) =>
@@ -70,7 +70,7 @@ function stockDetail(task,role) {
     ' · ' + (receipt ? (task.mode ?? 'EPC') + ' comparison' : 'Snapshot ' + esc(time(task.createdAt))) + '</p>' + skuTotals(task,latest) +
     (task.outbound ? '<p><a href="#sessions/' + encodeURIComponent(task.outbound) + '">View outbound session</a></p>' : '') +
     (task.review ? '<p>Reviewed by ' + esc(task.review.by) + (task.review.reason ? ' · ' + esc(task.review.reason) : '') + '</p>' : '') +
-    actions + task.runs.slice().reverse().map(run => runDetails(run,run === latest)).join('') + '</section>';
+    actions + (task.runs.length ? '<h3 class="line">Scan runs (' + task.runs.length + ')</h3>' + task.runs.slice().reverse().map(run => runDetails(run,run === latest)).join('') : '') + '</section>';
 }
 
 function receiptSetup(preview) {
@@ -113,38 +113,46 @@ const reportTypes = [
 ];
 const downloadIcon = cardIcon('M12 3v12m-4-4 4 4 4-4M4 16v4h16v-4');
 
-function reportsPage() {
+export function reportsCard() {
   const cards = reportTypes.map(([key,label,description,path]) => '<li class="report-card"><div class="report-description">' +
-    '<span class="report-icon">' + cardIcon(path) + '</span><div><h2>' + label + '</h2><p>' + description + '</p></div></div>' +
+    '<span class="report-icon">' + cardIcon(path) + '</span><div><h3>' + label + '</h3><p>' + description + '</p></div></div>' +
     '<a class="report-download" href="api/' + key + '.csv" download aria-label="Download ' + label + ' CSV">' + downloadIcon + 'Download CSV</a></li>');
-  return '<ul class="report-grid" aria-label="CSV reports">' + cards.join('') + '</ul>' +
-    '<div class="report-integration"><span class="report-icon">' + cardIcon('M8 4v5m8-5v5M6 9h12v3a6 6 0 0 1-12 0zm6 9v3') +
+  return '<div class="panel-heading"><h2>Reports</h2></div><ul class="report-grid report-grid-compact" aria-label="CSV reports">' +
+    cards.join('') + '</ul><div class="report-integration"><span class="report-icon">' +
+    cardIcon('M8 4v5m8-5v5M6 9h12v3a6 6 0 0 1-12 0zm6 9v3') +
     '</span><h2>ERP/WMS</h2><span class="dashboard-badge">Not configured</span></div>';
 }
 
-function devicesPage(device) {
-  const contact = device?.lastContact;
-  const connected = contact && Date.now() - Date.parse(contact) < 60_000;
-  const name = 'RFID handheld' + (device?.deviceId ? ' ' + device.deviceId : '');
-  return '<article class="device-card"><div class="report-description"><span class="report-icon">' +
-    cardIcon('M7 3h10v18H7zM9 6h6v7H9zm1 10h.01m4 0h.01m-4 3h.01m4 0h.01') +
-    '</span><h2>' + esc(name) + '</h2></div><dl class="device-details">' +
-    '<div><dt>Reader Status</dt><dd>' + (connected ? 'Connected' : 'Offline') + '</dd></div>' +
-    '<div><dt>Last Synced</dt><dd>' + (contact ? '<time datetime="' + esc(contact) + '">' + esc(time(contact)) + '</time>' : '—') +
-    '</dd></div></dl></article>';
+function devicesPage(devices) {
+  const listDevices = (Array.isArray(devices) ? devices : devices ? [devices] : []).slice()
+    .sort((a,b) => (b?.lastContact ?? '').localeCompare(a?.lastContact ?? ''));
+  const content = listDevices.length ? '<div class="device-grid">' + listDevices.map(device => {
+    const contact = device?.lastContact;
+    const connected = contact && Date.now() - Date.parse(contact) < 60_000;
+    const name = 'RFID handheld' + (device?.deviceId ? ' ' + device.deviceId : '');
+    return '<article class="device-card"><div class="report-description"><span class="report-icon">' +
+      cardIcon('M7 3h10v18H7zM9 6h6v7H9zm1 10h.01m4 0h.01m-4 3h.01m4 0h.01') +
+      '</span><h3>' + esc(name) + '</h3></div><dl class="device-details">' +
+      '<div><dt>Reader Status</dt><dd>' + (connected ? 'Connected' : 'Offline') + '</dd></div>' +
+      '<div><dt>Last Synced</dt><dd>' + (contact ? '<time datetime="' + esc(contact) + '">' + esc(time(contact)) + '</time>' : '—') +
+      '</dd></div></dl></article>';
+  }).join('') + '</div>' : '<p class="muted">No handheld has synced yet.</p>';
+  return '<section class="devices-section" aria-labelledby="devices-heading"><h2 id="devices-heading">Connected handhelds (' + listDevices.length + ')</h2>' + content + '</section>';
 }
 
 export function stockPage(section,data,ops,selected,preview) {
   if (!ops) return '';
-  if (section === 'devices') return devicesPage(ops.device);
-  if (section === 'reports') return reportsPage();
+  if (section === 'devices') return devicesPage(ops.devices ?? ops.device);
+  if (section === 'reports') return reportsCard();
   const inbound = section === 'inbound';
   const items = ops.tasks.filter(item => item.type === (inbound ? 'receipt' : 'count') && item.status !== 'Cancelled');
   const active = items.find(item => selected === item.id) ?? items[0];
   const open = !inbound && ['admin','operator'].includes(data.user.role) ? form('count','<label>Location<select name="location">' +
     ops.locations.map(location => option(location)).join('') + '</select></label>' + button('Open count')) : '';
+  const countLabel = items.length + (inbound ? (items.length === 1 ? ' receipt' : ' receipts') : (items.length === 1 ? ' count' : ' counts'));
   return '<div class="workspace-inventory"><section>' + open +
     (inbound && data.user.role === 'admin' ? receiptSetup(preview) : '') +
+    '<p class="workspace-count muted">' + countLabel + '</p>' +
     (items.length ? '<ul class="dashboard-records">' + items.map(item =>
     '<li><button type="button" class="dashboard-record" data-stock-open="' + esc(item.id) + '" aria-pressed="' + (item === active) +
     '"><span><strong>' + esc(inbound ? item.id : item.reference) + '</strong><small>' + esc(item.status) + '</small></span></button></li>').join('') +

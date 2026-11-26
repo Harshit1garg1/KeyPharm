@@ -37,9 +37,54 @@ export function createWorkspace(path, hardwareCsv = '') {
     CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, body TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, actor TEXT NOT NULL, session TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS audit (
-      id INTEGER PRIMARY KEY, at TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, session TEXT NOT NULL
+      id INTEGER PRIMARY KEY, at TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, session TEXT NOT NULL,
+      role TEXT, actor_name TEXT, detail TEXT
     );
+    CREATE TABLE IF NOT EXISTS devices (
+      device_id TEXT PRIMARY KEY, first_seen_at TEXT NOT NULL, last_contact_at TEXT NOT NULL,
+      last_role TEXT, last_actor TEXT
+    );
+    CREATE TABLE IF NOT EXISTS settings_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, role TEXT NOT NULL,
+      revision INTEGER NOT NULL, controls_json TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS manifest_revisions (
+      session_id TEXT NOT NULL, revision INTEGER NOT NULL, source TEXT, pallet_ref TEXT, pallet_epc TEXT,
+      carton_count INTEGER NOT NULL, imported_at TEXT, manifest_json TEXT NOT NULL,
+      PRIMARY KEY (session_id, revision)
+    );
+    CREATE TABLE IF NOT EXISTS pallet_attempts (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL, manifest_revision INTEGER, actor TEXT,
+      locked_pallet TEXT, pallet_epc TEXT, result TEXT, started_at TEXT, ended_at TEXT,
+      profile_json TEXT, observations_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS pallet_attempts_session ON pallet_attempts(session_id);
+    CREATE TABLE IF NOT EXISTS scan_runs (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL, pallet_epc TEXT, manifest_revision INTEGER,
+      operator TEXT, source TEXT, state TEXT, status TEXT, expected_count INTEGER, matched_count INTEGER,
+      missing_count INTEGER, extra_count INTEGER, percent INTEGER, reason TEXT, notes TEXT, error TEXT,
+      started_at TEXT, ended_at TEXT, elapsed_seconds INTEGER, profile_json TEXT, result_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS scan_runs_session ON scan_runs(session_id);
+    CREATE TABLE IF NOT EXISTS scan_observations (
+      run_id TEXT NOT NULL, epc TEXT NOT NULL, outcome TEXT NOT NULL, read_count INTEGER NOT NULL,
+      rssi REAL, first_seen_at TEXT, last_seen_at TEXT,
+      PRIMARY KEY (run_id, epc)
+    );
+    CREATE INDEX IF NOT EXISTS scan_observations_epc ON scan_observations(epc);
   `);
+  const AUDIT_CAP = 300;
+  const auditColumns = new Set(db.prepare('PRAGMA table_info(audit)').all().map(column => column.name));
+  if (!auditColumns.has('role')) db.exec('ALTER TABLE audit ADD COLUMN role TEXT');
+  if (!auditColumns.has('actor_name')) db.exec('ALTER TABLE audit ADD COLUMN actor_name TEXT');
+  if (!auditColumns.has('detail')) db.exec('ALTER TABLE audit ADD COLUMN detail TEXT');
+  const recordAudit = (user, action, sessionRef, detail = '') => {
+    const at = time();
+    db.prepare('INSERT INTO audit (at,actor,action,session,role,actor_name,detail) VALUES (?,?,?,?,?,?,?)')
+      .run(at, user?.id ?? '', action, String(sessionRef ?? ''), user?.role ?? null, user?.name ?? null, detail);
+    db.prepare('DELETE FROM audit WHERE id NOT IN (SELECT id FROM audit ORDER BY id DESC LIMIT ?)').run(AUDIT_CAP);
+    return at;
+  };
   const atomic = execute => {
     db.exec('BEGIN IMMEDIATE');
     try { const result = execute(); db.exec('COMMIT'); return result; }
@@ -72,7 +117,7 @@ export function createWorkspace(path, hardwareCsv = '') {
     setting.run('physical',physicalCsv);
   });
   db.exec("UPDATE cartons SET state='available', reservation=NULL WHERE state='reserved'");
-  const stockOps = stockWorkflows(db,products);
+  const stockOps = stockWorkflows(db,products,(user,action,ref,detail) => recordAudit(user,action,ref,detail));
   atomic(() => {
     if (db.prepare("SELECT 1 FROM cartons WHERE sku='Juice'").get()) {
       const renameCartons = manifest => {
@@ -133,6 +178,64 @@ export function createWorkspace(path, hardwareCsv = '') {
   const settings = () => JSON.parse(db.prepare("SELECT value FROM settings WHERE key='test-controls'").get()?.value ??
     '{"revision":0,"plan":[],"power":null}');
   const generation = () => Number(db.prepare("SELECT value FROM settings WHERE key='generation'").get()?.value ?? 0);
+  const insertManifestRev = db.prepare(`INSERT INTO manifest_revisions
+    (session_id,revision,source,pallet_ref,pallet_epc,carton_count,imported_at,manifest_json)
+    VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(session_id,revision) DO UPDATE SET manifest_json=excluded.manifest_json`);
+  const insertPalletAttempt = db.prepare(`INSERT INTO pallet_attempts
+    (id,session_id,manifest_revision,actor,locked_pallet,pallet_epc,result,started_at,ended_at,profile_json,observations_json)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET result=excluded.result,observations_json=excluded.observations_json`);
+  const insertScanRun = db.prepare(`INSERT INTO scan_runs
+    (id,session_id,pallet_epc,manifest_revision,operator,source,state,status,expected_count,matched_count,missing_count,extra_count,percent,reason,notes,error,started_at,ended_at,elapsed_seconds,profile_json,result_json)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+    state=excluded.state,status=excluded.status,matched_count=excluded.matched_count,missing_count=excluded.missing_count,
+    extra_count=excluded.extra_count,percent=excluded.percent,reason=excluded.reason,notes=excluded.notes,error=excluded.error,
+    ended_at=excluded.ended_at,elapsed_seconds=excluded.elapsed_seconds,result_json=excluded.result_json`);
+  const deleteObs = db.prepare('DELETE FROM scan_observations WHERE run_id=?');
+  const insertObs = db.prepare('INSERT OR REPLACE INTO scan_observations (run_id,epc,outcome,read_count,rssi,first_seen_at,last_seen_at) VALUES (?,?,?,?,?,?,?)');
+  function syncSessionRecords(s) {
+    const revisions = new Map();
+    for (const m of [...(s.manifestRevisions ?? []), ...(s.manifest ? [s.manifest] : [])]) {
+      if (m) revisions.set(m.revision ?? 1,m);
+    }
+    for (const [rev,m] of revisions) {
+      insertManifestRev.run(s.id,rev,m.source ?? null,m.pallet ?? null,m.palletEpc ?? null,
+        cartonsOf(m).length,m.importedAt ?? null,JSON.stringify(m));
+    }
+    for (const [i,attempt] of (s.palletAttempts ?? []).entries()) {
+      insertPalletAttempt.run(attempt.id ?? (s.id + ':attempt:' + i),s.id,attempt.manifestRevision ?? null,
+        attempt.actor ?? null,attempt.lockedPallet ?? null,attempt.palletEpc ?? null,attempt.result ?? null,
+        attempt.startedAt ?? null,attempt.endedAt ?? null,JSON.stringify(attempt.profile ?? null),JSON.stringify(attempt.observations ?? {}));
+    }
+    const palletEpcs = new Set((s.manifest?.pallets ?? (s.manifest?.palletEpc ? [s.manifest] : [])).map(p => p.palletEpc));
+    for (const [i,run] of (s.runs ?? []).entries()) {
+      const runId = run.id ?? (s.id + ':run:' + i);
+      const r = run.result;
+      const status = run.state === 'Interrupted' ? 'Interrupted' : (r?.status ?? run.state ?? null);
+      insertScanRun.run(runId,s.id,run.palletEpc ?? null,run.manifestRevision ?? null,run.operator ?? null,
+        run.source ?? null,run.state ?? null,status,r?.expected ?? null,r?.matched?.length ?? null,
+        r?.missing?.length ?? null,r?.extra?.length ?? null,r?.percent ?? null,run.reason ?? null,
+        run.note ?? run.notes ?? null,run.error ?? null,run.startedAt ?? null,run.endedAt ?? null,
+        run.elapsedSeconds ?? null,JSON.stringify(run.profile ?? null),JSON.stringify(r ?? null));
+      deleteObs.run(runId);
+      const matchedSet = new Set(r?.matched ?? []);
+      const extraSet = new Set(r?.extra ?? []);
+      const seen = new Set();
+      for (const [epc,info] of Object.entries(run.observations ?? {})) {
+        seen.add(epc);
+        const outcome = matchedSet.has(epc) ? 'matched' : extraSet.has(epc) ? 'extra' :
+          (epc === run.palletEpc || palletEpcs.has(epc)) ? 'pallet_tag' : 'observed';
+        const count = typeof info === 'number' ? info : (info?.count ?? 1);
+        insertObs.run(runId,epc,outcome,count,info?.rssi ?? null,info?.first ?? null,info?.last ?? null);
+      }
+      for (const missingEpc of r?.missing ?? []) {
+        if (!seen.has(missingEpc)) insertObs.run(runId,missingEpc,'missing',0,null,null,null);
+      }
+    }
+  }
+  atomic(() => {
+    for (const row of db.prepare('SELECT body FROM sessions').all()) syncSessionRecords(JSON.parse(row.body));
+    db.prepare('DELETE FROM audit WHERE id NOT IN (SELECT id FROM audit ORDER BY id DESC LIMIT ?)').run(AUDIT_CAP);
+  });
   function reset(user,input) {
     if (user.role !== 'admin') fail('Administrator access required.',403);
     if (input.confirm !== 'RESET') fail('Type RESET to confirm.',400);
@@ -141,6 +244,12 @@ export function createWorkspace(path, hardwareCsv = '') {
     db.exec(`
       DELETE FROM operations;
       DELETE FROM audit;
+      DELETE FROM devices;
+      DELETE FROM settings_history;
+      DELETE FROM manifest_revisions;
+      DELETE FROM pallet_attempts;
+      DELETE FROM scan_observations;
+      DELETE FROM scan_runs;
       DELETE FROM sessions;
       DELETE FROM pallet_manifests;
       DELETE FROM settings WHERE key='test-controls';
@@ -193,23 +302,35 @@ export function createWorkspace(path, hardwareCsv = '') {
     current.lastOperation = input.operationId;
     current.revision++;
     db.prepare("INSERT INTO settings VALUES ('test-controls',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(current));
+    db.prepare('INSERT INTO settings_history (at,actor,role,revision,controls_json) VALUES (?,?,?,?,?)')
+      .run(time(),user.name,user.role,current.revision,JSON.stringify(current));
+    recordAudit(user,'Settings updated','workspace',Object.keys(input).filter(k => !['operationId','revision'].includes(k)).join(','));
     return current;
   }
   const sample = source => db.prepare('SELECT value FROM settings WHERE key=?').get(source === 'C72 hardware' ? 'physical' : 'sample').value;
   const audit = (s,user,action,detail = '') => {
-    const at = time();
+    const at = recordAudit(user,action,s.id,detail);
     s.logs.push({at,actor:user.name,action,detail});
-    db.prepare('INSERT INTO audit (at,actor,action,session) VALUES (?,?,?,?)').run(at,user.id,action,s.id);
   };
   function write(s, revision) {
     const snapshot = {...s};
     delete snapshot.workspaceRevision;
     db.prepare('INSERT INTO sessions VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, body=excluded.body')
       .run(s.id,revision,JSON.stringify(snapshot));
+    syncSessionRecords(s);
     return readSession(s.id);
   }
+  function recordDevice(deviceId, user) {
+    const id = deviceId || 'default';
+    const at = time();
+    db.prepare(`INSERT INTO devices (device_id,first_seen_at,last_contact_at,last_role,last_actor) VALUES (?,?,?,?,?)
+      ON CONFLICT(device_id) DO UPDATE SET last_contact_at=excluded.last_contact_at,last_role=excluded.last_role,last_actor=excluded.last_actor`)
+      .run(id,at,at,user?.role ?? null,user?.name ?? null);
+  }
+  const devices = () => db.prepare('SELECT device_id,last_contact_at,last_role,last_actor FROM devices ORDER BY last_contact_at ASC').all()
+    .map(row => ({...(row.device_id !== 'default' ? {deviceId:row.device_id} : {}), lastContact:row.last_contact_at, lastRole:row.last_role, lastActor:row.last_actor}));
   function stock(epc) { return db.prepare('SELECT * FROM cartons WHERE epc=?').get(epc); }
-  function checkStock(manifest,currentId) {
+  function checkStock(manifest,currentId,ignoreDrafts = []) {
     const inventory = [];
     for (const c of cartonsOf(manifest)) {
       const carton = stock(c.epc);
@@ -219,6 +340,11 @@ export function createWorkspace(path, hardwareCsv = '') {
     }
     const conflict = outboundManifestConflict(manifest,inventory,activeSessions(),currentId);
     if (conflict) fail(conflict);
+    const expected = new Set(cartonsOf(manifest).map(c => c.epc));
+    const draft = manifests().find(item => !ignoreDrafts.includes(item.id) &&
+      ['Pallet scanned','Manifest ready'].includes(item.status) &&
+      draftPallets(item).some(pallet => pallet.cartons.some(carton => expected.has(carton.epc))));
+    if (draft) fail('This manifest contains cartons assigned to draft manifest ' + draft.reference + '. Remove that manifest or choose different cartons.');
   }
   const manifests = () => db.prepare('SELECT body FROM pallet_manifests ORDER BY rowid DESC').all().map(row => JSON.parse(row.body));
   const savePalletManifest = draft => {
@@ -241,10 +367,10 @@ export function createWorkspace(path, hardwareCsv = '') {
         pallet.cartons.every(carton => stock(carton.epc)?.state === 'available' && !sessionCartons.has(carton.epc)))
       .map(pallet => ({draftId:draft.id,...pallet})));
   }
-  function readyManifest(draft,pallets) {
+  function readyManifest(draft,pallets,ignoreDrafts = [draft.id]) {
     if (pallets.reduce((total,pallet) => total + 1 + pallet.cartons.length,0) > 500) fail('A manifest can use up to 500 labels.',400);
     const csv = palletCsv(pallets);
-    checkStock(parseManifest(csv));
+    checkStock(parseManifest(csv),undefined,ignoreDrafts);
     return {...draft,pallets,csv,status:'Manifest ready',generatedAt:time()};
   }
   function palletAvailable(epc,id) {
@@ -286,11 +412,12 @@ export function createWorkspace(path, hardwareCsv = '') {
       const {pallet,palletEpc,cartons} = selected;
       const pallets = draftPallets(draft);
       if (pallets.some(entry => entry.pallet.toUpperCase() === pallet.toUpperCase())) fail('This manifest already has a pallet with that reference.');
-      const combined = readyManifest(draft,[...pallets,{pallet,palletEpc,cartons}]);
+      const combined = readyManifest(draft,[...pallets,{pallet,palletEpc,cartons}],[draft.id,source.id]);
       const remaining = draftPallets(source).filter(entry => entry.palletEpc !== palletEpc);
       const last = remaining.at(-1);
       if (last) {
-        savePalletManifest(readyManifest({...source,scanReference:undefined,palletEpc:last.palletEpc},remaining));
+        const nextRef = remaining.some(entry => entry.pallet.toUpperCase() === source.reference.toUpperCase()) ? source.reference : remaining[0].pallet;
+        savePalletManifest(readyManifest({...source,reference:nextRef,scanReference:undefined,palletEpc:last.palletEpc},remaining,[draft.id,source.id]));
       } else {
         savePalletManifest({...source,status:'Cancelled',mergedInto:draft.id});
       }
@@ -326,8 +453,8 @@ export function createWorkspace(path, hardwareCsv = '') {
         palletAvailable(pallet.palletEpc,draft.id);
         if (pallet.cartons.some(carton => stock(carton.epc)?.state !== 'available')) fail('A manifest carton is no longer available.');
       }
-      const session = create(user,{testId:input.testId,location:input.location,source:'C72 hardware',csv:draft.csv});
-      return savePalletManifest({...draft,sessionId:session.id,status:'Session created'});
+      const session = create(user,{testId:input.testId,location:input.location,source:'C72 hardware',csv:draft.csv},[draft.id]);
+      return savePalletManifest({...draft,sessionId:session.id,sessionRemovedAt:undefined,status:'Session created'});
     }
     fail('This action is unavailable for the pallet manifest.');
   }
@@ -382,16 +509,16 @@ export function createWorkspace(path, hardwareCsv = '') {
     delete s.dispatchApproval;
     s.allocation = {cartons:cartonsOf(manifest).length,pallets:manifest.pallets.length};
   }
-  function create(user, input) {
+  function create(user, input, ignoreDrafts = []) {
     if (user.role !== 'admin') fail('Administrator access required.',403);
     const testId = String(input.testId ?? '').trim();
     const location = String(input.location ?? '').trim();
     if (!testId || testId.length > 80 || !location || location.length > 100) fail('Enter a valid test ID and location.',400);
-    if (sessions().some(s => s.testId === testId)) fail('That test ID already exists.');
+    if (activeSessions().some(s => s.testId === testId)) fail('That test ID already exists.');
     if (!['C72 hardware','Simulation'].includes(input.source)) fail('Choose a valid reader source.',400);
     const csv = input.csv || (input.sample ? sample(input.source) : '');
     const manifest = csv ? parseManifest(csv) : null;
-    if (manifest) checkStock(manifest);
+    if (manifest) checkStock(manifest,undefined,ignoreDrafts);
     const s = {
       id:input.id ?? randomUUID(), testId, location, level:'Ground', product:'Mixed cartons', palletType:'Mixed',
       label:'UHF', placement:'Long side', wrapping:'Unwrapped', shielding:'Not tested', method:'Walk around the pallet',
@@ -415,6 +542,10 @@ export function createWorkspace(path, hardwareCsv = '') {
       if (s.workspaceRevision !== input.revision) fail('Session changed. Refresh and review it.');
       s.removedAt = time();
       audit(s,user,'Session removed');
+      const linked = manifests().find(draft => draft.sessionId === s.id && draft.status === 'Session created');
+      if (linked) {
+        savePalletManifest(s.dispatchedAt ? {...linked,sessionRemovedAt:time()} : {...linked,sessionId:undefined,status:'Manifest ready'});
+      }
       return write(s,s.workspaceRevision + 1);
     }
     if (input.action === 'dispatch' && s.dispatchedAt) return s;
@@ -462,7 +593,7 @@ export function createWorkspace(path, hardwareCsv = '') {
       s = create(user,incoming);
     } else if (s.removedAt || s.workspaceRevision !== change.revision || s.closedAt ||
         ((s.dispatchedAt || s.acceptedAt) && !incoming.closedAt)) {
-      fail('Server session changed. Local evidence is still on the C72.');
+      fail('Server session changed. Local evidence is still on the handheld.');
     }
     // Once approved, a closure may be recorded without touching the accepted evidence.
     const evidenceEditable = !s.dispatchedAt && !s.acceptedAt;
@@ -561,16 +692,24 @@ export function createWorkspace(path, hardwareCsv = '') {
     sample,
     settings,
     generation,
+    recordDevice,
+    devices,
     reset:(user,input) => atomic(() => reset(user,input)),
     inventory:stockOps.inventory,
     stockTasks:() => ({tasks:stockOps.tasks().map(stockOps.tagged),locations:stockOps.locations,events:stockOps.events()}),
     palletManifests:manifests,
     assignedCartonEpcs:() => [...assignedCartonEpcs()],
     existingPallets,
-    palletManifest:(user,input,deviceId,devices) => atomic(() => palletManifest(user,input,deviceId,devices)),
+    palletManifest:(user,input,deviceId,devices) => atomic(() => {
+      const result = palletManifest(user,input,deviceId,devices);
+      recordAudit(user,'Manifest ' + input.action,result?.id ?? input.id,input.reference ?? result?.reference ?? '');
+      return result;
+    }),
     stockHistory:stockOps.events,
     stockReport:stockOps.report,
-    stockCommand:(user,input,dashboard) => atomic(() => stockOps.command(user,input,create,dashboard,epc => activeSessions().some(s => cartonsOf(s.manifest).some(c => c.epc === epc)))),
+    stockCommand:(user,input,dashboard) => atomic(() => stockOps.command(user,input,create,dashboard,epc =>
+      activeSessions().some(s => cartonsOf(s.manifest).some(c => c.epc === epc)) ||
+      manifests().some(d => !['Cancelled','Session created'].includes(d.status) && draftPallets(d).some(p => p.cartons.some(c => c.epc === epc))))),
     create:(user,input) => atomic(() => create(user,input)),
     action:(user,input,dashboard) => atomic(() => action(user,input,dashboard)),
     dispatchSelected:(user,input) => atomic(() => dispatchSelected(user,input)),
