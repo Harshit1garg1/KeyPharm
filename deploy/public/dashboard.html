@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en" data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Review records from the KeyPharm RFID handheld."><meta name="color-scheme" content="dark light">
+<title>KeyPharm records</title><link rel="icon" type="image/svg+xml" href="keypharm-favicon.svg"><link rel="stylesheet" href="dashboard.css"><script type="module" src="dashboard-theme.mjs"></script><script type="module" src="dashboard.mjs"></script></head>
+<body>
+<a class="dashboard-skip" href="#content">Skip to dashboard</a>
+<div class="dashboard-shell">
+<header class="dashboard-rail">
+  <a class="dashboard-brand" href="#overview">
+    <img src="keypharm-logo-hd.png" alt="KeyPharm Laboratories">
+  </a>
+  <button type="button" class="secondary dashboard-toggle" id="menu-toggle" aria-expanded="false" aria-controls="dashboard-nav">Sections</button>
+  <form class="dashboard-find" role="search" aria-label="Find a session" hidden>
+    <label class="dashboard-find-field">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+      <input id="dashboard-query" type="search" aria-label="Search sessions, pallets or EPCs" placeholder="Search sessions, pallets or EPCs" autocomplete="off" maxlength="120" aria-controls="dashboard-find-results">
+    </label>
+    <div id="dashboard-find-results" class="dashboard-find-results" hidden>
+      <p id="dashboard-find-status" role="status"></p>
+      <ul id="dashboard-find-links"></ul>
+    </div>
+  </form>
+  <div class="row dashboard-toolbar-actions">
+    <button type="button" id="dashboard-theme" aria-label="Dark mode" title="Dark mode" hidden></button>
+    <button type="button" id="refresh" aria-label="Refresh records" title="Refresh records">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 10a8 8 0 1 0-.9 6M20 4v6h-6"/></svg>
+    </button>
+  </div>
+  <nav id="dashboard-nav" aria-label="Dashboard sections">
+    <a href="#overview" aria-current="page"><span class="nav-icon nav-overview" aria-hidden="true"></span>Overview</a>
+    <a href="#sessions"><span class="nav-icon nav-sessions" aria-hidden="true"></span>Scan logs</a>
+    <a href="#activity"><span class="nav-icon nav-activity" aria-hidden="true"></span>Activity</a>
+  </nav>
+</header>
+<main id="content" class="dashboard-content" tabindex="-1">
+  <p id="connection" class="status" role="status">Loading records…</p>
+  <header id="page-heading" class="dashboard-heading" data-overview="true">
+    <h1 id="page-title" tabindex="-1">Overview</h1>
+  </header>
+  <div id="overview">
+    <div id="totals" class="dashboard-totals" aria-label="Record totals"></div>
+    <div class="dashboard-overview-records">
+      <section class="panel dashboard-sessions">
+        <div class="panel-heading row spread"><div class="row"><h2>Recent sessions</h2><span id="recent-sessions-count" class="count-pill" hidden></span></div><a href="#sessions">View all sessions</a></div>
+        <table>
+          <thead><tr><th scope="col">Session ID</th><th scope="col">Pallet</th><th scope="col">Source</th><th scope="col">Status</th></tr></thead>
+          <tbody id="recent-sessions"></tbody>
+        </table>
+        <p id="sessions-empty" class="muted">Waiting for records…</p>
+      </section>
+        <section class="panel dashboard-outcomes">
+          <div class="panel-heading"><h2>Carton scan outcomes</h2></div>
+          <div id="outcomes"></div>
+        </section>
+    </div>
+    <section id="overview-reports" class="panel dashboard-reports" aria-label="Reports" hidden></section>
+  </div>
+  <div id="catalog" class="dashboard-catalog" hidden>
+    <nav id="catalog-tabs" class="workspace-subtabs" aria-label="Scan log sections" hidden>
+      <a href="#sessions" aria-current="page">Sessions <span class="tab-count" data-tab-count="sessions">0</span></a>
+      <a href="#pallets">Pallet checks <span class="tab-count" data-tab-count="pallets">0</span></a>
+      <a href="#scans">Carton scans <span class="tab-count" data-tab-count="scans">0</span></a>
+      <a href="#exceptions">Exceptions <span class="tab-count" data-tab-count="exceptions">0</span></a>
+    </nav>
+    <section class="panel dashboard-history" aria-label="Recent records">
+      <label>Search recent records<input id="search" type="search" placeholder="Search this section"></label>
+      <p id="record-count" class="muted"></p>
+      <ul id="records" class="dashboard-records"></ul>
+    </section>
+    <section id="detail" class="panel dashboard-detail" aria-label="Record details" tabindex="-1"><p>Select a record to see its details.</p></section>
+  </div>
+  <noscript><p>Enable JavaScript to view records.</p></noscript>
+</main></div></body></html>

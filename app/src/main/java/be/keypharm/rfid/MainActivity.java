@@ -386,9 +386,9 @@ public final class MainActivity extends Activity {
             workspaceNetwork.execute(() -> {
                 HttpURLConnection connection = null;
                 try {
-                    connection = (HttpURLConnection) new URL("http://127.0.0.1:8790/api/" + path).openConnection();
-                    connection.setConnectTimeout(2500);
-                    connection.setReadTimeout(4000);
+                    connection = (HttpURLConnection) new URL("https://keypharm.abiot.eu/api/" + path).openConnection();
+                    connection.setConnectTimeout(5000);
+                    connection.setReadTimeout(9000);
                     connection.setInstanceFollowRedirects(false);
                     connection.setRequestProperty("Authorization", authorization);
                     if ("workspace".equals(path) || "pallet-manifest".equals(path)) {

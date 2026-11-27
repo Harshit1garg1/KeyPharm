@@ -1,0 +1,17 @@
+<?php
+// Copy to config.local.php (or set KEYPHARM_DB_* env vars) with your live TransIP MariaDB password.
+// Never commit real credentials to version control.
+return [
+    'db' => [
+        'host' => getenv('KEYPHARM_DB_HOST') ?: 'localhost',
+        'port' => (int)(getenv('KEYPHARM_DB_PORT') ?: 3306),
+        'name' => getenv('KEYPHARM_DB_NAME') ?: 'abiote_keypharm',
+        'user' => getenv('KEYPHARM_DB_USER') ?: 'abiote_harshit',
+        'pass' => getenv('KEYPHARM_DB_PASS') ?: 'REPLACE_WITH_MARIADB_PASSWORD',
+        'charset' => 'utf8mb4',
+    ],
+    'auth' => [
+        'username' => getenv('KEYPHARM_DEMO_USER') ?: 'testing',
+        'password' => getenv('KEYPHARM_DEMO_PASS') ?: 'testing123',
+    ],
+];

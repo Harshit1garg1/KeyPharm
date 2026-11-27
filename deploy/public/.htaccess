@@ -1,0 +1,27 @@
+# KeyPharm TransIP Apache Configuration
+Options -Indexes
+
+# Forward Authorization header to PHP under Apache + PHP-FPM / FastCGI
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+    # Block direct web access to backend/config files if placed inside docroot
+    RewriteRule ^app_php/ - [F,L]
+
+    # Route root, dynamic HTML/API/CSV endpoints through index.php
+    RewriteRule ^$ index.php [L]
+    RewriteRule ^dashboard/(sign-in|sign-out)$ index.php [L]
+    RewriteRule ^records$ index.php [L]
+    RewriteRule ^api/ index.php [L]
+</IfModule>
+
+<IfModule mod_mime.c>
+    AddType text/javascript .mjs
+</IfModule>
+
+<FilesMatch "^\.(htaccess|htpasswd|env)$|^(config|composer)\.">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+</FilesMatch>

@@ -4,3 +4,4 @@
 /app/build/
 /app/libs/*.aar
 /app/src/main/assets/private-live-sample.csv
+/deploy/app_php/config.local.php
