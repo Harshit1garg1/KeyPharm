@@ -11,15 +11,22 @@ const storage = resolve(process.env.KEYPHARM_LOCAL_DATA || 'build/connected-poc'
 await mkdir(storage,{recursive:true});
 const credentialsPath = resolve(storage,'accounts.json');
 const username = 'testing';
-const password = 'testing123';
+// Render sets RENDER=true. A hosted server is public, so it needs its own credentials from the environment.
+const hosted = process.env.RENDER === 'true';
+const password = process.env.KEYPHARM_PASSWORD || 'testing123';
+const secret = process.env.KEYPHARM_SECRET;
+if (hosted && (password === 'testing123' || password.length < 12)) {
+  throw new Error('Set KEYPHARM_PASSWORD to at least 12 characters.');
+}
+if (hosted && !(secret?.length >= 32)) throw new Error('Set KEYPHARM_SECRET to at least 32 characters.');
 let saved;
 try { saved = JSON.parse(await readFile(credentialsPath,'utf8')); }
 catch (error) {
   if (error.code !== 'ENOENT') throw error;
 }
-const account = {password,secret:saved?.[username]?.secret ?? randomBytes(32).toString('hex')};
+const account = {password,secret:secret || (saved?.[username]?.secret ?? randomBytes(32).toString('hex'))};
 const accounts = {[username]:account};
-if (JSON.stringify(saved) !== JSON.stringify(accounts)) {
+if (!hosted && JSON.stringify(saved) !== JSON.stringify(accounts)) {
   const pending = credentialsPath + '.new';
   await writeFile(pending,JSON.stringify(accounts,null,2),{mode:0o600});
   await rename(pending,credentialsPath);
@@ -33,7 +40,7 @@ const userForRole = role => Object.hasOwn(demoRoles,role) ? {id:username,role,na
 const dashboardSessionSeconds = 12 * 60 * 60;
 const dashboardCookie = 'keypharm_dashboard';
 const setDashboardCookie = (res,value) => res.setHeader('Set-Cookie',dashboardCookie + '=' + value +
-  '; Path=/; Max-Age=' + dashboardSessionSeconds + '; HttpOnly; SameSite=Strict');
+  '; Path=/; Max-Age=' + dashboardSessionSeconds + '; HttpOnly; SameSite=Strict' + (hosted ? '; Secure' : ''));
 function startDashboardSession(res) {
   const now = Date.now();
   const id = randomBytes(24).toString('base64url');
@@ -100,19 +107,20 @@ const server = createServer(async (req,res) => {
   res.setHeader('X-Content-Type-Options','nosniff');
   res.setHeader('Referrer-Policy','no-referrer');
   res.setHeader('Content-Security-Policy',"default-src 'self'; frame-ancestors 'none'; form-action 'self'");
-  const path = new URL(req.url,'http://localhost').pathname;
-  const authorization = req.headers.authorization;
-  const role = req.headers['x-keypharm-role'] ?? 'operator';
-  const handheld = authorization?.startsWith('Bearer ');
-  const dashboardId = req.headers.cookie?.split(/;\s*/).find(value => value.startsWith(dashboardCookie + '='))?.slice(dashboardCookie.length + 1);
-  const user = handheld || !dashboardId ? authenticate(authorization,role) :
-    workspace.dashboardSessionValid(dashboardId,Date.now()) ? (authorization ? authenticate(authorization,role) : userForRole(role)) : null;
-  const deviceHeader = req.headers['x-keypharm-device-id'];
-  const deviceId = handheld && typeof deviceHeader === 'string' && /^[0-9a-f]{1,16}$/i.test(deviceHeader) ? deviceHeader.toLowerCase() : null;
   try {
+    // Everything that reads the request stays inside try: an escaped error here stops the whole server.
+    const path = new URL(req.url,'http://localhost').pathname;
+    const authorization = req.headers.authorization;
+    const role = req.headers['x-keypharm-role'] ?? 'operator';
+    const handheld = authorization?.startsWith('Bearer ');
+    const dashboardId = req.headers.cookie?.split(/;\s*/).find(value => value.startsWith(dashboardCookie + '='))?.slice(dashboardCookie.length + 1);
+    const user = handheld || !dashboardId ? authenticate(authorization,role) :
+      workspace.dashboardSessionValid(dashboardId,Date.now()) ? (authorization ? authenticate(authorization,role) : userForRole(role)) : null;
+    const deviceHeader = req.headers['x-keypharm-device-id'];
+    const deviceId = handheld && typeof deviceHeader === 'string' && /^[0-9a-f]{1,16}$/i.test(deviceHeader) ? deviceHeader.toLowerCase() : null;
     if (req.method === 'POST' && ['/dashboard/sign-in','/dashboard/sign-out'].includes(path)) {
       const origin = req.headers.origin;
-      const localForm = origin === 'http://' + req.headers.host ||
+      const localForm = origin === (hosted ? 'https://' : 'http://') + req.headers.host ||
         ((!origin || origin === 'null') && req.headers['sec-fetch-site'] === 'same-origin');
       if (!localForm) return json(res,403,{message:'Open the action from the KeyPharm dashboard.'});
       if (path === '/dashboard/sign-in') {
@@ -176,14 +184,17 @@ const server = createServer(async (req,res) => {
         res.writeHead(200,{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':'attachment; filename="pallet-manifest.csv"'});
         return res.end(draft.csv);
       }
+      // Build each export before sending headers, so a failure can still return an error response.
       if (path === '/api/evidence.csv') {
+        const body = specEvidenceCsv(workspace.records());
         res.writeHead(200,{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':'attachment; filename="keypharm-evidence.csv"'});
-        return res.end(specEvidenceCsv(workspace.records()));
+        return res.end(body);
       }
       const report = /^\/api\/(stock|movements|receipts|counts|receipt-template)\.csv$/.exec(path);
       if (report) {
+        const body = workspace.stockReport(report[1]);
         res.writeHead(200,{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':'attachment; filename="keypharm-' + report[1] + '.csv"'});
-        return res.end(workspace.stockReport(report[1]));
+        return res.end(body);
       }
       if (path === '/api/sample' || path === '/api/physical-sample') {
         return json(res,200,{csv:workspace.sample(path === '/api/physical-sample' ? 'C72 hardware' : 'Simulation')});
@@ -233,12 +244,14 @@ const server = createServer(async (req,res) => {
     }
     return json(res,404,{message:'Page not found.'});
   } catch (error) {
+    if (res.headersSent) return res.destroy();
     const status = error.status || (error instanceof SyntaxError ? 400 : 422);
     if (status >= 500) console.error(error);
     return json(res,status,{message:status >= 500 ? 'Workspace is unavailable.' : error.message});
   }
 });
-server.listen(Number(process.env.KEYPHARM_PORT || 8790),'127.0.0.1',() => {
-  console.log('KeyPharm workspace: http://127.0.0.1:' + server.address().port);
-  console.log('Demo accounts file: ' + credentialsPath);
+const host = hosted ? '0.0.0.0' : '127.0.0.1';
+server.listen(Number(process.env.KEYPHARM_PORT || (hosted && process.env.PORT) || 8790),host,() => {
+  console.log('KeyPharm workspace: http://' + host + ':' + server.address().port);
+  if (!hosted) console.log('Demo accounts file: ' + credentialsPath);
 });

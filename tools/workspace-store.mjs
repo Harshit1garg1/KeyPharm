@@ -929,7 +929,7 @@ export function createWorkspace(path, hardwareCsv = '') {
           const epcs = Object.keys(run.observations ?? {}).map(normalizeEpc);
           const target = s.manifest.pallets.find(pallet => pallet.palletEpc === run.palletEpc);
           const manifest = target ? lockTo(s.manifest,target) : s.manifest;
-          s.runs.push({...run,operator:user.name,state:'Interrupted',error:scanConflict,
+          s.runs.push({...run,observations:run.observations ?? {},operator:user.name,state:'Interrupted',error:scanConflict,
             result:compareOutbound(manifest,epcs,[],new Set(epcs))});
         }
         audit(s,user,'Pallet scan blocked',scanConflict);

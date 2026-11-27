@@ -45,3 +45,25 @@ Open **Lookup** to find out what an unknown tag is. Hold the reader close and pr
 - `py -3.13 tests/connected_smoke.py`
 
 The connected rehearsal uses an isolated test database, desktop browsers, and the handheld application code with simulated RFID input. See the [brief comparison and acceptance evidence](platform-poc-review.md) for the remaining gaps. The Administrator can edit the shared test plan and request reader power from the dashboard. The handheld applies the recommendation when opening an active hardware session. Stock tasks use their own setting, which defaults to 10 dBm. Live count uploads require a connection. A failed upload can be retried while the app remains open.
+
+## Host the dashboard on Render
+
+The same server runs on Render and keeps SQLite. Create a Node web service from this repository with these settings.
+
+| Setting | Value |
+|---|---|
+| Region | Frankfurt |
+| Build command | `npm install` |
+| Start command | `npm start` |
+| Health check | leave empty |
+| `NODE_VERSION` | `24` |
+| `KEYPHARM_PASSWORD` | your own password, at least 12 characters |
+| `KEYPHARM_SECRET` | random text, at least 32 characters; keep it unchanged so handheld sign-ins survive restarts |
+
+Sign in with username `testing` and your password. The server refuses to start on Render without both values.
+
+Generate the password randomly with 20 or more characters: failed sign-ins are not limited or logged. The handheld token does not expire. If a password or token may have leaked, change both `KEYPHARM_PASSWORD` and `KEYPHARM_SECRET`. Everyone who signs in can choose any role, including Administrator and its data reset.
+
+**Data on the free plan is temporary.** Render erases the SQLite file on every sleep, restart and deploy, and the demo data is created again. To keep data, use a paid instance with a persistent disk and set `KEYPHARM_LOCAL_DATA` to its mount path.
+
+The private live EPC sample is not in Git, so the hosted server has simulation data only. The handheld app still calls `http://127.0.0.1:8790`; pointing it at the Render address needs a new APK.

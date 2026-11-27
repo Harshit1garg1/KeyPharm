@@ -1,0 +1,12 @@
+{
+  "name": "keypharm-workspace",
+  "version": "0.9.37",
+  "private": true,
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "start": "node tools/workspace-server.mjs",
+    "test": "node --test tests/*.test.mjs"
+  }
+}
