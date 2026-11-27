@@ -824,6 +824,7 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
 
                 scan_outbound(["AC0001"])
                 scan_outbound(["AC0001","AB0001"])
+                expect(mobile.locator('.tag-row[data-tag-status="matched"]')).to_contain_text("Physalis · PHYSALIS-M")
                 mobile.get_by_role("button",name="Next pallet").click()
                 scan_outbound(["AC0002"])
                 scan_outbound(["AB0001"])

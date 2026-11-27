@@ -311,7 +311,8 @@ export function compare(manifest, observed, inventory = []) {
       if (!remaining.get(sku)) { extra.push(epc); continue; }
       remaining.set(sku,remaining.get(sku) - 1);
       matched.push(epc);
-      matchedCartons.push({epc,sku:carton.sku,carton:carton.carton});
+      matchedCartons.push({epc,sku:carton.sku,carton:carton.carton,
+        ...(carton.variant_size ? {variant_size:carton.variant_size} : {})});
     }
     const expected = palletCartonCount(manifest);
     const missing = [...remaining].flatMap(([sku,quantity]) => Array(quantity).fill(sku));

@@ -1048,20 +1048,32 @@ function tagRows(s,r = scanResult(s)) {
   const extra = epc => {
     const carton = connected?.stock.find(item => item.epc === epc);
     const other = otherPallet(s.manifest,epc);
-    const title = carton ? 'Extra is ' + demoSku(cartonSku(carton)) : other ? 'Belongs to pallet ' + other : 'Outside this pallet';
+    const title = carton ? 'Extra is ' + cartonSku(carton).toUpperCase() : other ? 'Belongs to pallet ' + other : 'Outside this pallet';
     return row(epc,title,'unexpected','Unexpected',scannedTagConflict(epc,s));
   };
+  const cartonTitle = carton => {
+    const sku = cartonSku(carton);
+    return sku === carton.sku ? sku : carton.sku + ' · ' + sku.toUpperCase();
+  };
   if (s.manifest.requirements) {
-    const observed = (r.matchedCartons ?? []).map(carton => row(carton.epc,carton.sku + ' · ' + demoSku(carton.sku),'matched','Expected'));
+    const observed = (r.matchedCartons ?? []).map(carton => {
+      const saved = carton.variant_size ? carton : connected?.stock.find(item => item.epc === carton.epc) ?? carton;
+      return row(carton.epc,cartonTitle(saved),'matched','Expected');
+    });
     const shortages = s.manifest.requirements.flatMap(({sku}) => {
       const missing = r.missing.filter(product => product === sku).length;
-      return missing ? [row('',sku + ' · ' + demoSku(sku),pending ? 'waiting' : 'missing',missing + (pending ? ' to scan' : ' missing'))] : [];
+      return missing ? [row('',sku.toUpperCase(),pending ? 'waiting' : 'missing',missing + (pending ? ' to scan' : ' missing'))] : [];
     });
     return [...observed,...shortages,...r.extra.map(extra)].join('');
   }
   return r.extra.map(extra).join('') +
-    s.manifest.cartons.map(c => matched.has(c.epc) ? row(c.epc,c.carton,'matched','Expected') :
-      pending ? row(c.epc,c.carton,'waiting','Waiting') : row(c.epc,c.carton,'missing','Missing')).join('');
+    s.manifest.cartons.map(c => {
+      if (matched.has(c.epc)) {
+        const registered = connected?.stock.find(item => item.epc === c.epc);
+        return row(c.epc,registered ? cartonTitle(registered) : c.carton,'matched','Expected');
+      }
+      return pending ? row(c.epc,c.carton,'waiting','Waiting') : row(c.epc,c.carton,'missing','Missing');
+    }).join('');
 }
 function resultBox(s, title, run) {
   if (!run) return '<div><h3>' + title + '</h3><p class="muted">No earlier run.</p></div>';

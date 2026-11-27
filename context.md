@@ -1,6 +1,6 @@
 # KeyPharm RFID PoC context
 
-Updated 27 November 2026. Android **0.9.35**, version code **56**, package `be.keypharm.rfid.poc.dev`. GitHub branch `Harshit-POC` contains the connected PoC.
+Updated 27 November 2026. Android **0.9.36**, version code **57**, package `be.keypharm.rfid.poc.dev`. GitHub branch `Harshit-POC` contains the connected PoC.
 
 ## Run locally
 
