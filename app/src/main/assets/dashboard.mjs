@@ -1,4 +1,4 @@
-import {actionLabel, displaySource, escapeHtml as escape, manifestFor} from './model.mjs';
+import {actionLabel, cartonSku, displaySource, escapeHtml as escape, manifestFor} from './model.mjs';
 import {indexRecords, RECENT_LIMIT, sections} from './dashboard-model.mjs';
 
 const find = selector => document.querySelector(selector);
@@ -79,13 +79,34 @@ function updateOverview() {
   empty.textContent = previousBody === undefined ? 'Waiting for records…' : 'No shared sessions yet.';
 }
 
-function observationDetails(observations) {
-  const entries = Object.entries(observations ?? {});
-  return fold('Observed EPCs (' + entries.length + ')', list(entries, ([epc,o]) => code(epc) +
-    '<br><small>' + escape(joined(o?.count == null ? '' : o.count + ' reads',o?.rssi == null ? '' : 'RSSI ' + o.rssi,
-      time(o?.first))) + '</small>'));
+function cartonTitle(carton) {
+  if (!carton?.sku) return '';
+  const sku = cartonSku(carton);
+  return sku === carton.sku ? sku : carton.sku + ' · ' + sku.toUpperCase();
 }
-function runEvidence(run) {
+function observedSku(epc, session, run) {
+  const manifest = manifestFor(session,run) ?? session?.manifest;
+  const pallets = manifest?.pallets?.length ? manifest.pallets : manifest ? [manifest] : [];
+  if (run?.palletEpc === epc || pallets.some(p => p.palletEpc === epc) ||
+      session?.palletAttempts?.some(a => a.actualPalletEpc === epc)) return '';
+  const matched = run?.result?.matchedCartons?.find(c => c.epc === epc);
+  const registered = stockOverview?.cartons?.get(epc);
+  if (matched) return registered && !matched.variant_size ? cartonTitle(registered) : cartonTitle(matched);
+  if (registered) return cartonTitle(registered);
+  const planned = pallets.flatMap(p => p.cartons ?? []).find(c => c.epc === epc);
+  if (planned) return cartonTitle(planned);
+  return run?.result?.extraSkus?.[epc] ?? '';
+}
+function observationDetails(observations, session, run) {
+  const entries = Object.entries(observations ?? {});
+  return fold('Observed EPCs (' + entries.length + ')', list(entries, ([epc,o]) => {
+    const sku = observedSku(epc,session,run);
+    return code(epc) + (sku ? ' · <strong>' + escape(sku) + '</strong>' : '') +
+      '<br><small>' + escape(joined(o?.count == null ? '' : o.count + ' reads',o?.rssi == null ? '' : 'RSSI ' + o.rssi,
+        time(o?.first))) + '</small>';
+  }));
+}
+function runEvidence(run, session) {
   const r = run.result;
   return facts(['Operator',run.operator],['Source',displaySource(run.source)],['Started',time(run.startedAt)],['Finished',time(run.endedAt)],
     ['Duration',run.elapsedSeconds == null ? null : run.elapsedSeconds + ' s'],['Manifest revision',run.manifestRevision],
@@ -94,7 +115,7 @@ function runEvidence(run) {
     ['Rescan reason',run.reason],['Notes',run.note ?? run.notes],['Error',run.error]) +
     fold((r?.matchedCartons ? 'Missing cartons by SKU (' : 'Missing EPCs (') + (r?.missing?.length ?? 0) + ')',list(r?.missing,code)) +
     fold('Unexpected EPCs (' + (r?.extra?.length ?? 0) + ')',list(r?.extra,code)) +
-    observationDetails(run.observations);
+    observationDetails(run.observations,session,run);
 }
 function sessionEvidence(s) {
   const m = s.manifest;
@@ -112,7 +133,7 @@ function sessionEvidence(s) {
       pallets.map(p => '<h3>' + escape(p.pallet) + '</h3>' +
         list(p.cartons,c => escape(joined(c.carton,c.sku)) + '<br>' + code(c.epc))).join('')) +
     '<h3 class="line">Recent carton scans</h3>' + (scans.map(row =>
-      fold(row.title,runEvidence(row.run),row.status)).join('') || '<p class="muted">No recorded attempts.</p>') +
+      fold(row.title,runEvidence(row.run,s),row.status)).join('') || '<p class="muted">No recorded attempts.</p>') +
     '<h3 class="line">Recent activity</h3>' + list(logs,logBody);
 }
 
@@ -124,7 +145,7 @@ function exceptionEvidence(row) {
     ['Operator',row.run.operator],['Recorded',time(row.at)],['Error',row.run.error]) +
     (row.status === 'Unexpected' ? '<button type="button" data-copy-exception="' + escape(row.epc) + '">Copy EPC</button>' : '') +
     '<div class="exception-subdetails">' + (disposition ? fold('Investigation',logBody(disposition)) : '') +
-    fold('Scan evidence','<div class="exception-evidence-content">' + runEvidence(row.run) + '</div>') + '</div>';
+    fold('Scan evidence','<div class="exception-evidence-content">' + runEvidence(row.run,row.session) + '</div>') + '</div>';
 }
 
 detail.addEventListener('click',event => {
@@ -164,11 +185,11 @@ function renderDetail(row) {
     const a = row.attempt;
     evidence = facts(['Test',row.session.testId],['Pallet locked',a.lockedPallet],['Scanned pallet EPC',a.actualPalletEpc],['Operator',a.actor],
       ['Started',time(a.startedAt)],['Finished',time(a.endedAt)],['Region / power',readerPower(a.profile)]) +
-      observationDetails(a.observations);
+      observationDetails(a.observations,row.session);
   }
   if (section === 'scans') {
     const manifest = manifestFor(row.session,row.run);
-    evidence = facts(['Test',row.session.testId],['Pallet',manifest?.pallet]) + runEvidence(row.run);
+    evidence = facts(['Test',row.session.testId],['Pallet',manifest?.pallet]) + runEvidence(row.run,row.session);
   }
   if (section === 'exceptions') evidence = sessionExceptions(row);
   if (section === 'activity') evidence = facts(['Test',row.session.testId],['Actor',row.log.actor],
@@ -353,7 +374,11 @@ nav.addEventListener('click',event => {
 window.addEventListener('hashchange',() => navigate(true));
 refresh.addEventListener('click',fetchRecords);
 window.addEventListener('workspace-updated',fetchRecords);
-window.addEventListener('stock-overview',event => { stockOverview = event.detail; updateOverview(); });
+window.addEventListener('stock-overview',event => {
+  stockOverview = event.detail;
+  updateOverview();
+  if (!catalog.hidden) renderRecords();
+});
 updateOverview();
 navigate();
 fetchRecords();

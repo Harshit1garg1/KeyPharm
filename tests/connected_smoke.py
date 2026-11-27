@@ -838,6 +838,13 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 lead.get_by_role("button",name="Refresh records").click()
                 expect(row.get_by_text("2 of 2 pallets matched")).to_be_visible()
                 expect(row.get_by_role("checkbox",name="Select PAL-SKU for dispatch")).to_be_enabled()
+                lead.goto(base + "/#scans")
+                observed = lead.locator("#detail details.dashboard-fold").filter(has_text="Observed EPCs (")
+                observed.locator(":scope > summary").click()
+                expect(observed.locator(".dashboard-fold-body")).to_contain_text(f"AB0002 · Physalis · {other_sku.upper()}")
+                lead.locator("#records button",has_text="Hold").first.click()
+                observed.locator(":scope > summary").click()
+                expect(observed.locator(".dashboard-fold-body")).to_contain_text(f"AB0001 · Physalis · {received_sku.upper()}")
                 browser.close()
                 print("Connected browser flow passed: offline outbound, reset, paired receiving, count review, carton history and C72 handoff.")
         finally:

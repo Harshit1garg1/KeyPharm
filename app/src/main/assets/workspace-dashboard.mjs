@@ -469,7 +469,8 @@ async function load(background = false) {
       'pallet-inventory':data.palletInventory.filter(pallet => pallet.status === 'On hand').length,
       inventory:data.inventory.filter(c => c.state !== 'dispatched').length,
       inbound:stockData.tasks.filter(t => t.type === 'receipt' && !['Completed','Cancelled'].includes(t.status)).length,
-      counts:stockData.tasks.filter(t => t.type === 'count' && t.status === 'In progress').length
+      counts:stockData.tasks.filter(t => t.type === 'count' && t.status === 'In progress').length,
+      cartons:new Map(data.inventory.map(c => [c.epc,c]))
     }}));
   } catch (error) {
     if (!canRender()) return;
