@@ -406,7 +406,7 @@ noscript p {margin-top:16px}
 .manifest-quantities > div {display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,11rem),1fr));gap:12px 16px}
 .manifest-quantities div > label {min-width:0}
 .manifest-quantities small {font-weight:400}
-.manifest-quantities input {width:5.5rem;max-width:100%}
+.manifest-quantities input {width:7.5rem;max-width:100%}
 .stock-action:is([data-stock-action="cancel-count"],[data-stock-action="cancel-receipt"]) {margin:0 0 0 auto}
 .stock-action[data-stock-action="cancel-count"] button {width:36px;min-height:36px;padding:0;font-size:20px;line-height:1}
 [data-stock-record] {min-width:0}
