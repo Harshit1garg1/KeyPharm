@@ -26,8 +26,9 @@ h3 {font-size:17px;margin:0 0 8px}
 p {margin:0 0 12px}
 small,.muted {color:var(--subtle)}
 #notice {white-space:pre-line}
-#notice:empty {display:none}
-#notice:not(:empty),.status {padding:8px 12px;background:var(--sky);border-radius:8px}
+.info-bubble:empty {display:none}
+.info-bubble,.status {padding:8px 12px;background:var(--sky);border-radius:8px}
+.info-bubble {border:1px solid var(--line);width:fit-content;max-width:100%}
 #notice[data-error],.status.hold,.status.interrupted,.status.incomplete {color:var(--hold);background:var(--clay)}
 .status.match {color:var(--match);background:var(--leaf)}
 .line {border-top:1px solid var(--line);padding-top:12px;margin-top:12px}
@@ -98,6 +99,9 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .panel > details:first-child > summary,.panel > h2 + details > summary {border-top:0}
 @media(prefers-reduced-motion:reduce) {.handheld summary::after {transition:none}}
 .scan-cta {width:100%;min-height:56px;margin-top:12px}
+.receipt-read {display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border:1px solid var(--line);border-radius:8px}
+.receipt-read strong,.receipt-read code {display:block;overflow-wrap:anywhere}
+.receipt-read .receipt-remove {flex:none;min-width:44px;min-height:44px;padding:0;font-size:1.5rem}
 #demo-trigger {touch-action:none;user-select:none}
 .full {grid-column:1/-1}
 .log {list-style:none;margin:0;padding:0}
@@ -139,7 +143,7 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .home .title-row {align-items:baseline}
 
 /* Session steps: a real sequence, so an ordered strip. */
-.steps {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;list-style:none;margin:0 0 12px;padding:0;counter-reset:step}
+.steps {display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:4px;list-style:none;margin:0 0 12px;padding:0;counter-reset:step}
 .steps li {counter-increment:step;display:flex;align-items:center;justify-content:center;gap:4px;min-height:36px;padding:4px;border-radius:7px;background:var(--paper);border:1px solid var(--line);color:var(--subtle);font-size:13px;font-weight:650;text-align:center}
 .steps li::before {content:counter(step)}
 .steps li[data-state=done] {background:var(--leaf);border-color:var(--leaf);color:var(--match)}
@@ -177,6 +181,14 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .reader-body p {margin:0}
 
 /* Primary action in the thumb zone, always reachable. */
+.bottom-tabs {position:fixed;inset:auto 0 0;z-index:6;padding:4px 12px calc(4px + env(safe-area-inset-bottom));background:var(--paper);border-top:1px solid var(--line)}
+.bottom-tabs > div {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;max-width:672px;margin:auto}
+.bottom-tabs button {min-height:48px;padding:8px 4px;border:0;background:transparent;color:var(--muted);font-size:.9rem}
+.bottom-tabs button svg {display:block;width:24px;height:24px;margin:auto;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.bottom-tabs button[aria-current="page"] {background:var(--sky);color:var(--action);font-weight:700}
+.shell:has(.bottom-tabs) {padding-bottom:calc(74px + env(safe-area-inset-bottom))}
+.shell:has(.bottom-tabs) .actionbar {bottom:calc(57px + env(safe-area-inset-bottom))}
+.shell:has(.bottom-tabs):has(.actionbar) {padding-bottom:calc(160px + env(safe-area-inset-bottom))}
 .actionbar {position:fixed;left:0;right:0;bottom:0;z-index:5;padding:12px 24px;background:var(--workspace);border-top:1px solid var(--line)}
 .actionbar .scan-cta {display:flex;max-width:672px;margin:0 auto}
 .shell:has(.actionbar) {padding-bottom:104px}
@@ -198,7 +210,43 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .pallet-pick input {width:22px;min-height:22px;accent-color:var(--action)}
 #build-form .secondary {width:100%}
 @media(max-width:420px) {.handheld .brand img {height:34px}}
-.mode-line {margin:12px 4px 0;font-size:14px}
 .home .search {margin-bottom:12px}
 .sku-gap {margin:8px 0}
 [hidden] {display:none !important}
+.workspace-strip {position:relative;display:grid;grid-template-columns:minmax(0,1.2fr) repeat(2,minmax(0,1fr));gap:8px;margin-bottom:12px}
+.workspace-strip:not(:has(select)) {grid-template-columns:repeat(2,minmax(0,1fr))}
+.workspace-bubble {
+  position:fixed;z-index:8;bottom:calc(72px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);
+  width:max-content;max-width:min(320px,calc(100vw - 32px));margin:0;padding:8px 12px;border:0;
+  border-radius:18px;background:rgba(0,0,0,.82);color:#fff;pointer-events:none;
+}
+.workspace-bubble[data-visible="false"],.native-toast-status {
+  position:absolute;width:1px;height:1px;padding:0;border:0;overflow:clip;clip-path:inset(50%);pointer-events:none;
+}
+.workflow-dialog {width:min(calc(100% - 32px),400px);border:1px solid var(--line);border-radius:16px;padding:24px;background:var(--paper);color:var(--ink)}
+.lookup-indicator {width:112px;height:112px;margin:22px auto 6px;border:3px solid var(--line);border-radius:50%;background:var(--paper)}
+.lookup-indicator:not([data-signal="idle"]) {border-color:var(--action);background:var(--sky);animation:lookup-breathe 1.4s ease-in-out infinite}
+.lookup-indicator[data-signal="medium"] {animation-duration:.9s}
+.lookup-indicator[data-signal="strong"] {animation-duration:.5s}
+.lookup-label {text-align:center;margin:0}
+.tag-result {border-top:1px solid var(--line);padding-top:12px}
+.tag-result h2 {margin:0 0 8px;overflow-wrap:anywhere}
+.tag-result dl {display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 12px;margin:0 0 8px}
+.tag-result dt {color:var(--muted)}
+.tag-result dd {margin:0;overflow-wrap:anywhere}
+@keyframes lookup-breathe {0%,100% {transform:scale(.84);opacity:.65} 50% {transform:scale(1.07);opacity:1}}
+@media (prefers-reduced-motion:reduce) {.lookup-indicator:not([data-signal="idle"]) {animation:none}}
+.tagged-cartons {min-width:0;overflow-wrap:anywhere}
+#workflow-tags {max-height:min(40vh,300px);overflow:auto;text-align:left}
+.workflow-dialog h2 {margin:12px 0 8px}
+.workflow-dialog button {width:100%;margin-top:16px}
+.workflow-tick {display:grid;place-items:center;width:52px;height:52px;border-radius:50%;background:var(--leaf);color:var(--match)}
+.workflow-tick::after {content:"";width:20px;height:11px;border:solid currentColor;border-width:0 0 3px 3px;transform:rotate(-45deg) translateY(-2px)}
+.workflow-dialog[open] .workflow-tick {animation:workflow-tick-in 220ms ease-out both}
+@keyframes workflow-tick-in {from {opacity:0;transform:scale(.72)} to {opacity:1;transform:scale(1)}}
+@media (prefers-reduced-motion:reduce) {.workflow-dialog[open] .workflow-tick {animation:none}}
+.workspace-strip-actions {display:contents}
+.workspace-strip :is(select,button) {height:48px;min-height:48px;min-width:0;margin:0}
+.workspace-strip-actions button {padding-inline:8px}
+.manifest-options:has(> button:nth-child(2):last-child) {display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+.manifest-options > button {min-height:48px}

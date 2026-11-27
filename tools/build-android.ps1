@@ -11,6 +11,16 @@ $project = Split-Path -Parent $PSScriptRoot
 $src = Join-Path $project 'app\src\main'
 $vendor = Join-Path $project 'app\libs\DeviceAPI_ver20251103_release.aar'
 if (!(Test-Path -LiteralPath $vendor)) { throw 'Place the Chainway DeviceAPI AAR in app/libs.' }
+$barcodeCore = Join-Path $project 'build\zxing-core-3.5.3.jar'
+$barcodeHash = '8D8064C1636FDAEF7189DD9055C7D59950A8940A12F2293956446EC3C109FD82'
+if (!(Test-Path -LiteralPath $barcodeCore)) {
+    $null = New-Item -ItemType Directory -Path (Split-Path -Parent $barcodeCore) -Force
+    $download = "$barcodeCore.download"
+    Invoke-WebRequest 'https://repo.maven.apache.org/maven2/com/google/zxing/core/3.5.3/core-3.5.3.jar' -OutFile $download
+    if ((Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash -ne $barcodeHash) { throw 'ZXing download checksum mismatch.' }
+    Move-Item -LiteralPath $download -Destination $barcodeCore -Force
+}
+if ((Get-FileHash -LiteralPath $barcodeCore -Algorithm SHA256).Hash -ne $barcodeHash) { throw 'ZXing dependency checksum mismatch.' }
 $tool = Join-Path $Sdk 'build-tools\34.0.0'
 $platform = Join-Path $Sdk 'platforms\android-34\android.jar'
 $work = Join-Path $project ("build\sdk-" + [guid]::NewGuid())
@@ -41,7 +51,8 @@ if (!$versionCode -or !$versionName) { throw 'Could not read versionCode/version
 $null = $manifest.manifest.SetAttribute('versionCode',$ns,$versionCode)
 $null = $manifest.manifest.SetAttribute('versionName',$ns,$versionName)
 $null = $manifest.manifest.application.SetAttribute('debuggable',$ns,'true')
-$null = $manifest.manifest.application.activity.SetAttribute('name',$ns,'be.keypharm.rfid.MainActivity')
+$launcher = $manifest.manifest.application.SelectSingleNode("activity[intent-filter]")
+$null = $launcher.SetAttribute('name',$ns,'be.keypharm.rfid.MainActivity')
 $null = $manifest.manifest.application.provider.SetAttribute('name',$ns,'be.keypharm.rfid.EvidenceProvider')
 $null = $manifest.manifest.application.provider.SetAttribute('authorities',$ns,"$Package.evidence")
 if ($Label) { $null = $manifest.manifest.application.SetAttribute('label',$ns,$Label) }
@@ -54,11 +65,11 @@ Run "$tool\aapt2.exe" @('compile','--dir',"$vendorDir\res",'-o',$resources)
 Run "$tool\aapt2.exe" @('compile','--dir',"$src\res",'-o',$appResources)
 Run "$tool\aapt2.exe" @('link','-I',$android,'--manifest',$manifestPath,'--min-sdk-version','30','--target-sdk-version','34','-A',"$src\assets",'--java',$generated,'--extra-packages','com.rscja.deviceapi','-o',$unsigned,$resources,$appResources)
 $sources = @(Get-ChildItem -LiteralPath "$src\java",$generated -Recurse -Filter *.java | ForEach-Object FullName)
-Run "$Jdk\bin\javac.exe" (@('--release','17','-encoding','UTF-8','-classpath',"$android;$aarClasses",'-d',$classes) + $sources)
+Run "$Jdk\bin\javac.exe" (@('--release','17','-encoding','UTF-8','-classpath',"$android;$aarClasses;$barcodeCore",'-d',$classes) + $sources)
 $appJar = Join-Path $work 'app.jar'
 Run "$Jdk\bin\jar.exe" @('cf',$appJar,'-C',$classes,'.')
 $env:JAVA_HOME = $Jdk
-Run "$tool\d8.bat" @('--lib',$android,'--min-api','30','--output',$dex,$appJar,$aarClasses)
+Run "$tool\d8.bat" @('--lib',$android,'--min-api','30','--output',$dex,$appJar,$aarClasses,$barcodeCore)
 $apk = [IO.Compression.ZipFile]::Open($unsigned,[IO.Compression.ZipArchiveMode]::Update)
 try {
     foreach ($file in Get-ChildItem -LiteralPath $dex -Filter '*.dex') {

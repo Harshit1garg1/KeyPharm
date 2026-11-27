@@ -3,20 +3,46 @@ export const SAMPLE = `pallet_ref,pallet_epc,carton_ref,carton_epc,sku
 KP-DEMO-01,A00000000000000000000001,Carton 01,C00000000000000000000001,Ginger
 KP-DEMO-01,A00000000000000000000001,Carton 02,C00000000000000000000002,Ginger
 KP-DEMO-01,A00000000000000000000001,Carton 03,C00000000000000000000003,Essential oil
-KP-DEMO-01,A00000000000000000000001,Carton 04,C00000000000000000000004,Pomegranate juice
+KP-DEMO-01,A00000000000000000000001,Carton 04,C00000000000000000000004,Physalis
 `;
 export const EXTRA_EPC = 'E00000000000000000000009';
 const columns = ['pallet_ref', 'pallet_epc', 'carton_ref', 'carton_epc', 'sku'];
 // Excel saves ';' instead of ',' in Dutch and Belgian locales; the header decides which one the file uses.
 const csvLine = sep => new RegExp('(?:^|' + sep + ')(?:"((?:[^"]|"")*)"|([^"' + sep + ']*))(?=' + sep + '|$)', 'g');
 export const normalizeEpc = value => String(value ?? '').trim().toUpperCase();
-const validEpc = value => /^(?:[0-9A-F]{2}){2,31}$/.test(value);
-function cells(line, row, sep) {
+export const productSku = value => value === 'Juice' ? 'Physalis' : value;
+export const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]);
+export const displaySource = value => value == null ? value : value === 'C72 hardware' ? 'RFID handheld' : ['Simulation','Simulated','Simulator'].includes(value) ? 'Scan *' :
+  ['Sample CSV','Demo sample CSV'].includes(value) ? 'CSV *' : String(value).replace(/\bC72\b/gi, 'UHF');
+
+const productCodes = {Physalis:'DEMO-PHY','Tiger Balm':'DEMO-TB',Biotona:'DEMO-BIO'};
+export const demoSku = sku => productCodes[sku] ?? sku;
+export const skuProduct = sku => Object.keys(productCodes).find(product => productCodes[product] === sku) ?? productSku(sku);
+
+export function receiptProducts(task) {
+  const quantities = task.quantities ?? Object.fromEntries([...new Set(task.expected.map(carton => carton.sku))]
+    .map(sku => [sku,task.expected.filter(carton => carton.sku === sku).length]));
+  const identifiers = task.identifiers ?? Object.entries(quantities).map(([sku]) => [sku,sku]);
+  return identifiers.map(([identifier,sku]) => ({identifier,sku,remaining:quantities[sku] - (task.receivedBySku?.[sku] ??
+    task.expected.filter(carton => carton.sku === sku && task.received.includes(carton.epc)).length)}));
+}
+export const validEpc = value => /^(?:[0-9A-F]{2}){2,31}$/.test(value);
+function cells(line, row, sep, size = columns.length) {
   const parts = [...line.matchAll(csvLine(sep))];
-  if (parts.map(p => p[0]).join('') !== line || parts.length !== columns.length) {
-    throw new Error('Row ' + row + ': expected five CSV fields.');
+  if (parts.map(p => p[0]).join('') !== line || parts.length !== size) {
+    throw new Error('Row ' + row + ': expected ' + (size === 5 ? 'five' : size) + ' CSV fields.');
   }
   return parts.map(p => (p[1]?.replaceAll('""', '"') ?? p[2]).trim());
+}
+
+export function parseCsvRows(text, headers) {
+  if (typeof text !== 'string') throw new Error('Choose a CSV.');
+  const [header,...lines] = text.replace(/^\uFEFF/,'').trim().split(/\r?\n/);
+  const sep = [',',';'].find(value => header.toLowerCase().split(value).map(col => col.trim()).join() === headers.join());
+  const rows = sep ? lines.flatMap((line,index) =>
+    !line.replace(new RegExp('[\\s"' + sep + ']', 'g'), '') ? [] : [cells(line,index + 2,sep,headers.length)]) : [];
+  if (!sep || !rows.length) throw new Error('Use the template headers and at least one data row.');
+  return rows;
 }
 
 // Manifest built on the handheld from one scan: the chosen pallet tag, every other kept EPC as a numbered carton.
@@ -32,9 +58,41 @@ export function manifestCsv(palletRef, palletEpc, epcs, sku = '') {
   return ['pallet_ref,pallet_epc,carton_ref,carton_epc,sku', ...cartons.map((epc,i) =>
     [ref, pallet, 'Carton ' + String(i + 1).padStart(2,'0'), epc, item].join(','))].join('\n') + '\n';
 }
+const skuColumns = ['pallet_ref','pallet_epc','sku','quantity'];
+export function skuManifestCsv(pallets) {
+  return [skuColumns.join(','),...pallets.flatMap(pallet => pallet.requirements.map(({sku,quantity}) =>
+    [pallet.pallet,pallet.palletEpc,demoSku(sku),quantity].map(csvCell).join(',')))].join('\n');
+}
+export const palletCartonCount = pallet => pallet.requirements?.reduce((sum,row) => sum + row.quantity,0) ?? pallet.cartons.length;
+
+function parseSkuManifest(text) {
+  const pallets = new Map(), tags = new Set();
+  let labels = 0;
+  for (const [pallet,tag,code,value] of parseCsvRows(text,skuColumns)) {
+    const palletEpc = normalizeEpc(tag), sku = skuProduct(code), quantity = Number(value);
+    if (!pallet || pallet.length > 80 || /^[=+@-]/.test(pallet) || !validEpc(palletEpc) || !sku ||
+        !Number.isInteger(quantity) || quantity < 1 || quantity > 499) throw new Error('Enter a pallet reference, EPC, SKU and whole carton quantity.');
+    let row = pallets.get(pallet);
+    if (!row) {
+      if (tags.has(palletEpc)) throw new Error('A pallet EPC can appear under one pallet reference only.');
+      tags.add(palletEpc);
+      row = {pallet,palletEpc,cartons:[],requirements:[]};
+      pallets.set(pallet,row);
+      labels++;
+    }
+    if (row.palletEpc !== palletEpc || row.requirements.some(item => item.sku === sku)) throw new Error('Use one quantity per SKU on each pallet.');
+    row.requirements.push({sku,quantity});
+    labels += quantity;
+    if (labels > 500) throw new Error('A manifest can use up to 500 labels.');
+  }
+  const list = [...pallets.values()];
+  return {...(list.length === 1 ? list[0] : {pallet:list.length + ' pallets',palletEpc:'',cartons:[]}),
+    matchBy:'sku',pallets:list};
+}
 export function parseManifest(text) {
   const lines = text.replace(/^\uFEFF/, '').trim().split(/\r?\n/);
   const header = lines.shift().toLowerCase();
+  if ([',',';'].some(separator => header.split(separator).map(field => field.trim()).join() === skuColumns.join())) return parseSkuManifest(text);
   const sep = [',', ';'].find(s => header.split(s).map(h => h.trim()).join() === columns.join());
   if (!sep) throw new Error('Use the five headers from the sample CSV, separated by commas or semicolons.');
   if (!lines.length) throw new Error('Manifest needs at least one carton.');
@@ -64,7 +122,7 @@ export function parseManifest(text) {
       }
       epcs.add(epc);
       references.add(carton.toUpperCase());
-      entry.cartons.push({epc, carton, sku});
+      entry.cartons.push({epc, carton, sku:productSku(sku)});
     } catch (error) {
       errors.push(error.message);
     }
@@ -82,6 +140,23 @@ export function parseManifest(text) {
 }
 
 const palletsOf = m => m?.pallets?.length ? m.pallets : (m ? [m] : []);
+const manifestCartons = m => palletsOf(m).flatMap(pallet => pallet.cartons ?? []);
+export function outboundManifestConflict(manifest,inventory,sessions,currentId) {
+  const expected = new Set(manifestCartons(manifest).map(carton => carton.epc));
+  const shipped = new Set(inventory.filter(carton => carton.state === 'dispatched' && expected.has(carton.epc)).map(carton => carton.epc));
+  if (shipped.size) {
+    const refs = sessions.filter(session => session.dispatchedAt && manifestCartons(session.manifest).some(carton => shipped.has(carton.epc)))
+      .map(session => session.testId);
+    return 'This manifest contains cartons already dispatched' + (refs.length ? ' under ' + refs.join(', ') : '') +
+      '. Change the CSV to use cartons currently on hand.';
+  }
+  const assigned = sessions.filter(session => session.id !== currentId && !session.dispatchedAt &&
+    manifestCartons(session.manifest).some(carton => expected.has(carton.epc)))
+    .map(session => session.testId);
+  if (assigned.length) return 'This manifest contains cartons assigned to ' + assigned.join(', ') +
+    '. Open or reopen the existing session to continue verification, or change the CSV if the assignment is a mistake.';
+  return '';
+}
 const tagsOf = p => [p.palletEpc, ...p.cartons.map(c => c.epc)];
 export const inManifest = (manifest, epc) => palletsOf(manifest).some(p => tagsOf(p).includes(epc));
 
@@ -111,8 +186,41 @@ export function matchesQuery(s, query, status = '') {
     ...s.runs.map(run => run.operator)].join(' ').toLowerCase();
   return String(query ?? '').toLowerCase().split(/\s+/).filter(Boolean).every(term => text.includes(term));
 }
+// "Carton 01" already says what it is; "ST-9" needs the word in front.
+const named = (kind, ref) => String(ref).toLowerCase().startsWith(kind.toLowerCase() + ' ') ? String(ref) : kind + ' ' + ref;
+// Lookup tab: say what one scanned tag is, from records already on the handheld. Read-only.
+export function describeTag(epc, sessions, stock = []) {
+  const item = stock.find(carton => carton.epc === epc);
+  const uses = [];
+  for (const s of [...sessions].reverse()) {
+    // A SKU manifest lists no carton EPCs; a carton belongs to it once a confirmed run matched it.
+    const confirmed = new Set(Object.values(s.palletMatches ?? {}));
+    const runs = s.manifest?.matchBy !== 'sku' ? [] : s.runs.filter(run =>
+      confirmed.has(run.id) || (!s.palletMatches && s.confirmedAt && run === s.runs.at(-1)));
+    for (const pallet of palletsOf(s.manifest)) {
+      const carton = pallet.cartons?.find(c => c.epc === epc) ?? runs.filter(run => run.palletEpc === pallet.palletEpc)
+        .flatMap(run => run.result?.matchedCartons ?? []).find(c => c.epc === epc);
+      if (pallet.palletEpc !== epc && !carton) continue;
+      uses.push({pallet, carton, session:[s.testId, s.location, 'pallet ' + pallet.pallet,
+        s.dispatchedAt ? 'dispatched' : s.closedAt ? 'closed' : ''].filter(Boolean).join(' · ')});
+    }
+  }
+  const carton = item ?? uses.find(use => use.carton)?.carton;
+  if (!carton && !uses.length) return {kind:'unknown', title:'Not in records', rows:[]};
+  const state = item?.state ?? '';
+  const rows = carton ? [['SKU', carton.sku], ['Location', item?.location],
+    ['State', state.charAt(0).toUpperCase() + state.slice(1)], ['Batch', item?.batch_lot],
+    ['Units per carton', item?.units_per_carton]] : [['Cartons expected', palletCartonCount(uses[0].pallet)]];
+  return {kind:carton ? 'carton' : 'pallet', title:carton ? named('Carton', carton.carton) : named('Pallet', uses[0].pallet.pallet),
+    rows:[...rows, ...uses.map(use => ['Session', use.session])]
+      .filter(([, value]) => value || value === 0).map(([label, value]) => [label, String(value)])};
+}
 // AT-02: expected, matched and missing cartons per SKU for one run; SKU never replaces the EPC identity.
 export function skuBreakdown(manifest, result) {
+  if (manifest.requirements) return manifest.requirements.map(({sku,quantity:expected}) => {
+    const missing = result.missing.filter(product => product === sku).length;
+    return {sku,expected,matched:expected - missing,missing};
+  });
   const matched = new Set(result.matched), rows = new Map();
   for (const c of manifest.cartons) {
     const sku = c.sku || 'No SKU', row = rows.get(sku) ?? {sku, expected:0, matched:0, missing:0};
@@ -122,14 +230,34 @@ export function skuBreakdown(manifest, result) {
   }
   return [...rows.values()];
 }
+// Records keep the original action name; screens show the current word for it.
+export const actionLabel = action => action === 'Physical verification' ? 'Verification' : action;
 // Section 9.3 lists "Unexpected reads" as its own state; FR-15 calls it Hold. Show both.
 export const statusLabel = status => status === 'Hold' ? 'Hold: unexpected reads' : status;
-export const lockTo = (manifest, pallet) => ({...manifest, pallet:pallet.pallet, palletEpc:pallet.palletEpc, cartons:pallet.cartons});
+export const pendingPallet = session => session.manifest?.pallets?.find(pallet => !session.palletMatches?.[pallet.palletEpc]);
+export const lockTo = (manifest, pallet) => ({...manifest, pallet:pallet.pallet, palletEpc:pallet.palletEpc, cartons:pallet.cartons, requirements:pallet.requirements});
 // The other loaded pallet an unexpected EPC belongs to, if any.
 export const otherPallet = (manifest, epc) =>
   palletsOf(manifest).find(p => p.palletEpc !== manifest.palletEpc && tagsOf(p).includes(epc))?.pallet;
 
-export function compare(manifest, observed) {
+export function compare(manifest, observed, inventory = []) {
+  if (manifest.requirements) {
+    const remaining = new Map(manifest.requirements.map(({sku,quantity}) => [sku,quantity]));
+    const catalog = new Map(inventory.filter(carton => carton.state === 'available').map(carton => [carton.epc,carton]));
+    const matched = [], extra = [], matchedCartons = [];
+    for (const epc of new Set(observed.map(normalizeEpc))) {
+      if (!epc || epc === manifest.palletEpc) continue;
+      const carton = catalog.get(epc);
+      if (!carton || !remaining.get(carton.sku)) { extra.push(epc); continue; }
+      remaining.set(carton.sku,remaining.get(carton.sku) - 1);
+      matched.push(epc);
+      matchedCartons.push({epc,sku:carton.sku,carton:carton.carton});
+    }
+    const expected = palletCartonCount(manifest);
+    const missing = [...remaining].flatMap(([sku,quantity]) => Array(quantity).fill(sku));
+    return {expected,matched,missing,extra,matchedCartons,percent:Math.round(matched.length * 1000 / expected) / 10,
+      status:extra.length ? 'Hold' : missing.length ? 'Incomplete' : 'Match'};
+  }
   const expected = new Set(manifest.cartons.map(c => c.epc));
   const seen = new Set(observed.map(normalizeEpc).filter(epc => epc && epc !== manifest.palletEpc));
   const matched = [...expected].filter(epc => seen.has(epc));
@@ -148,12 +276,15 @@ export function scanDelta(previous, current) {
   };
 }
 
+export const isCurrentManifestRun = (session, run) =>
+  Boolean(run && (run.manifestRevision ?? 1) === (session?.manifest?.revision ?? 1));
+
 export function canContinue(session, run) {
   return Boolean(session?.verifiedBy && session.identified && !session.closedAt &&
-    run?.state === 'Finished' && run.result?.status === 'Match');
+    isCurrentManifestRun(session,run) && run.state === 'Finished' && run.result?.status === 'Match');
 }
 
-export const roles = {admin:'Test lead', operator:'Operator', supervisor:'Supervisor', reviewer:'Reviewer'};
+export const roles = {admin:'Administrator', operator:'Operator', supervisor:'Supervisor', reviewer:'Reviewer'};
 const actions = {
   create: ['admin','operator'], manifest: ['admin'], 'reader-power': ['admin'], verify: ['supervisor'],
   scan: ['operator','admin'], confirm: ['operator','admin'], close: ['operator','admin','supervisor'],
@@ -184,7 +315,7 @@ export function dashboardSnapshot(store, includeOtherRecords = false) {
   })};
 }
 
-const csvCell = value => {
+export const csvCell = value => {
   let str = String(value ?? '');
   // Plain numbers such as RSSI -55 are not formulas; keep them numeric for Excel.
   if (!/^-?\d+(\.\d+)?$/.test(str) && (/^[\s\u0000-\u001f]*[=+@-]/.test(str) || /^[\t\r\n]/.test(str))) str = "'" + str;
@@ -196,13 +327,16 @@ export function evidenceCsv(store) {
     const identity = [s.id,s.testId,s.manifest?.pallet];
     rows.push(['Session',...identity,'',s.createdAt,s.creator,s.closedAt ? 'Closed' : 'Open','','','','','','',JSON.stringify({...s, runs:undefined, logs:undefined, manifest:undefined})]);
     if (s.manifest) rows.push(['Manifest',...identity,'',s.manifest.importedAt,'','Revision ' + s.manifest.revision,'','','','','',s.manifest.palletEpc,s.manifest.source]);
-    for (const c of s.manifest?.cartons ?? []) rows.push(['Manifest carton',...identity,'','','','','','','','','',c.epc,JSON.stringify(c)]);
+    for (const pallet of palletsOf(s.manifest)) {
+      for (const c of pallet.cartons ?? []) rows.push(['Manifest carton',s.id,s.testId,pallet.pallet,'','','','','','','','','',c.epc,JSON.stringify(c)]);
+    }
     for (const run of s.runs) {
-      const r = run.result ?? {};
-      rows.push(['Run',...identity,run.id,run.endedAt,run.operator,run.state === 'Finished' ? r.status : run.state,r.expected,r.matched?.length,r.missing?.length,r.extra?.length,r.percent,'',JSON.stringify({...run, observations:undefined})]);
-      for (const [epc,read] of Object.entries(run.observations)) rows.push(['RFID observation',...identity,run.id,read.first,run.operator,
-        epc === s.manifest?.palletEpc ? 'Pallet' : (r.matched?.includes(epc) ? 'Matched' : 'Unexpected'),'','','','','',epc,JSON.stringify(read)]);
-      for (const epc of r.missing ?? []) rows.push(['Missing EPC',...identity,run.id,run.endedAt,run.operator,'Missing','','','','','',epc,'']);
+      const r = run.result ?? {}, m = manifestFor(s,run);
+      const runIdentity = [s.id,s.testId,m?.pallet];
+      rows.push(['Run',...runIdentity,run.id,run.endedAt,run.operator,run.state === 'Finished' ? r.status : run.state,r.expected,r.matched?.length,r.missing?.length,r.extra?.length,r.percent,'',JSON.stringify({...run, observations:undefined})]);
+      for (const [epc,read] of Object.entries(run.observations)) rows.push(['RFID observation',...runIdentity,run.id,read.first,run.operator,
+        epc === m?.palletEpc ? 'Pallet' : (r.matched?.includes(epc) ? 'Matched' : 'Unexpected'),'','','','','',epc,JSON.stringify(read)]);
+      for (const epc of r.missing ?? []) rows.push(['Missing EPC',...runIdentity,run.id,run.endedAt,run.operator,'Missing','','','','','',epc,'']);
     }
     for (const log of s.logs) rows.push(['Log',...identity,log.run ?? '',log.at,log.actor,'','','','','','','',log.action + ': ' + (log.detail ?? '')]);
   }
@@ -219,9 +353,13 @@ export const EXPORT_COLUMNS = ['SessionID','Mode','TransactionRef','PalletRef','
 export function specEvidenceCsv(store) {
   const rows = [EXPORT_COLUMNS];
   for (const s of store.sessions) {
-    s.runs.filter(run => run.result).forEach((run, index) => {
+    const firstPassByPallet = new Set();
+    s.runs.filter(run => run.result).forEach(run => {
       const r = run.result, p = run.profile ?? {}, m = manifestFor(s, run);
-      const cartons = new Map((m?.cartons ?? []).map(c => [c.epc, c]));
+      const key = m?.palletEpc;
+      const rescan = firstPassByPallet.has(key);
+      firstPassByPallet.add(key);
+      const cartons = new Map((r.matchedCartons ?? m?.cartons ?? []).map(c => [c.epc, c]));
       const notes = s.logs.filter(log => log.run === run.id && log.action === 'Run note').map(log => log.detail);
       // Latest investigation per EPC; the handheld logs "Unexpected EPC <outcome>" with "<epc> / <note>".
       const disposition = new Map();
@@ -232,7 +370,7 @@ export function specEvidenceCsv(store) {
       }
       const row = (epc, classification, expected, observed, code, note) => {
         const c = cartons.get(epc), read = run.observations[epc], d = disposition.get(epc);
-        return [s.id, s.mode ?? 'POC', '', m?.pallet, s.testId, run.id, index ? 'Rescan' : 'First pass',
+        return [s.id, s.mode ?? 'POC', '', m?.pallet, s.testId, run.id, rescan ? 'Rescan' : 'First pass',
           run.startedAt, run.endedAt, run.elapsedSeconds, s.location, s.level, c?.sku, c?.carton,
           expected ? epc : '', observed ? epc : '', classification, p.model ?? p.name, p.deviceId, p.region, p.powerDbm,
           run.method ?? s.method, s.label, s.placement, s.shielding, r.percent,
@@ -240,7 +378,14 @@ export function specEvidenceCsv(store) {
           [note, run.reason && 'Rescan reason: ' + run.reason, d?.note, ...notes].filter(Boolean).join(' | '),
           read?.count, read?.first, read?.last, read?.rssi, p.version];
       };
-      for (const c of m?.cartons ?? []) {
+      if (m?.requirements) {
+        for (const epc of r.matched) rows.push(row(epc,'Matched',false,true,''));
+        for (const sku of r.missing) {
+          const missing = row('','Missing',false,false,'MISSING_CARTON');
+          missing[12] = sku;
+          rows.push(missing);
+        }
+      } else for (const c of m?.cartons ?? []) {
         const seen = r.matched.includes(c.epc);
         rows.push(row(c.epc, seen ? 'Matched' : 'Missing', true, seen, seen ? '' : 'MISSING_CARTON'));
       }
@@ -304,8 +449,11 @@ function configResults(sessions) {
 }
 
 // A run is compared against the manifest revision that was current when it started (section 8 data rule).
-export const manifestFor = (s, run) =>
-  [...(s.manifestRevisions ?? []), s.manifest].find(m => m && m.revision === run.manifestRevision) ?? s.manifest;
+export function manifestFor(s, run) {
+  const manifest = [...(s.manifestRevisions ?? []), s.manifest].find(m => m && m.revision === run.manifestRevision) ?? s.manifest;
+  const pallet = manifest?.pallets?.find(entry => entry.palletEpc === run.palletEpc);
+  return pallet ? lockTo(manifest,pallet) : manifest;
+}
 
 // One PoC test plan for the day: "TEST-ID description" per line. Records link to it by Test ID.
 export function parsePlan(text) {

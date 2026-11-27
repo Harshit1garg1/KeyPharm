@@ -1,3 +1,4 @@
+import {actionLabel} from './model.mjs';
 export const RECENT_LIMIT = 50;
 
 export const sections = {
@@ -43,10 +44,21 @@ export function indexRecords(sessions) {
       }
     }
     for (const [i,log] of (session.logs ?? []).entries()) {
-      order('activity',{id:session.id + ':' + i, title:log.action || 'Activity event',
+      order('activity',{id:session.id + ':' + i, title:actionLabel(log.action) || 'Activity event',
         description:[test,log.actor].filter(Boolean).join(' / '), at:log.at, log});
     }
   }
   for (const group of Object.values(rows)) group.sort((a,b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
-  return {rows, results, closed};
+  const exceptionGroups = new Map();
+  for (const item of rows.exceptions) {
+    const session = item.session;
+    if (!exceptionGroups.has(session.id)) {
+      exceptionGroups.set(session.id,{id:session.id,session,title:session.testId || 'Unnamed session',
+        description:[session.manifest?.pallet,session.location].filter(Boolean).join(' / '),at:item.at,exceptions:[]});
+    }
+    exceptionGroups.get(session.id).exceptions.push(item);
+  }
+  const exceptionSessions = [...exceptionGroups.values()].map(row => ({...row,
+    status:row.exceptions.length + (row.exceptions.length === 1 ? ' exception' : ' exceptions')}));
+  return {rows, results, closed, exceptionSessions};
 }

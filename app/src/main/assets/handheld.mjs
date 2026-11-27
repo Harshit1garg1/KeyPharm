@@ -1,16 +1,28 @@
-import {SAMPLE, EXTRA_EPC, normalizeEpc, parseManifest, compare, scanDelta, canContinue, canClose,
+import {SAMPLE, EXTRA_EPC, normalizeEpc, validEpc, parseManifest, compare, scanDelta, canContinue, canClose, isCurrentManifestRun,
   roles, permits, allocationTotal, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary,
-  parsePlan, planCoverage, closePlanErrors, lockPallet, lockTo, otherPallet, inManifest, manifestCsv, missingSku, unexported,
-  matchesQuery, skuBreakdown, statusLabel, manifestFor} from './model.mjs';
+  parsePlan, planCoverage, closePlanErrors, lockPallet, lockTo, pendingPallet, otherPallet, inManifest, manifestCsv, missingSku, unexported,
+  displaySource, matchesQuery, skuBreakdown, statusLabel, manifestFor, outboundManifestConflict, receiptProducts, demoSku, palletCartonCount, describeTag, actionLabel} from './model.mjs';
 import qrcode from './qrcode-generator.mjs';
+import {workspaceClient} from './workspace-client.mjs';
 
 const root = document.querySelector('#app');
 const who = document.querySelector('#who');
 const notice = document.querySelector('#notice');
 const bridge = window.KeypharmAndroid;
+const connected = workspaceClient(bridge);
+const connectionPanel = document.querySelector('#workspace-connection');
+const workflowDialog = document.querySelector('#workflow-confirmation');
+document.querySelector('#workflow-dismiss').addEventListener('click',() => workflowDialog.close());
+function confirmWorkflow(title, detail, tagged = []) {
+  if (!connected || workflowDialog.open) return;
+  workflowDialog.querySelector('h2').textContent = title;
+  workflowDialog.querySelector('p').textContent = detail;
+  workflowDialog.querySelector('#workflow-tags').innerHTML = taggedList(tagged);
+  workflowDialog.showModal();
+}
 const liveSample = bridge?.liveSampleManifest?.() ?? '';
 const liveSampleName = 'KP-LIVE-SORTED-01.csv';
-const key = 'keypharm-poc-v1';
+const key = connected ? 'keypharm-connected-records-v1' : 'keypharm-poc-v1';
 const metadata = {
   testId:'Test ID', location:'Location', level:'Storage level', product:'Product mix', palletType:'Pallet type',
   label:'Label type and size', placement:'Label position and orientation', wrapping:'Wrapping',
@@ -24,6 +36,10 @@ const defaults = {
 const now = () => new Date().toISOString();
 // The person holding the device signs every record (operator, verifier, sign-off); roles stay local and unauthenticated.
 const actor = () => {
+  if (connected) {
+    if (!connected.auth) throw new Error('Sign in to record a result.');
+    return connected.auth.user.name;
+  }
   if (!store.person) {
     document.querySelector('#who-menu')?.setAttribute('open','');
     throw new Error('Enter your name in the menu at the top right before recording anything.');
@@ -57,15 +73,43 @@ try {
 } catch {
   storageError = true;
 }
-let role = 'operator';
+let role = connected?.auth?.user.role ?? 'operator';
+const compactOperator = () => connected && role === 'operator';
+const handheldRoles = {operator:roles.operator,admin:roles.admin,supervisor:roles.supervisor};
+const canCreate = () => connected ? role === 'admin' : permits(role,'create');
+let refreshConnected = () => {};
+const resetDialog = document.createElement('dialog');
+resetDialog.className = 'workflow-dialog';
+resetDialog.setAttribute('aria-labelledby','reset-demo-title');
+resetDialog.innerHTML = '<form method="dialog" class="stack"><h2 id="reset-demo-title">Reset data *</h2>' +
+  '<p>Clear sessions, scans and test settings on the handheld and dashboard. Restore starting stock.</p>' +
+  field('confirm','Type RESET','','required pattern="RESET" autocomplete="off"') +
+  '<div class="row"><button value="cancel" class="secondary" formnovalidate>Cancel</button>' +
+  '<button value="reset">Reset data *</button></div></form>';
+const palletDialog = document.createElement('dialog');
+palletDialog.id = 'pallet-confirm-dialog';
+palletDialog.className = 'workflow-dialog';
+palletDialog.setAttribute('aria-labelledby','pallet-confirm-title');
+palletDialog.innerHTML = '<form method="dialog" class="stack"><h2 id="pallet-confirm-title">Send pallet scan</h2>' +
+  '<p>Send pallet tag <code id="pallet-confirm-epc"></code> to the dashboard for <strong id="pallet-confirm-ref"></strong>?</p>' +
+  '<div class="row"><button value="cancel" class="secondary" formnovalidate>Cancel</button>' +
+  '<button value="confirm">Confirm</button></div></form>';
+if (connected) document.body.append(resetDialog,palletDialog);
 let selected;
 let view = 'sessions';
+let stockTaskId = '', stockScenario = 'match', stockScanBusy = false, countUpload;
+let receiptProduct = '', receiptCapture, receiptRead, receiptUpload;
+let demoBarcode = true, pendingBarcode;
+// The Search tab keeps the internal name 'lookup'; the Lookup tab is 'identify'.
+let palletTask, palletRead, utilityScan, lookupSessionId, lookupTarget, lookupRead, lookupTimer, identifyRead;
+const identifyPower = () => connected?.controls.identifyPower ?? 10; // dBm: low by default, so the tag held close wins.
 let pendingImport;
 let rescanReason = '';
-let scenario = 'Missing one';
+const defaultScenario = 'Clean match';
+let scenario = defaultScenario;
 let active;
 let reader = {ready:false,message:'Checking reader…'};
-let powerRequest;
+let powerRequest, appliedSessionPower;
 let dashboardUrl = '';
 let dashboardQr = '';
 let includeOtherRecords = false;
@@ -74,7 +118,7 @@ let simulatedKeys = false;
 let query = ''; // session search on the home screen (FR-33)
 let builder; // manifest generator: {tags:{epc:{count,rssi}}, capture, palletRef, sku}
 // The open screen and half-typed form fields survive re-renders and restarts (records stay in `key`).
-const uiKey = 'keypharm-poc-ui-v1';
+const uiKey = connected ? 'keypharm-connected-ui-v1' : 'keypharm-poc-ui-v1';
 let ui = {drafts:{}};
 try { ui = {drafts:{}, ...JSON.parse(localStorage.getItem(uiKey) ?? '{}')}; } catch {}
 function saveUi() {
@@ -83,7 +127,7 @@ function saveUi() {
     else localStorage.setItem(uiKey,JSON.stringify({view, selected, drafts:ui.drafts}));
   } catch {}
 }
-const draftable = el => el.form?.id && el.name && el.form.id !== 'reader-power' &&
+const draftable = el => el.form?.id && el.name && !['reader-power','stock-demo','receipt-barcode'].includes(el.form.id) &&
   !['file','checkbox','radio','hidden','submit','button'].includes(el.type);
 const draftPrefix = formId => (['session','scan','build'].includes(view) ? selected : '') + '|' + formId + '|';
 function clearDrafts(prefix) {
@@ -91,11 +135,27 @@ function clearDrafts(prefix) {
   saveUi();
 }
 
-const session = () => store.sessions.find(entry => entry.id === selected);
+const visibleSessions = () => store.sessions.filter(entry => !connected?.removedSessions.has(entry.id));
+const session = () => visibleSessions().find(entry => entry.id === selected);
+const lookupSession = () => visibleSessions().find(entry => entry.id === lookupSessionId && entry.manifest);
 const latest = s => s?.runs.at(-1);
+const multiPallet = s => s?.manifest?.pallets?.length > 1;
+const latestCurrentRun = s => s?.runs.findLast(run => isCurrentManifestRun(s,run) &&
+  (!multiPallet(s) || run.palletEpc === (pendingPallet(s)?.palletEpc ?? latest(s)?.palletEpc)));
+function automaticRescanReason(run) {
+  const missing = run?.result?.missing?.length;
+  const extra = run?.result?.extra?.length;
+  if (missing && extra) return 'Missing cartons and extra EPCs detected';
+  if (missing) return 'Missing cartons';
+  if (extra) return 'Extra EPCs detected';
+  return '';
+}
 function feedback(message, error = false) {
   notice.textContent = message;
   notice.toggleAttribute('data-error',error);
+  const native = Boolean(bridge?.showToast && message && !message.includes('\n'));
+  notice.classList.toggle('native-toast-status',native);
+  if (native) bridge.showToast(message);
 }
 function log(s, action, detail, run) {
   s.logs.push({action,detail,run,at:now(),actor:actor()});
@@ -107,6 +167,7 @@ function save() {
   if (storageError) throw new Error('Local records are unavailable. Reopen the app before making changes.');
   localStorage.setItem(key,JSON.stringify(store));
   publish();
+  if (connected) queueMicrotask(refreshConnected);
 }
 function commit(change) {
   const previous = structuredClone(store);
@@ -124,7 +185,7 @@ try {
       run.state = 'Interrupted';
       run.endedAt = now();
       run.elapsedSeconds = Math.round((Date.parse(run.endedAt) - Date.parse(run.startedAt)) / 1000);
-      run.result = compare(s.manifest,Object.keys(run.observations));
+      run.result = compareSession(s,manifestFor(s,run),Object.keys(run.observations));
       s.logs.push({action:'Interrupted',detail:'App restarted during capture',run:run.id,at:run.endedAt,actor:run.operator});
     }
     for (const s of store.sessions) if (s.palletPending) {
@@ -140,6 +201,7 @@ try {
 
 // The name in the header signs every record (see actor()); roles stay local.
 function identityMenu(open) {
+  if (connected) return connected.auth ? '<span class="mode">' + escape(connected.auth.user.name) + '</span>' : '';
   const locked = active || powerRequest ? 'disabled' : '';
   const name = store.person;
   return '<details class="who" id="who-menu"' + (open ? ' open' : '') + '><summary aria-label="Role and name">' +
@@ -147,7 +209,7 @@ function identityMenu(open) {
     '<span class="who-text"><strong>' + escape(name || 'Set your name') + '</strong><small>' + escape(roles[role]) + '</small></span>' +
     '<svg class="who-chevron" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="2"/></svg>' +
     '</summary><div class="who-sheet"><label>Role<select id="role" ' + locked + '>' +
-    Object.entries(roles).map(([value,label]) => '<option value="' + value + '" ' + (role === value ? 'selected' : '') +
+    Object.entries(handheldRoles).map(([value,label]) => '<option value="' + value + '" ' + (role === value ? 'selected' : '') +
       '>' + escape(label) + '</option>').join('') + '</select></label>' +
     // Saved names are kept until the Test lead resets local data.
     '<label>Your name<input id="person" list="people" maxlength="60" autocomplete="off" placeholder="Pick or type your name" value="' +
@@ -164,15 +226,19 @@ const STEPS = [['manifest','Cartons'],['verify','Verify'],['scan','Scan'],['clos
 const STEP_ROLE = {manifest:['admin','manifest'], verify:['supervisor','verify'], scan:['operator','scan'], close:['operator','close']};
 const stepOf = s => s.closedAt ? 'done' : !s.manifest ? 'manifest' : !s.verifiedBy ? 'verify' : !s.confirmedAt ? 'scan' : 'close';
 function nextLabel(s) {
-  const step = stepOf(s), run = latest(s);
+  const step = stepOf(s), run = latestCurrentRun(s);
   if (step === 'done') return 'Closed';
-  if (step === 'manifest') return 'Load cartons';
-  if (step === 'verify') return 'Check by hand';
+  if (step === 'manifest') return role === 'operator' ? 'Waiting for setup' : 'Load cartons';
+  if (step === 'verify') return role === 'operator' ? 'Waiting for setup' : role === 'supervisor' ? 'Verify pallet' : 'Waiting for Supervisor';
   if (step === 'close') return 'Ready to close';
   if (!s.identified) return 'Scan pallet';
   return run?.state === 'Finished' && run.result.status !== 'Match' ? run.result.status + ', rescan' : 'Scan cartons';
 }
 function render() {
+  root.hidden = Boolean(connected && !connected.auth);
+  const scanner = view === 'scan' || Boolean(builder?.capture || receiptCapture || utilityScan);
+  who.hidden = scanner;
+  connectionPanel.hidden = !connected || scanner;
   // Keep the menu open across re-renders, e.g. right after a role change.
   who.innerHTML = storageError ? '' : identityMenu(document.querySelector('#who-menu')?.open);
   if (storageError) {
@@ -180,10 +246,14 @@ function render() {
     return;
   }
   const s = session();
-  if (!s && (view === 'session' || view === 'scan')) view = 'sessions';
+  if (!s && ['session','scan'].includes(view)) view = 'sessions';
   if (view === 'build' && (!s || !builder)) view = 'session';
-  root.innerHTML = view === 'scan' ? scanPanel(s) : view === 'build' ? buildPanel(s) : view === 'new' ? subbar() + creation() :
-    view === 'session' ? subbar() + showSession(s) : history();
+  if (view === 'stock' && (!connected?.auth || !['operator','admin'].includes(role))) view = 'sessions';
+  const screen = view === 'scan' ? scanPanel(s) : view === 'build' ? buildPanel(s) : view === 'new' ? subbar() + creation() :
+    view === 'pallet-task' ? subbar() + palletTaskPanel() : view === 'lookup' ? lookupPanel() : view === 'identify' ? identifyPanel() :
+    view === 'settings' ? settingsPanel() : view === 'session' ? subbar() + showSession(s) :
+    view === 'stock' ? subbar() + palletScanRequests() + stockPanel() : history();
+  root.innerHTML = screen + (!scanner && ['sessions','lookup','identify','settings'].includes(view) ? bottomTabs() : '');
   for (const el of root.querySelectorAll('form[id] [name]')) {
     const k = draftable(el) && draftPrefix(el.form.id) + el.name;
     if (k && k in ui.drafts) el.value = ui.drafts[k];
@@ -191,43 +261,361 @@ function render() {
   saveUi();
   if (active) updateScan();
 }
+function goBack() {
+  if (workflowDialog.open) { workflowDialog.close(); return; }
+  if (resetDialog.open) { resetDialog.close('cancel'); return; }
+  if (palletDialog.open) { palletDialog.close('cancel'); return; }
+  if (active) { end(true); return; }
+  if (builder?.capture) { buildToggle(); return; }
+  if (root.querySelector('#untag-dialog[open]')) { root.querySelector('#untag-dialog').close(); return; }
+  if (utilityScan) { stopUtilityScan(true); return; }
+  if (stockScanBusy) return;
+  if (['lookup','identify','settings','pallet-task'].includes(view)) {
+    view = view === 'pallet-task' ? 'stock' : 'sessions';
+    lookupRead = identifyRead = undefined;
+    feedback('');
+    render();
+    return;
+  }
+  if (pendingBarcode) { cancelBarcode(); return; }
+  if (receiptCapture) { stopReceiptScan(true); return; }
+  if (powerRequest || stockScanBusy) return;
+  if (view === 'stock' && receiptUpload) { feedback('Retry the pending confirmation first.',true); return; }
+  const menu = document.querySelector('#who-menu[open]');
+  if (menu) { menu.open = false; return; }
+  if (view === 'sessions' || (connected && !connected.auth)) { bridge?.closeApp?.(); return; }
+  if (view === 'scan' || view === 'build') {
+    builder = undefined;
+    view = 'session';
+  } else {
+    view = 'sessions';
+    selected = undefined;
+    pendingImport = undefined;
+  }
+  feedback('');
+  render();
+  window.scrollTo(0,0);
+}
+function bottomTabs() {
+  return '<nav class="bottom-tabs" aria-label="Main menu"><div>' +
+    [['sessions','Home','M3 10.5 12 3l9 7.5V21h-6v-6H9v6H3z'],
+      ['lookup','Search','M16 16l5 5M10.5 3.5a7 7 0 1 0 0 14 7 7 0 0 0 0-14z'],
+      ['identify','Lookup','M3 3h8l10 10-8 8L3 11zM7.5 7.5h.01'],
+      ['settings','Settings','M10 3h4l.6 2.4 2 .9 2.2-1.1 2.8 2.8-1.1 2.2.9 2L24 13v4l-2.6.6-.9 2 1.1 2.2-2.8 2.8-2.2-1.1-2 .9-.6 2.6h-4l-.6-2.6-2-.9-2.2 1.1-2.8-2.8 1.1-2.2-.9-2L0 17v-4l2.6-.8.9-2L2.4 8l2.8-2.8 2.2 1.1 2-.9zM12 11a4 4 0 1 0 0 8 4 4 0 0 0 0-8z']]
+      .map(([page,label,path]) => button('tab','<svg aria-hidden="true" viewBox="' + (page === 'settings' ? '-2 1 28 28' : '0 0 24 24') +
+        '"><path d="' + path + '"/></svg>','data-page="' + page + '" aria-label="' + label + '" title="' + label + '"' +
+        (view === page ? ' aria-current="page"' : ''))).join('') + '</div></nav>';
+}
 function history() {
-  const total = store.sessions.reduce((sum,s) => sum + allocationTotal(s.allocation),0);
-  const records = store.sessions.slice().reverse().map(s => '<button class="record" data-open="' + escape(s.id) + '"' +
+  const sessions = visibleSessions();
+  const total = sessions.reduce((sum,s) => sum + allocationTotal(s.allocation),0);
+  const records = sessions.slice().reverse().map(s => '<button class="record" data-open="' + escape(s.id) + '"' +
     (matchesQuery(s,query,nextLabel(s)) ? '' : ' hidden') + '><span><strong>' + escape(s.testId) + '</strong><small>' + escape(s.manifest?.pallet ?? 'No cartons loaded') + ' / ' +
-    escape(s.source) + '</small></span><span class="record-next" data-step="' + stepOf(s) + '" data-alert="' + /^(Hold|Incomplete|Interrupted)/.test(nextLabel(s)) +
+    escape(displaySource(s.source)) + '</small></span><span class="record-next" data-step="' + stepOf(s) + '" data-alert="' + /^(Hold|Incomplete|Interrupted)/.test(nextLabel(s)) +
     '">' + escape(nextLabel(s)) +
     '</span></button>').join('');
-  // Reader status first (checked before any scan), then the sessions as one list; the main action sits in the thumb zone.
-  return (bridge ? readerCard() : '') +
-    // Section 6 home: the mode, the device and whether a network is present (the PoC never needs one).
-    '<p class="muted mode-line">PoC Test mode' + (reader.profile?.model ? ' / ' + escape(reader.profile.model) : '') + ' / ' +
-      (navigator.onLine ? 'Network connected, not required' : 'Offline') + '</p>' +
-    '<section class="home"><div class="row spread section-head"><h1>Sessions</h1><small>' + total + ' of 500 labels used</small></div>' +
-    (store.sessions.length > 1 ? '<input type="search" id="search" class="search" aria-label="Search sessions" maxlength="80" ' +
-      'placeholder="Search test, pallet, SKU, place, date, status" value="' + escape(query) + '">' : '') +
-    (records ? '<div class="group records">' + records + '</div>' + '<p class="muted" id="no-match"' +
-      (store.sessions.some(s => matchesQuery(s,query,nextLabel(s))) ? ' hidden' : '') + '>No session matches the search.</p>' :
-      '<p class="empty">No tests yet. Start one, load its cartons, then scan the pallet.</p>') +
-    (permits(role,'create') ? '' : '<p class="muted">Switch to Operator or Test lead to start a test.</p>') + '</section>' +
-    planPanel() +
+  return '<section class="home"><div class="row spread section-head"><h1>Sessions</h1>' +
+    (connected?.auth && (role === 'admin' || (compactOperator() && (connected.stockTasks.length || connected.palletTasks.length))) ?
+      button('stock-tasks','Stock tasks','class="secondary"') : connected ? '' : '<small>' + total + ' of 500 labels used</small>') + '</div>' +
+    (sessions.length > 1 ? '<input type="search" id="search" class="search" aria-label="Search sessions" maxlength="80" ' +
+      'placeholder="Search sessions" value="' + escape(query) + '">' : '') +
+    (records ? '<div class="group records">' + records + '</div><p class="muted" id="no-match"' +
+      (sessions.some(s => matchesQuery(s,query,nextLabel(s))) ? ' hidden' : '') + '>No session matches the search.</p>' :
+      '<p class="empty">No sessions yet.</p>') + '</section>' +
+    (canCreate() ? '<div class="actionbar">' + button('new','New test session','class="scan-cta"') + '</div>' : '');
+}
+function settingsPanel() {
+  return '<h1>Settings</h1>' + (bridge ? readerCard() : '') + planPanel() +
     (permits(role,'export') ? '<h2 class="section-title">Evidence</h2><section class="panel">' + exportState() + '<div class="row">' +
       button('export','Export CSV and summary','class="secondary" ' + (!store.sessions.length ? 'disabled' : '')) +
-      (bridge ? button('dashboard',dashboardUrl ? 'Stop dashboard sharing' : 'Share web dashboard',
+      (bridge && !connected ? button('dashboard',dashboardUrl ? 'Stop dashboard sharing' : 'Share web dashboard',
         'class="secondary" ' + (dashboardResetPending ? 'disabled' : '')) : '') +
-      '</div>' + (bridge && role === 'admin' && !dashboardUrl ?
+      '</div>' + (bridge && !connected && role === 'admin' && !dashboardUrl ?
         '<label class="check"><input id="share-all" type="checkbox" checked>Include hardware and imported records</label>' : '') +
       (dashboardUrl ? '<div class="line dashboard-share"><div class="dashboard-qr" role="img" aria-label="Dashboard QR code">' +
       dashboardQr + '</div><div><p>Scan the QR code or open the private link on the same Wi-Fi network. ' +
-      (includeOtherRecords ? 'All local sessions are shared.' : 'Sample simulation sessions are shared.') + '</p><p><code>' + escape(dashboardUrl) +
+      (includeOtherRecords ? 'All local sessions are shared.' : 'Only marked sessions (*) are shared.') + '</p><p><code>' + escape(dashboardUrl) +
       '</code></p>' + button('copy','Copy dashboard link','class="secondary"') + '</div></div>' : '') +
-      (role === 'admin' ? '<div class="line">' + button('reset','Reset all local data',
+      (role === 'admin' ? '<div class="line">' + button('reset',connected ? 'Reset data *' : 'Reset all local data',
         'class="secondary" ' + (powerRequest ? 'disabled' : '')) + '</div>' : '') +
       (store.audit?.length ? '<details class="line"><summary>Device log (' + store.audit.length + ')</summary><ul class="log">' +
         store.audit.slice().reverse().map(e => '<li><strong>' + escape(e.action) + '</strong><br>' + escape(e.detail) +
           '<br><small>' + escape(e.actor) + ' / ' + escape(time(e.at)) + '</small></li>').join('') + '</ul></details>' : '') +
-      '</section>' : '') +
-    (permits(role,'create') ? '<div class="actionbar">' + button('new','New test session','class="scan-cta"') + '</div>' : '');
+      '</section>' : '');
+}
+const currentStockTask = () => countUpload?.task ?? connected.stockTasks.find(task => task.id === stockTaskId) ?? connected.stockTasks[0];
+function palletScanRequests() {
+  return role === 'operator' && connected.palletTasks.length ? '<section class="panel stack"><h2>Pallet scan requests</h2>' +
+    connected.palletTasks.map(task => button('pallet-task',escape(task.scanReference ?? task.reference),'class="secondary" data-task="' + escape(task.id) + '"')).join('') +
+    '</section>' : '';
+}
+function stockPanel() {
+  const task = currentStockTask();
+  const admin = role === 'admin';
+  const power = admin ? '<form id="stock-power" class="row">' +
+    field('power','Stock Task Power (dBm)',stockPower(),'type="number" min="5" max="30" step="1" required') +
+    '<button class="secondary">Save power</button></form>' : '';
+  if (!task) return '<section class="panel stack"><h1>Stock tasks</h1>' + power + '<p>No stock tasks.</p></section>';
+  const option = (value,label,selected) => '<option value="' + escape(value) + '"' + (selected ? ' selected' : '') + '>' + escape(label) + '</option>';
+  const selector = '<label>Task<select id="stock-task"' + (receiptCapture || pendingBarcode || receiptUpload || countUpload || stockScanBusy ? ' disabled' : '') + '>' +
+    (countUpload ? [task] : connected.stockTasks).map(item => option(item.id,item.reference ?? item.id,item.id === task.id)).join('') + '</select></label>';
+  if (task.type === 'receipt') {
+    const tags = taggedList(task.tagged,admin && !task.outbound);
+    const untag = admin ? '<dialog id="untag-dialog" class="workflow-dialog" aria-labelledby="untag-title">' +
+      '<h2 id="untag-title">Untag carton</h2><p>Return <code></code> to outstanding.</p>' +
+      '<form id="untag-carton" class="stack"><input type="hidden" name="epc">' +
+      field('reason','Reason','','required maxlength="240"') + '<button>Confirm untag</button>' +
+      button('untag-close','Cancel','class="secondary"') + '</form></dialog>' : '';
+    return '<section class="panel stack"><h1>Stock tasks</h1>' + power + selector +
+      (admin ? '' : receiptPanel(task,option)) + tags + untag + '</section>';
+  }
+  const scenarios = [['match','Match'],['missing','Missing carton'],['unknown','Unknown EPC']];
+  const run = task.runs.at(-1);
+  const live = countUpload ? button('count-retry','Retry count upload','class="scan-cta" ' + (stockScanBusy ? 'disabled' : '')) :
+    button('count-scan',receiptCapture?.ending ? 'Finishing…' : receiptCapture ? 'Stop count scan' : 'Start count scan',
+      'class="scan-cta" ' + (!bridge?.startStockReader || !reader.ready || receiptCapture?.ending || stockScanBusy ? 'disabled' : ''));
+  return '<section class="panel stack"><h1>Stock tasks</h1>' + selector + live +
+    (receiptCapture || countUpload ? '' : '<form class="stack" id="stock-demo"><label>Reads *<select id="stock-scenario" name="scenario">' +
+    scenarios.map(([value,label]) => option(value,label,value === stockScenario)).join('') +
+    '</select></label><button class="scan-cta"' + (stockScanBusy ? ' disabled' : '') + '>Run count *</button></form>') +
+    (run ? '<p class="status">' + run.found.length + ' matched · ' + (run.outstanding ?? run.missing.length) + ' missing · ' +
+      (run.unexpected.length + run.unknown.length) + ' extra</p>' : '') + '</section>';
+}
+const stockPower = () => connected.stockPower();
+function taggedList(tags = [],canUntag = false) {
+  if (!tags.length) return '';
+  return '<section class="tagged-cartons"><h3>Tagged cartons</h3><ul class="log">' + tags.slice().reverse().map(tag =>
+    '<li><strong>' + escape(tag.sku) + '</strong> · ' + escape(demoSku(tag.sku)) +
+    '<br><code>' + escape(tag.epc) + '</code>' + (canUntag && tag.state === 'available' ?
+      '<br>' + button('untag-open','Untag carton','class="secondary" data-epc="' + escape(tag.epc) + '"') : '') + '</li>').join('') + '</ul></section>';
+}
+function receiptPanel(task,option) {
+  const products = receiptProducts(task);
+  const remaining = [...new Map(products.map(item => [item.sku,item.remaining])).values()].reduce((sum,n) => sum+n,0);
+  const progress = '<p role="status">' + task.received.length + ' received · ' + remaining + ' outstanding</p>';
+  if (!remaining) return progress;
+  const product = products.find(item => item.identifier === receiptProduct && item.remaining > 0);
+  if (!product) return progress + '<form class="stack" id="receipt-barcode"><h2>Select product</h2>' +
+    (demoBarcode ? '<label>Product Identifier<select name="identifier">' + products.filter(item => item.remaining > 0).map(item =>
+      option(item.identifier,item.identifier === item.sku ? item.identifier : item.identifier + ' · ' + item.sku)).join('') +
+      '</select></label>' : '') +
+    '<button class="scan-cta"' + (pendingBarcode ? ' disabled>Scanning barcode…' : '>Scan barcode') + '</button>' +
+    (pendingBarcode ? '<div class="row">' + button('barcode-camera','Use camera','class="secondary"') +
+      button('barcode-cancel','Cancel','class="secondary"') + '</div>' : '') +
+    '<label class="check"><input type="checkbox" id="demo-barcode"' + (demoBarcode ? ' checked' : '') +
+    (pendingBarcode ? ' disabled' : '') + '>Barcode *</label></form>';
+  const details = progress + '<h2>Scan EPC</h2><p><strong>Product Identifier</strong> ' + escape(product.identifier) + '</p>';
+  if (receiptRead) return details + '<div class="receipt-read"><span><strong>Pending tag</strong>' +
+    (receiptRead.epc ? '<code>' + escape(receiptRead.epc) + '</code>' : '<span>EPC *</span>') + '</span>' +
+    (!receiptUpload ? button('receipt-remove','×','class="secondary receipt-remove" aria-label="Remove scanned tag"') : '') +
+    '</div>' + button('receipt-confirm',stockScanBusy ? 'Saving…' : receiptUpload ? 'Retry confirmation' : 'Confirm',
+      'class="scan-cta" ' + (stockScanBusy ? 'disabled' : ''));
+  return details + button('receipt-epc',receiptCapture?.ending ? 'Finishing…' : receiptCapture ? 'Stop scan' : 'Scan EPC',
+      'class="scan-cta" ' + (!bridge?.startStockReader || !reader.ready || receiptCapture?.ending || stockScanBusy ? 'disabled' : '')) +
+    (!receiptCapture && !stockScanBusy ? button('receipt-simulate','EPC *','class="secondary"') +
+      button('receipt-barcode-reset','Scan another barcode','class="secondary"') : '');
+}
+function acceptReceiptBarcode(value) {
+  const barcode = String(value ?? '').trim();
+  const task = currentStockTask();
+  if (task?.type !== 'receipt' || !receiptProducts(task).some(line => line.identifier === barcode && line.remaining > 0)) {
+    feedback('This barcode does not match a product still outstanding on this receipt.',true);
+    render();
+    return;
+  }
+  receiptProduct = barcode;
+  feedback('');
+  render();
+}
+function cancelBarcode() {
+  const request = pendingBarcode;
+  pendingBarcode = undefined;
+  if (request) bridge?.cancelReceiptBarcode?.(request);
+  feedback('');
+  render();
+}
+function palletTaskPanel() {
+  const label = utilityScan ? 'Scanning pallet…' : 'Scan pallet';
+  const disabled = stockScanBusy ? ' disabled' : '';
+  const controls = palletRead ? '<div class="receipt-read"><span><strong>Scanned pallet tag</strong><code>' + escape(palletRead.epc) +
+    '</code>' + (Number.isFinite(palletRead.rssi) ? '<small>RSSI ' + escape(palletRead.rssi) + ' dBm</small>' : '') + '</span>' +
+    button('pallet-clear','×','class="secondary receipt-remove" aria-label="Clear pallet tag and rescan"' + disabled) + '</div>' +
+    button('pallet-send',stockScanBusy ? 'Sending…' : 'Send Scan','class="scan-cta"' + disabled) :
+    button('utility-scan',label,'class="scan-cta" ' + (!reader.ready || utilityScan || stockScanBusy ? 'disabled' : ''));
+  return '<section class="panel stack"><h1>' + escape(palletTask?.scanReference ?? palletTask?.reference) + '</h1>' +
+    '<p>Hold the reader close to the pallet tag.</p>' + controls + '</section>';
+}
+function lookupPanel() {
+  const s = lookupSession();
+  const sessions = visibleSessions().filter(entry => entry.manifest).reverse();
+  const title = '<section class="panel stack"><h1>Search for a tag</h1>';
+  if (!sessions.length) return title + '<p>No sessions with a manifest yet.</p></section>';
+  const picker = '<label>Session<select id="lookup-session" aria-label="Session"' + (utilityScan || powerRequest ? ' disabled' : '') + '>' +
+    '<option value="">Choose a session</option>' + sessions.map(entry => '<option value="' + escape(entry.id) + '"' +
+      (entry.id === s?.id ? ' selected' : '') + '>' + escape(entry.testId + ' · ' + entry.location) + '</option>').join('') + '</select></label>';
+  if (!s) return title + picker + '</section>';
+  const pallets = s.manifest.pallets?.length ? s.manifest.pallets : [s.manifest];
+  const tags = pallets.flatMap(pallet => [[pallet.palletEpc,'Pallet ' + pallet.pallet],
+    ...(pallet.requirements ? scanStockFor(s,pallet).filter(carton => carton.state === 'available' &&
+      pallet.requirements.some(row => row.sku === carton.sku)) : pallet.cartons)
+      .map(carton => [carton.epc,carton.carton + (carton.sku ? ' · ' + carton.sku : '')])]);
+  if (!tags.some(([epc]) => epc === lookupTarget)) lookupTarget = tags[0]?.[0];
+  return title + picker + '<label>Tag<select id="lookup-target"' +
+    (utilityScan ? ' disabled' : '') + '>' + tags.map(([epc,label]) => '<option value="' + escape(epc) + '"' +
+      (epc === lookupTarget ? ' selected' : '') + '>' + escape(label) + '</option>').join('') + '</select></label>' +
+    '<code>' + escape(lookupTarget) + '</code><div class="lookup-indicator" data-signal="idle" aria-hidden="true"></div>' +
+    '<p id="lookup-label" class="lookup-label" role="status">Ready to search</p><small id="lookup-rssi" class="lookup-label muted">RSSI —</small>' +
+    button('utility-scan',utilityScan ? utilityScan.ending ? 'Finishing…' : 'Stop search' : 'Start search',
+      'class="scan-cta" ' + (!bridge?.startReader || !reader.ready || utilityScan?.ending || powerRequest ? 'disabled' : '')) + '</section>';
+}
+function identifyPanel() {
+  const tag = identifyRead && describeTag(identifyRead.epc,visibleSessions(),connected?.stock);
+  const result = !tag ? '' : '<div class="tag-result" role="status"><h2>' + escape(tag.title) + '</h2><dl>' +
+    tag.rows.map(([label,value]) => '<dt>' + escape(label) + '</dt><dd>' + escape(value) + '</dd>').join('') +
+    '<dt>EPC</dt><dd><code>' + escape(identifyRead.epc) + '</code></dd></dl>' +
+    (Number.isFinite(identifyRead.rssi) ? '<small class="muted">RSSI ' + identifyRead.rssi.toFixed(0) + ' dBm</small>' : '') + '</div>';
+  return '<section class="panel stack"><h1>Look up a tag</h1><p>Hold the reader close to one tag.</p>' + result +
+    button('utility-scan',utilityScan ? 'Scanning\u2026' : tag ? 'Scan another tag' : 'Scan tag',
+      'class="scan-cta" ' + (!bridge?.startStockReader || !reader.ready || utilityScan || powerRequest ? 'disabled' : '')) + '</section>';
+}
+function updateLookup() {
+  const looking = utilityScan?.kind === 'lookup' && !utilityScan.ending;
+  const sample = looking && lookupRead && Date.now() - lookupRead.at < 900 ? lookupRead.rssi : null;
+  const strength = sample == null ? 0 : Math.max(0,Math.min(1,(sample + 78) / 36));
+  const signal = sample == null ? 'idle' : strength >= .72 ? 'strong' : strength >= .38 ? 'medium' : 'weak';
+  const indicator = root.querySelector('.lookup-indicator');
+  if (indicator) {
+    indicator.dataset.signal = signal;
+    const label = root.querySelector('#lookup-label');
+    const text = sample == null ? looking ? 'Searching…' : 'Ready to search' :
+      ({strong:'Strong signal',medium:'Medium signal',weak:'Weak signal'})[signal];
+    if (label.textContent !== text) label.textContent = text;
+    root.querySelector('#lookup-rssi').textContent = 'RSSI ' + (sample == null ? '—' : sample.toFixed(0) + ' dBm');
+  }
+  return sample == null ? null : Math.round(1050 - 855 * strength);
+}
+function lookupPulse() {
+  const delay = updateLookup();
+  if (utilityScan?.kind !== 'lookup' || utilityScan.ending) return;
+  if (delay != null) bridge.feedback?.('lookup');
+  lookupTimer = setTimeout(lookupPulse,delay ?? 160);
+}
+function startUtilityScan() {
+  if (utilityScan || stockScanBusy || powerRequest || !reader.ready) return;
+  const kind = ['lookup','identify'].includes(view) ? view : 'pallet';
+  const lookupPower = connected?.controls.lookupPower;
+  if (kind === 'lookup') {
+    if (!bridge?.startReader || !lookupTarget) return;
+    if (lookupPower == null && !applySessionPower(lookupSession(), true)) {
+      feedback('Wait for reader power before searching.',true);
+      return;
+    }
+  } else if (!bridge?.startStockReader || (kind === 'pallet' && (role !== 'operator' || !palletTask || palletRead))) return;
+  utilityScan = {id:id(),kind,epcs:new Map()};
+  lookupRead = identifyRead = undefined;
+  feedback('');
+  if (kind === 'pallet') bridge.startStockReader(utilityScan.id,connected.controls.palletPower ?? 15);
+  else if (kind === 'identify') bridge.startStockReader(utilityScan.id,identifyPower());
+  else if (lookupPower != null && bridge.startStockReader) bridge.startStockReader(utilityScan.id,lookupPower);
+  else bridge.startReader(utilityScan.id);
+  render();
+  if (kind === 'lookup') lookupPulse();
+}
+function stopUtilityScan(interrupted = false) {
+  if (!utilityScan || utilityScan.ending) return;
+  utilityScan.ending = true;
+  clearTimeout(utilityScan.timer);
+  clearTimeout(lookupTimer);
+  bridge.stopReader(utilityScan.id,interrupted);
+  render();
+}
+async function submitPalletScan(epc) {
+  stockScanBusy = true;
+  render();
+  try {
+    await connected.submitPalletScan(palletTask,epc);
+    palletTask = palletRead = undefined;
+    view = 'stock';
+    feedback('Pallet scan sent to the dashboard.');
+  } catch (error) { feedback(error.message,true); }
+  finally {
+    stockScanBusy = false;
+    render();
+    void refreshConnected();
+  }
+}
+function startStockScan() {
+  const task = currentStockTask();
+  if (!task || role !== 'operator' || receiptCapture || countUpload || stockScanBusy || !reader.ready || !bridge?.startStockReader) return;
+  if (task.type === 'receipt' && (receiptRead || !receiptProduct)) return;
+  receiptCapture = {id:id(),task,epc:'',epcs:task.type === 'count' ? new Map() : null,ending:false};
+  feedback('');
+  bridge.startStockReader(receiptCapture.id,stockPower());
+  render();
+}
+function stopReceiptScan(interrupted = false) {
+  if (!receiptCapture || receiptCapture.ending) return;
+  receiptCapture.ending = true;
+  bridge.stopReader(receiptCapture.id,interrupted);
+  render();
+}
+async function receiveStockCarton() {
+  if (stockScanBusy || role !== 'operator' || !receiptRead) return;
+  receiptUpload ??= {task:currentStockTask(),change:{action:'receive-carton',identifier:receiptProduct,operationId:id(),...receiptRead}};
+  const {task,change} = receiptUpload;
+  stockScanBusy = true;
+  feedback('');
+  render();
+  try {
+    const updated = await connected.stockAction(task,change);
+    receiptUpload = receiptRead = undefined;
+    receiptProduct = '';
+    confirmWorkflow('Carton tagged',updated.status === 'Completed' ? 'Receipt complete.' : 'Carton added to this receipt.',updated.tagged);
+  } catch (error) {
+    if ([400,403,409,422].includes(error.status)) receiptUpload = undefined;
+    feedback(error.message,true);
+  } finally {
+    stockScanBusy = false;
+    render();
+    void refreshConnected();
+  }
+}
+async function untagCarton(data) {
+  const task = currentStockTask();
+  if (!task || stockScanBusy) return;
+  stockScanBusy = true;
+  feedback('');
+  try {
+    const updated = await connected.stockAction(task,{action:'untag',epc:data.epc,reason:data.reason});
+    confirmWorkflow('Carton untagged','Carton returned to outstanding.',updated.tagged);
+  } catch (error) {
+    feedback(error.message,true);
+  } finally {
+    stockScanBusy = false;
+    render();
+    void refreshConnected();
+  }
+}
+async function scanStock(change, task = currentStockTask()) {
+  ({task,change} = countUpload ?? {task,change});
+  if (stockScanBusy || !task || role !== 'operator') return;
+  stockScanBusy = true;
+  feedback('');
+  render();
+  try {
+    if (change.scenario) bridge?.feedback?.('start');
+    await connected.stockAction(task,{action:'scan',...change});
+    countUpload = undefined;
+    feedback('Scan saved.');
+  } catch (error) {
+    if (change.epcs && (!error.status || error.status >= 500)) countUpload = {task,change};
+    else countUpload = undefined;
+    feedback(error.message,true);
+  } finally {
+    stockScanBusy = false;
+    render();
+    void refreshConnected();
+  }
 }
 // Section 13 recovery: say which sessions changed since their last export, so nothing is cleared unexported.
 function exportState() {
@@ -245,7 +633,7 @@ function planPanel() {
   html += tests.length ? '<ul class="log">' + tests.map(t => '<li><strong>' + escape(t.id) + '</strong> ' + escape(t.title) +
       '<br><small>' + escape(t.status) + (plan.closure?.skipped?.[t.id] ? ' / not run: ' + escape(plan.closure.skipped[t.id]) : '') +
       '</small></li>').join('') + '</ul>' + (unplanned.length ? '<p class="muted">Not in plan: ' + escape(unplanned.join(', ')) + '</p>' : '')
-    : '<p class="muted">No planned tests yet.' + (permits(role,'manifest') ? '' : ' Switch to Test lead in the menu at the top right to enter them.') + '</p>';
+    : '<p class="muted">No planned tests.</p>';
   if (plan?.closedAt) return html + '<p class="status match">PoC day closed by ' + escape(plan.closure.actor) + ' on ' +
     escape(time(plan.closedAt)) + '.</p></section>';
   if (permits(role,'manifest')) html += '<details' + (tests.length ? '' : ' open') + '><summary>Edit planned tests</summary>' +
@@ -266,37 +654,75 @@ function creation() {
   const input = name => field(name,metadata[name],values[name],'maxlength="160" ' +
     (name === 'notes' ? '' : 'required') + (name === 'testId' ? ' list="planned-tests"' : ''));
   return '<form id="create" class="stack"><h1>New test session</h1><label>Reader source<select name="source">' +
-    (bridge ? '<option>C72 hardware</option>' : '') + '<option>Simulation</option></select></label>' +
+    (bridge ? '<option value="C72 hardware">RFID handheld</option>' : '') + '<option value="Simulation">Scan *</option></select></label>' +
     '<div class="fields">' + essential.map(input).join('') + '</div>' +
     '<details><summary>More setup details</summary><div class="fields">' +
     Object.keys(metadata).filter(name => !essential.includes(name)).map(input).join('') + '</div></details>' +
     '<datalist id="planned-tests">' + (store.plan?.tests ?? []).map(t => '<option value="' + escape(t.id) + '">' +
       escape(t.title) + '</option>').join('') + '</datalist><button class="scan-cta">Create session</button></form>';
 }
+const sessionPower = s => connected.sessionPowerOverride(s?.id) ?? connected.controls.power?.requested ?? 30;
+function needsSessionPower(s, allowClosed = false) {
+  return Boolean(connected?.auth && s?.source === 'C72 hardware' && (allowClosed || (!s.closedAt && !s.dispatchedAt)));
+}
+function applySessionPower(s, allowClosed = false) {
+  if (!needsSessionPower(s, allowClosed)) return true;
+  const power = sessionPower(s);
+  if (appliedSessionPower?.id === s.id && appliedSessionPower.power === power) return true;
+  if (powerRequest || active || !reader.ready || !bridge?.setReaderPower) return false;
+  if (reader.profile?.powerDbm === power) {
+    appliedSessionPower = {id:s.id,power};
+    return true;
+  }
+  powerRequest = {id:id(), automatic:{id:s.id,power}};
+  bridge.setReaderPower(powerRequest.id,power);
+  return false;
+}
+
 function showSession(s) {
-  const step = stepOf(s), current = STEPS.findIndex(([key]) => key === step);
-  const progress = '<ol class="steps" aria-label="Test progress">' + STEPS.map(([key,label],i) => {
+  const operator = compactOperator();
+  const step = stepOf(s);
+  const steps = role === 'operator' ? STEPS.filter(([key]) => key === 'scan' || key === 'close') :
+    STEPS.filter(([key]) => key !== 'verify' || role === 'supervisor');
+  const current = steps.findIndex(([key]) => key === step);
+  const progress = '<ol class="steps" aria-label="Test progress">' + steps.map(([key,label],i) => {
     const state = step === 'done' || i < current ? 'done' : i === current ? 'current' : 'todo';
     return '<li data-state="' + state + '"' + (state === 'current' ? ' aria-current="step"' : '') + '>' + label + '</li>';
   }).join('') + '</ol>';
+  const runs = s.runs.length ? comparisons(s,operator) : '';
   return '<div class="title-row"><h1>' + escape(s.testId) + '</h1><p class="muted">' + escape(s.location) + ' / ' +
-    escape(s.level) + ' / ' + escape(s.source) + '</p></div>' + progress + nextCard(s,step) +
-    (s.runs.length ? comparisons(s) : '') + detailsPanel(s,step);
+    (operator ? '' : escape(s.level) + ' / ') + escape(displaySource(s.source)) + '</p>' +
+    (connected?.auth && s.source === 'C72 hardware' ? '<p class="muted">Recommended: ' + sessionPower(s) + ' dBm</p>' : '') + '</div>' +
+    progress + (connected?.auth && s.source === 'C72 hardware' && permits(role,'reader-power') ?
+      '<form id="session-power" class="panel row">' + field('power','Recommended Power (dBm)',connected.sessionPowerOverride(s.id) ?? '',
+        'type="number" min="5" max="30" step="1" placeholder="' + (connected.controls.power?.requested ?? 30) + '"') +
+      '<button class="secondary">Save power</button></form>' : '') + nextCard(s,step) + runs +
+    (operator ? '<section class="panel details">' + sessionLog(s,true) + sessionExport() + '</section>' : detailsPanel(s,step));
 }
 function nextCard(s, step) {
   if (step === 'done') return '<section class="panel next" data-step="done"><h2>Session closed</h2><p>' +
     escape(s.closure.coverage) + '</p><p class="muted">Signed by ' + escape(s.closure.actor) + ' on ' + escape(time(s.closedAt)) + '.</p></section>';
+  if (role === 'operator' && (step === 'manifest' || step === 'verify')) {
+    return '<section class="panel next"><h2>Waiting for setup</h2><p>Sync when the session is ready to scan.</p></section>';
+  }
+  if (role === 'admin' && step === 'verify') {
+    return '<section class="panel next"><h2>Waiting for Supervisor</h2>' +
+      (connected ? '' : button('as-role','Switch to Supervisor','class="scan-cta" data-role="supervisor"')) + '</section>';
+  }
+  if (connected && role !== 'operator' && step === 'scan') {
+    return '<section class="panel next"><h2>Ready for Operator</h2><p>Switch to Operator to scan the pallet.</p></section>';
+  }
   const [needRole, needAction] = STEP_ROLE[step];
-  const title = {manifest:'Load the expected cartons', verify:'Check the pallet by hand', close:'Review and close the test',
-    scan:!s.identified ? 'Scan the pallet' : latest(s)?.result ? 'Rescan the cartons' : 'Scan the cartons'}[step];
+  const title = {manifest:'Load the expected cartons', verify:'Verify the pallet', close:'Review and close the test',
+    scan:!s.identified ? 'Scan the pallet' : latestCurrentRun(s)?.result ? 'Rescan the cartons' : 'Scan the cartons'}[step];
   let body = step === 'verify' ? '<p><strong>' + escape(manifestSummary(s.manifest)) + '</strong></p>' + skuNote(s.manifest) : '';
   if (!permits(role,needAction)) {
-    body += '<p>The ' + escape(roles[needRole]) + ' does this step.</p>' +
-      button('as-role','Switch to ' + escape(roles[needRole]),'class="scan-cta" data-role="' + needRole + '"');
+    body += '<p>Role required: ' + escape(roles[needRole]) + '</p>' +
+      (connected ? '' : button('as-role','Switch to ' + escape(roles[needRole]),'class="scan-cta" data-role="' + needRole + '"'));
   } else if (step === 'manifest') {
     body = manifestControls(s,null);
   } else if (step === 'verify') {
-    body += '<p>Check the pallet contents, that every label is unique, and where the labels sit.</p>' +
+    body += '<p>Check contents, label uniqueness and placement.</p>' +
       '<form id="verify" class="stack"><label class="check"><input name="checked" type="checkbox" required>' +
       'Contents and label assignment verified</label><button class="scan-cta">Record verification</button></form>';
   } else if (step === 'scan') {
@@ -315,8 +741,9 @@ function lastRun(s) {
     (r ? ' / ' + r.matched.length + ' of ' + r.expected + ' matched' + (r.extra.length ? ' / ' + r.extra.length + ' unexpected' : '') : '') + '</p>';
 }
 function closeForm(s) {
-  return '<form id="close" class="stack"><p>Planned: ' + escape(s.planned) + '</p>' +
-    '<label>Coverage and missing-test reason<textarea name="coverage" required maxlength="500"></textarea></label>' +
+  return '<form id="close" class="stack">' + (compactOperator() ? '' : '<p>Planned: ' + escape(s.planned) + '</p>') +
+    '<label>Coverage and missing-test reason<textarea name="coverage" required maxlength="500">' +
+    (s.confirmedAt ? 'Successful Run' : '') + '</textarea></label>' +
     '<label class="check"><input type="checkbox" name="reviewed" required>Results reviewed and signed off</label>' +
     '<button>Close test session</button></form>';
 }
@@ -327,23 +754,34 @@ function detailsPanel(s, step) {
       '<li><strong>' + escape(v) + '</strong> ' + escape(s[k] || '—') + '</li>').join('') + '</ul></details>' +
     (m ? '<details' + (pendingImport ? ' open' : '') + '><summary>Expected cartons</summary>' + manifestList(m) +
       (step !== 'manifest' ? manifestControls(s,m) : '') + '</details>' : '') +
-    (s.verifiedBy ? '<details><summary>Physical verification</summary><p>Verified by ' + escape(s.verifiedBy) +
+    (role === 'supervisor' && s.verifiedBy ? '<details><summary>Verification</summary><p>Verified by ' + escape(s.verifiedBy) +
       ' on ' + escape(time(s.verifiedAt)) + '.</p></details>' : '') +
-    (s.source === 'C72 hardware' ? readerSettings(s) : '') +
-    '<details><summary>Session log (' + s.logs.length + ')</summary><ul class="log">' +
-    s.logs.slice().reverse().map(e => '<li><strong>' + escape(e.action) + '</strong><br>' + escape(e.detail) +
-      '<br><small>' + escape(e.actor) + ' / ' + escape(time(e.at)) + '</small></li>').join('') + '</ul></details>' +
-    (permits(role,'export') && !active ? button('export-one','Export this test','class="secondary"') : '') + '</section>';
+    (s.source === 'C72 hardware' ? readerSettings(s) : '') + sessionLog(s) + sessionExport() + '</section>';
 }
-// A multi-pallet file lists every pallet until the pallet scan locks one.
+function sessionLog(s,includeRunNote = false) {
+  const open = root.querySelector('#session-log');
+  const logs = role === 'operator' ? s.logs.filter(entry => entry.action !== 'Physical verification') : s.logs;
+  return '<details id="session-log" data-session="' + escape(s.id) + '"' +
+    (open?.open && open.dataset.session === s.id ? ' open' : '') + '><summary>Session log (' + logs.length + ')</summary><ul class="log">' +
+    logs.slice().reverse().map(e => '<li><strong>' + escape(actionLabel(e.action)) + '</strong><br>' + escape(e.detail) +
+      '<br><small>' + escape(e.actor) + ' / ' + escape(time(e.at)) + '</small></li>').join('') + '</ul>' +
+    (includeRunNote ? runNote(s) : '') + '</details>';
+}
+function sessionExport() {
+  return permits(role,'export') && !active ? button('export-one','Export this test','class="secondary"') : '';
+}
 function manifestSummary(m) {
   const pallets = m.pallets?.length > 1 ? m.pallets : null;
-  return m.pallet + ' / ' + (pallets && !m.palletEpc ? pallets.reduce((n,p) => n + p.cartons.length,0) + ' cartons, locks on scan' :
-    m.cartons.length + ' cartons') + ' / Revision ' + m.revision + (pallets && m.palletEpc ? ' / locked from ' + pallets.length + ' pallets' : '');
+  const summary = pallets ? pallets.length + ' pallets / ' + pallets.reduce((n,p) => n + palletCartonCount(p),0) :
+    m.pallet + ' / ' + palletCartonCount(m);
+  return summary + ' cartons / Revision ' + m.revision;
 }
 function manifestList(m) {
-  const pallets = m.pallets?.length > 1 && !m.palletEpc ? m.pallets : null;
-  return '<p>' + escape(manifestSummary(m)) + '</p><p class="muted">' + escape(m.source) + '</p>' + skuNote(m) + '<ul class="log">' +
+  if (m.matchBy === 'sku') return '<p>' + escape(manifestSummary(m)) + '</p><ul class="log">' +
+    m.pallets.flatMap(pallet => pallet.requirements.map(({sku,quantity}) =>
+      '<li>' + escape(pallet.pallet + ' / ' + sku + ' / ' + demoSku(sku)) + ' · ' + quantity + '</li>')).join('') + '</ul>';
+  const pallets = m.pallets?.length > 1 ? m.pallets : null;
+  return '<p>' + escape(manifestSummary(m)) + '</p><p class="muted">' + escape(displaySource(m.source)) + '</p>' + skuNote(m) + '<ul class="log">' +
     (pallets ? pallets.flatMap(p => p.cartons.map(c => ({...c, carton:p.pallet + ' / ' + c.carton}))) : m.cartons)
       .map(c => '<li>' + escape([c.carton, c.sku].filter(Boolean).join(' / ')) + '<br><code>' + escape(c.epc) + '</code></li>').join('') + '</ul>';
 }
@@ -351,18 +789,19 @@ function manifestList(m) {
 function manifestControls(s,m) {
   if (s.closedAt || s.confirmedAt || active || !permits(role,'manifest')) return '';
   const hardware = s.source === 'C72 hardware';
-  let result = (s.runs.length ? '<p class="muted">A revision needs a reason, a new check by hand and a new pallet scan. ' +
-      'Earlier runs stay on the revision they were scanned against.</p>' : '') +
-    '<p class="muted">One CSV row per carton. Several pallets in one file are fine.</p><div class="row">' +
-    (hardware ? (liveSample ? button('sample','Use live sample','class="secondary"') : '') :
-      button('sample','Use sample manifest','class="secondary"')) + button('csv','Choose CSV','class="secondary"') + button('build-open','Build from scan','class="secondary"') +
-    button('template',hardware && liveSample ? 'Save live sample CSV' : 'Save CSV template','class="secondary"') + '</div>';
+  let result = (s.runs.length ? '<p class="muted">A CSV change requires a new verification and scan.</p>' : '') +
+    '<div class="row manifest-options">' +
+    (connected ? button('csv','Choose a CSV','class="secondary"') +
+      button('sample','Use CSV *','class="secondary" ' + (connected.samples[s.source] ? '' : 'disabled')) :
+    (hardware ? (liveSample ? button('sample','Use RFID CSV *','class="secondary"') : '') :
+      button('sample','Use CSV *','class="secondary"')) + button('csv','Choose CSV','class="secondary"') + button('build-open','Build from scan','class="secondary"') +
+    button('template',hardware && liveSample ? 'Save RFID CSV *' : 'Save CSV template','class="secondary"')) + '</div>';
   if (!bridge) result += '<label class="line">CSV file<input id="csv-file" type="file" accept=".csv,text/csv"></label>';
   if (pendingImport) result += '<form class="line stack" id="manifest"><p>' + escape(pendingImport.name) + ' / ' +
     pendingImport.data.pallets.length + ' pallet(s) / ' + pendingImport.data.pallets.reduce((n,p) => n + p.cartons.length,0) +
     ' cartons</p>' + skuNote(pendingImport.data) + '<div class="fields">' +
-    field('reserves','Reserve labels',s.allocation.reserves ?? 0,'type="number" min="0" max="500" required') +
-    field('candidates','Candidate labels',s.allocation.candidates ?? 0,'type="number" min="0" max="500" required') +
+    (connected ? '' : field('reserves','Reserve labels',s.allocation.reserves ?? 0,'type="number" min="0" max="500" required') +
+      field('candidates','Candidate labels',s.allocation.candidates ?? 0,'type="number" min="0" max="500" required')) +
     (m ? field('reason','Revision reason','','maxlength="160" required') : '') +
     '</div><button>Save manifest</button></form>';
   return result;
@@ -378,10 +817,10 @@ function buildPanel(s) {
     '<div class="title-row"><h1>Build manifest from scan</h1><p class="muted">Scan the tags on one pallet. The strongest tag ' +
       'is taken as the pallet tag; change it if needed.</p></div>' +
     '<section class="panel"><div class="row spread"><strong id="build-count">' + tags.length + ' tags read</strong>' +
-      '<span class="reader-state" data-ready="' + (!hardware || reader.ready) + '">' + escape(hardware ? readerStatus() : 'Simulation') + '</span></div>' +
+      '<span class="reader-state" data-ready="' + (!hardware || reader.ready) + '">' + escape(hardware ? readerStatus() : 'Scan *') + '</span></div>' +
       button('build-toggle',reading ? 'Stop scan' : tags.length ? 'Scan again' : 'Start scan',
         'class="scan-cta" ' + (hardware && !reader.ready && !reading ? 'disabled' : '')) +
-      (hardware ? '<p class="muted line">Or hold the C72 trigger and release to finish. Scanning again adds to the list.</p>' : '') + '</section>' +
+      (hardware ? '<p class="muted line">Or hold the handheld trigger and release to finish. Scanning again adds to the list.</p>' : '') + '</section>' +
     (tags.length && !reading ? '<form id="build-form" class="stack"><div class="fields">' +
       field('palletRef','Pallet reference',builder.palletRef ?? 'PAL-' + s.testId,'maxlength="60" required') +
       field('sku','SKU for all cartons (optional)',builder.sku ?? '','maxlength="60"') + '</div>' +
@@ -419,12 +858,17 @@ function buildToggle() {
   }
   const hardware = s.source === 'C72 hardware';
   if (hardware && !reader.ready) { feedback(reader.message,true); return; }
+  if (hardware && (powerRequest || !applySessionPower(s))) {
+    feedback(powerRequest ? 'Setting reader power. Scan again when ready.' : 'Reader power could not be confirmed.',true);
+    return;
+  }
   if (hardware) {
     builder.capture = {id:id()};
     bridge.startReader(builder.capture.id);
     render();
     return;
   }
+  bridge?.feedback?.('start');
   // Simulation: the demo pallet and its cartons, the pallet tag strongest.
   const m = parseManifest(SAMPLE);
   buildCollect([m.palletEpc, ...m.cartons.map(c => c.epc)].map((epc,i) => ({epc, rssi:String(-38 - i * 4)})));
@@ -436,10 +880,13 @@ function readerStatus() {
 }
 function readerControls(closed) {
   if (closed || !bridge?.setReaderPower) return '';
-  if (!permits(role,'reader-power')) return '<p class="muted">The Test lead sets reader power.</p>' +
-    button('as-role','Switch to Test lead','class="secondary" data-role="admin"');
+  if (!permits(role,'reader-power')) return '<p class="muted">The Administrator sets reader power.</p>' +
+    (connected ? '' : button('as-role','Switch to Administrator','class="secondary" data-role="admin"'));
   if (!reader.ready) return button('reconnect','Check reader','class="secondary"');
-  return '<form id="reader-power" class="row">' + field('power','Output power (dBm)',reader.profile?.powerDbm,
+  const request = connected?.controls.power;
+  const requested = request && !request.appliedAt ? request.requested : undefined;
+  return (requested == null ? '' : '<p class="muted">Dashboard requested ' + escape(requested) + ' dBm. Check the reader before applying.</p>') +
+    '<form id="reader-power" class="row">' + field('power','Output power (dBm)',requested ?? reader.profile?.powerDbm,
       'type="number" min="5" max="30" step="1" required ' + (powerRequest ? 'disabled' : '')) +
     '<button ' + (powerRequest ? 'disabled' : '') + '>' + (powerRequest ? 'Setting power…' : 'Set power') + '</button></form>' +
     '<p class="muted">5 to 30 dBm. Each scan records the power it used.</p>';
@@ -449,57 +896,71 @@ function readerControls(closed) {
 function readerCard() {
   const open = document.querySelector('#reader-card')?.open || powerRequest;
   return '<details class="panel reader-card" id="reader-card"' + (open ? ' open' : '') + '><summary><span class="reader-label">' +
-    '<strong>C72 reader</strong><small>' + escape(reader.message) + '</small></span><span class="reader-state" data-ready="' +
+    '<strong>Reader diagnostics</strong><small>' + escape(reader.message) + '</small></span><span class="reader-state" data-ready="' +
     reader.ready + '">' + escape(readerStatus()) + '</span></summary><div class="reader-body">' + readerControls(false) + '</div></details>';
 }
 function readerSettings(s) {
   return '<details><summary>Reader settings: ' + escape(readerStatus()) + '</summary><p>' + escape(reader.message) + '</p>' +
-    readerControls(s.closedAt) + '</details>';
+    readerControls(s.closedAt || Boolean(connected)) + '</details>';
 }
 function scanPanel(s) {
-  const run = latest(s);
+  const run = latestCurrentRun(s);
+  const target = multiPallet(s) ? pendingPallet(s) : null;
+  const palletStep = target ? 'Pallet ' + (s.manifest.pallets.indexOf(target) + 1) + ' of ' + s.manifest.pallets.length + ' · ' : '';
+  const automaticReason = automaticRescanReason(run);
   const isHardware = s.source === 'C72 hardware';
   const ready = !isHardware || reader.ready;
   return '<section class="scan-workspace"><div class="row spread scan-nav">' +
-    button('scan-details','Session details','class="secondary"') +
-    '<span class="mode">Step ' + (s.identified ? '2' : '1') + ' of 2</span></div>' +
+    button('scan-details',compactOperator() ? 'Scan results' : 'Session details','class="secondary"') +
+    '<span class="mode">' + palletStep + 'Step ' + (s.identified ? '2' : '1') + ' of 2</span></div>' +
     '<section class="panel scan-panel"><div class="row spread scan-title"><h1 tabindex="-1">' +
     (s.identified ? 'Scan cartons' : 'Scan pallet') + '</h1><span class="reader-state" data-ready="' + ready + '">' +
-    escape(isHardware ? (ready ? 'Reader ready' : 'Reader unavailable') : 'Simulation') + '</span></div>' +
+    escape(isHardware ? (ready ? 'Reader ready' : 'Reader unavailable') : 'Scan *') + '</span></div>' +
     '<div class="scan-target"><div class="scan-signal" data-reading="false" aria-hidden="true"></div><div>' +
-    '<p class="provenance">' + escape(s.manifest.pallet) + '</p>' +
-    (s.identified ? '<p class="muted">Pallet verified by UHF EPC.</p>' :
-      '<p>Scan near the pallet tag or any of its cartons. The pallet whose tags read strongest is locked; other tags can stay nearby.</p>') +
+    '<p class="provenance">' + escape(target?.pallet ?? s.manifest.pallet) + '</p>' +
+    (s.identified ? '<p class="muted">Pallet verified by UHF EPC.</p>' : '<p>Scan near the pallet tag.</p>') +
     (isHardware && reader.profile?.powerDbm != null ? '<p class="muted">Reader power: ' + escape(reader.profile.powerDbm) + ' dBm</p>' : '') +
-    '<p class="muted">' + (isHardware ? 'Tap Start scan, or hold the C72 trigger and release to finish.' : 'Hold the demo trigger. Release to finish.') + '</p></div></div>' +
+    '<p class="muted">' + (isHardware ? 'Tap Start scan, or hold the handheld trigger and release to finish.' : 'Hold the trigger *. Release to finish.') + '</p></div></div>' +
     (isHardware && !ready ? '<p class="status hold">' + escape(reader.message) + '</p>' +
       button('reconnect','Check reader','class="secondary"') : '') +
     '<p id="scan-clock" class="scan-clock" hidden></p><div id="scan-results" class="scan-results">' + scanSummary(s) + '</div>' +
-    (!isHardware && s.identified ? '<label>Demo reads<select id="scenario">' +
-      ['Missing one','Unexpected extra','Clean match','Interrupted'].map(item => '<option ' + (scenario === item ? 'selected' : '') +
+    (!isHardware && s.identified ? '<label>Reads *<select id="scenario">' +
+      [defaultScenario,'Missing one','Unexpected extra','Missing and unexpected','Interrupted'].map(item => '<option ' + (scenario === item ? 'selected' : '') +
         '>' + item + '</option>').join('') + '</select></label>' : '') +
-    // FR-19: pick one of the design's reasons or type another.
-    (s.identified && run ? '<label>Rescan reason<input id="rescan" list="rescan-reasons" maxlength="160" value="' + escape(rescanReason) +
-      '" placeholder="Pick or type what changed"></label><datalist id="rescan-reasons">' +
+    (s.identified && run ? '<label>Rescan reason<input id="rescan" maxlength="160" value="' + escape(automaticReason || rescanReason) +
+      '"' + (automaticReason ? ' readonly></label>' : ' list="rescan-reasons" placeholder="Pick or type what changed"></label><datalist id="rescan-reasons">' +
       ['Missed carton','Label repositioned','Pallet rebuilt','Shielding adjusted','Scan method changed']
-        .map(reason => '<option value="' + reason + '"></option>').join('') + '</datalist>' : '') +
-    (!isHardware ? '<button type="button" id="demo-trigger" class="secondary scan-cta">Hold demo trigger</button>' : '') +
+        .map(reason => '<option value="' + reason + '"></option>').join('') + '</datalist>') : '') +
+    (!isHardware ? '<button type="button" id="demo-trigger" class="secondary scan-cta">Hold trigger *</button>' : '') +
     // Glove-friendly alternative to the trigger: tap once to start, tap again to stop (§6 scan screen).
     (isHardware ? '<button type="button" id="hw-toggle" class="scan-cta" ' + (!ready && !active ? 'disabled' : '') +
       '>' + (active ? 'Stop scan' : 'Start scan') + '</button>' : '') +
-    (s.identified ? button('continue','Continue','class="scan-cta" ' +
+    (s.identified ? button('continue',target && target !== s.manifest.pallets.at(-1) ? 'Next pallet' : 'Continue','class="scan-cta" ' +
       (!active && permits(role,'confirm') && canContinue(s,run) ? '' : 'disabled')) : '') +
     '</section>' + (s.identified ? '<section class="panel"><h2>Carton status</h2><ul id="tag-list" class="tag-list">' +
       tagRows(s) + '</ul></section>' : '') + '</section>';
 }
+function scanStockFor(s,manifest) {
+  if (!manifest.requirements) return [];
+  const confirmed = new Set(Object.values(s.palletMatches ?? {}));
+  const used = new Set(s.runs.filter(run => confirmed.has(run.id) && run.palletEpc !== manifest.palletEpc)
+    .flatMap(run => run.result?.matched ?? []));
+  return (connected?.stock ?? []).filter(carton => {
+    const claimedBy = connected.verificationClaims[carton.epc];
+    return !used.has(carton.epc) && (!claimedBy || claimedBy === s.id);
+  });
+}
+function compareSession(s,manifest,epcs) {
+  return compare(manifest,epcs,scanStockFor(s,manifest));
+}
 function scanResult(s) {
   if (!s.identified) return null;
-  const run = latest(s);
-  return active ? compare(s.manifest,Object.keys(run?.observations ?? {})) :
-    (run?.result ?? compare(s.manifest,[]));
+  const run = latestCurrentRun(s);
+  return active ? compareSession(s,s.manifest,Object.keys(run?.observations ?? {})) :
+    (run?.result ?? compareSession(s,s.manifest,[]));
 }
 function scanSummary(s,r = scanResult(s)) {
-  const run = latest(s);
+  const run = latestCurrentRun(s);
   const status = active ? (active.ending ? 'Finishing' : 'Reading') :
     run ? (run.state === 'Finished' ? run.result.status : run.state) : 'Ready to scan';
   return '<p role="status" class="status ' + status.toLowerCase().replaceAll(' ','-') + '">' + statusLabel(status) + '</p>' +
@@ -507,9 +968,17 @@ function scanSummary(s,r = scanResult(s)) {
 }
 function tagRows(s,r = scanResult(s)) {
   const matched = new Set(r.matched);
-  const pending = active || !latest(s)?.result;
+  const pending = active || !latestCurrentRun(s)?.result;
   const row = (epc,title,state,label) => '<li class="tag-row" data-tag-status="' + state + '"><div><strong>' +
     escape(title) + '</strong><code>' + escape(epc) + '</code></div><span class="tag-badge">' + label + '</span></li>';
+  if (s.manifest.requirements) {
+    const observed = (r.matchedCartons ?? []).map(carton => row(carton.epc,carton.sku + ' · ' + demoSku(carton.sku),'matched','Expected'));
+    const shortages = s.manifest.requirements.flatMap(({sku}) => {
+      const missing = r.missing.filter(product => product === sku).length;
+      return missing ? [row('',sku + ' · ' + demoSku(sku),pending ? 'waiting' : 'missing',missing + (pending ? ' to scan' : ' missing'))] : [];
+    });
+    return [...observed,...shortages,...r.extra.map(epc => row(epc,'Outside this pallet','unexpected','Unexpected'))].join('');
+  }
   return r.extra.map(epc => {
     const other = otherPallet(s.manifest,epc);
     return row(epc,other ? 'Belongs to pallet ' + other : 'Outside this pallet','unexpected','Unexpected');
@@ -540,47 +1009,59 @@ function issueList(label, epcs, s) {
   if (!epcs.length) return '<p>' + label + ': none</p>';
   return '<p>' + label + '</p><ul class="log">' + epcs.map(epc => {
     // EPC is the carton identity, so any revision can name it.
-    const c = [s.manifest, ...(s.manifestRevisions ?? [])].flatMap(m => m.cartons).find(item => item.epc === epc);
+    const c = [s.manifest, ...(s.manifestRevisions ?? [])].flatMap(m => m.pallets?.flatMap(pallet => pallet.cartons) ?? m.cartons).find(item => item.epc === epc);
     return '<li><code>' + escape(epc) + '</code>' + (c ? '<br>' + escape([c.carton, c.sku].filter(Boolean).join(' / ')) : '') + '</li>';
   }).join('') + '</ul>';
 }
-function comparisons(s) {
+function comparisons(s,compact = false) {
   const run = latest(s);
-  const first = s.runs[0];
-  const previous = s.runs.at(-2);
+  const samePallet = multiPallet(s) ? s.runs.filter(candidate =>
+    candidate.palletEpc === run.palletEpc && candidate.manifestRevision === run.manifestRevision) : s.runs;
+  const first = samePallet[0];
+  const previous = samePallet.at(-2);
+  const earlier = multiPallet(s) ? s.runs.filter(candidate => candidate !== previous && candidate !== run) : s.runs.slice(0,-2);
   const delta = previous?.result && run?.result ? scanDelta(previous.result,run.result) : null;
   const firstText = first.result ? first.result.percent + '% first-pass completeness' : 'First pass in progress';
-  return '<section class="panel"><div class="row spread"><h2>Scan attempts</h2><small>' + firstText + '</small></div><div class="pair">' +
-    resultBox(s,'Previous run',previous) + resultBox(s,'Current run',run) + '</div>' +
+  return '<section class="panel" id="scan-attempts"><div class="row spread"><h2 tabindex="-1">Scan attempts</h2><small>' + firstText + '</small></div><div class="pair">' +
+    (compact ? resultBox(s,'Current run',run) + (previous ? resultBox(s,'Previous run',previous) : '') :
+      resultBox(s,'Previous run',previous) + resultBox(s,'Current run',run)) + '</div>' +
     (delta ? '<details class="line"><summary>Changes from previous run</summary>' +
       issueList('Newly seen',delta.newlySeen,s) + issueList('Still missing',delta.stillMissing,s) + '</details>' : '') +
-    (s.runs.length > 2 ? '<details class="line"><summary>Earlier attempts</summary>' +
-      s.runs.slice(0,-2).map((r,i) => resultBox(s,i ? 'Rescan ' + i : 'First pass',r)).join('') + '</details>' : '') +
+    (!compact && earlier.length ? '<details class="line"><summary>Earlier attempts</summary>' +
+      earlier.map((r,i) => resultBox(s,multiPallet(s) ? manifestFor(s,r).pallet : i ? 'Rescan ' + i : 'First pass',r)).join('') + '</details>' : '') +
     (run?.result?.extra.length && !active && !s.closedAt && permits(role,'investigate') ?
       '<form id="investigate" class="line stack"><label>Unexpected EPC<select name="epc">' +
       run.result.extra.map(epc => '<option>' + escape(epc) + '</option>').join('') + '</select></label>' +
       '<label>Action<select name="outcome"><option>Investigated</option><option>Removed from zone</option><option>Neighbouring tag</option><option>Unresolved</option></select></label>' +
       field('note','Investigation note','','required maxlength="200"') + '<button class="secondary">Save investigation</button></form>' : '') +
-    (run && !active && !s.closedAt && permits(role,'investigate') ? '<form id="run-note" class="line stack">' +
+    (compact ? '' : runNote(s)) + '</section>';
+}
+function runNote(s) {
+  return latest(s) && !active && !s.closedAt && permits(role,'investigate') ? '<form id="run-note" class="line stack">' +
       field('note','Note on the current run','','required maxlength="300" placeholder="Label position, pallet build, shielding, environment"') +
-      '<button class="secondary">Save run note</button></form>' : '') + '</section>';
+      '<button class="secondary">Save run note</button></form>' : '';
 }
 
 function begin() {
   const s = session();
-  if (active || view !== 'scan' || !s || !permits(role,'scan') || !s.verifiedBy || !s.manifest || s.closedAt || s.confirmedAt) return;
+  if (active || view !== 'scan' || (connected && role !== 'operator') || !s || !permits(role,'scan') || !s.verifiedBy || !s.manifest || s.closedAt || s.confirmedAt) return;
   const hardware = s.source === 'C72 hardware';
   if (hardware && !reader.ready) { feedback(reader.message,true); return; }
+  if (hardware && (powerRequest || !applySessionPower(s))) {
+    feedback(powerRequest ? 'Setting reader power. Scan again when ready.' : 'Reader power could not be confirmed.',true);
+    return;
+  }
   const kind = s.identified ? 'cartons' : 'pallet';
-  const reason = document.querySelector('#rescan')?.value.trim() ?? rescanReason;
-  if (kind === 'cartons' && s.runs.length && !reason) { feedback('Enter a rescan reason before holding the trigger.',true); return; }
+  const previous = kind === 'cartons' && latestCurrentRun(s);
+  const reason = previous ? automaticRescanReason(previous) || rescanReason.trim() : '';
+  if (previous && !reason) { feedback('Enter a rescan reason before starting another carton scan.',true); return; }
   const startedAt = now();
   const capture = {id:id(),kind,hardware,startedAt,scenario,observations:{},ending:false};
   commit(() => {
     if (kind === 'cartons') s.runs.push({
       id:capture.id, startedAt, state:'Reading', source:s.source, operator:actor(), method:s.method,
-      reason:s.runs.length ? reason : '', profile:hardware ? reader.profile : {name:'Simulator',region:'Simulated'},
-      manifestRevision:s.manifest.revision, observations:{}
+      reason, profile:hardware ? reader.profile : {name:'Simulator',region:'Simulated'},
+      manifestRevision:s.manifest.revision, palletEpc:s.manifest.palletEpc, observations:{}
     });
     else s.palletPending = {id:capture.id,startedAt,observations:capture.observations,actor:actor(),
       profile:hardware ? reader.profile : {name:'Simulator'}};
@@ -589,13 +1070,20 @@ function begin() {
   active = capture;
   feedback('');
   if (hardware) bridge.startReader(active.id);
+  else bridge?.feedback?.('start');
   updateScan();
 }
 function simReads(s, capture) {
-  if (capture.kind === 'pallet') return [{epc:(s.manifest.pallets?.[0] ?? s.manifest).palletEpc}];
-  const expected = s.manifest.cartons.map(c => c.epc);
-  const epcs = capture.scenario === 'Missing one' || capture.scenario === 'Interrupted' ? expected.slice(0,-1) : expected;
-  if (capture.scenario === 'Unexpected extra') epcs.push(EXTRA_EPC);
+  if (capture.kind === 'pallet') return [{epc:(pendingPallet(s) ?? s.manifest).palletEpc}];
+  const expected = s.manifest.requirements ? s.manifest.requirements.flatMap(({sku,quantity}) =>
+    scanStockFor(s,s.manifest).filter(carton => carton.sku === sku && carton.state === 'available').slice(0,quantity).map(c => c.epc)) :
+    s.manifest.cartons.map(c => c.epc);
+  const missing = ['Missing one','Missing and unexpected','Interrupted'].includes(capture.scenario);
+  const epcs = missing ? expected.slice(0,-1) : expected;
+  if (['Unexpected extra','Missing and unexpected'].includes(capture.scenario)) {
+    const neighbour = connected?.stock.find(c => !c.physical && c.state === 'available' && !expected.includes(c.epc));
+    epcs.push(neighbour?.epc ?? EXTRA_EPC);
+  }
   return [...epcs, ...epcs.slice(0,1)].map(epc => ({epc}));
 }
 function collect(reads) {
@@ -637,7 +1125,7 @@ function end(interrupted = false) {
     updateScan();
   } else {
     collect(simReads(session(),active));
-    finalize(interrupted || (active.kind === 'cartons' && active.scenario === 'Interrupted'), 'Demo interruption');
+    finalize(interrupted || (active.kind === 'cartons' && active.scenario === 'Interrupted'), 'Interrupted *');
   }
 }
 function finalize(interrupted, message) {
@@ -647,17 +1135,18 @@ function finalize(interrupted, message) {
   commit(() => {
     if (capture.kind === 'pallet') {
       const seen = Object.keys(capture.observations);
-      // Any tag of a loaded pallet locks it; with several pallets the strongest signal wins. Cartons then count only for it.
-      const lock = interrupted ? null : lockPallet(s.manifest,capture.observations);
+      const target = multiPallet(s) ? pendingPallet(s) : null;
+      const lock = interrupted ? null : target ?
+        lockPallet({pallets:[target]},capture.observations[target.palletEpc] ? {[target.palletEpc]:capture.observations[target.palletEpc]} : {}) :
+        lockPallet(s.manifest,capture.observations);
       s.identified = Boolean(lock);
       if (lock && lock.pallet.palletEpc !== s.manifest.palletEpc) {
         s.manifest = lockTo(s.manifest,lock.pallet);
-        s.allocation = {...s.allocation, cartons:lock.pallet.cartons.length, pallets:1};
       }
       (s.palletAttempts ??= []).push({
         id:capture.id, startedAt:capture.startedAt, endedAt, observations:capture.observations,
         profile:s.palletPending?.profile, actor:actor(), result:s.identified ? 'Identified' : 'Unconfirmed',
-        lockedPallet:lock?.pallet.pallet
+        lockedPallet:lock?.pallet.pallet, palletEpc:lock?.pallet.palletEpc, manifestRevision:s.manifest.revision
       });
       delete s.palletPending;
       log(s,lock ? 'Pallet locked' : 'Pallet not confirmed',lock ? lock.pallet.pallet + ' / strongest signal ' +
@@ -668,7 +1157,7 @@ function finalize(interrupted, message) {
       run.endedAt = endedAt;
       run.elapsedSeconds = Math.max(0,Math.round((Date.parse(endedAt) - Date.parse(run.startedAt)) / 1000));
       run.state = interrupted ? 'Interrupted' : 'Finished';
-      run.result = compare(s.manifest,Object.keys(run.observations));
+      run.result = compareSession(s,manifestFor(s,run),Object.keys(run.observations));
       run.invalidReads = capture.invalid ?? 0;
       if (interrupted) run.error = run.invalidReads ? run.invalidReads + ' invalid EPC observations' : message || 'Capture interrupted';
       log(s,interrupted ? 'Scan interrupted' : 'Scan finished',interrupted ? run.error : run.result.status,capture.id);
@@ -677,7 +1166,8 @@ function finalize(interrupted, message) {
   if (interrupted) bridge?.feedback('error');
   active = undefined;
   rescanReason = '';
-  feedback(capture.kind === 'pallet' && !s.identified ? 'Pallet EPC not confirmed: no tag from this manifest was read. Scan closer to the pallet and retry.' : '',capture.kind === 'pallet' && !s.identified);
+  if (capture.kind === 'pallet' && s.identified) scenario = defaultScenario;
+  feedback(capture.kind === 'pallet' && !s.identified ? 'Pallet EPC not confirmed. Scan closer to the displayed pallet and retry.' : '',capture.kind === 'pallet' && !s.identified);
   render();
   if (capture.kind === 'pallet' && s.identified) focusScan();
 }
@@ -707,6 +1197,11 @@ function updateScan() {
     toggle.disabled = Boolean(active.ending);
   }
 }
+function checkManifestConflict(manifest,sessionId) {
+  if (!connected) return;
+  const conflict = outboundManifestConflict(manifest,connected.stock,store.sessions,sessionId);
+  if (conflict) throw new Error(conflict);
+}
 function chooseManifest(text,name,demo = false) {
   const s = session();
   if (view !== 'session' || !permits(role,'manifest') || s?.closedAt || s?.confirmedAt || active) return;
@@ -720,6 +1215,7 @@ function chooseManifest(text,name,demo = false) {
     if (s && store.person) commit(() => log(s,'Manifest import failed',name + ' / ' + rows.slice(0,3).join(' | ') + (rows.length > 3 ? ' | …' : '')));
     throw error;
   }
+  checkManifestConflict(data,s.id);
   pendingImport = {data,name,demo};
   feedback('');
   render();
@@ -729,6 +1225,106 @@ function action(fn) {
   try { fn(); } catch (error) { feedback(error?.message ?? 'Action could not be completed.',true); }
 }
 window.keypharmEvent = (name,data) => action(() => {
+  if (name === 'back') { goBack(); return; }
+  if (utilityScan?.id === data?.id && utilityScan) {
+    if (name === 'started' && utilityScan.kind !== 'lookup' && !utilityScan.ending) {
+      utilityScan.timer = setTimeout(() => stopUtilityScan(),850);
+    }
+    if (name === 'reads' || name === 'ended') {
+      for (const read of data.reads ?? []) {
+        const epc = normalizeEpc(read.epc);
+        if (utilityScan.kind !== 'lookup' && validEpc(epc)) {
+          const rssi = Number.parseFloat(read.rssi);
+          const strength = Number.isFinite(rssi) ? rssi : -Infinity;
+          utilityScan.epcs.set(epc,Math.max(utilityScan.epcs.get(epc) ?? -Infinity,strength));
+        }
+        if (utilityScan.kind === 'lookup' && epc === lookupTarget) {
+          const rssi = Number.parseFloat(read.rssi);
+          if (Number.isFinite(rssi)) lookupRead = {rssi,at:Date.now()};
+        }
+      }
+      if (name === 'reads' && utilityScan.kind === 'lookup') updateLookup();
+      if (name === 'ended') {
+        const {kind,epcs,timer} = utilityScan;
+        clearTimeout(timer);
+        utilityScan = undefined;
+        clearTimeout(lookupTimer);
+        if (data.interrupted) feedback(data.message || 'Scan interrupted.',true);
+        else if (kind !== 'lookup') {
+          const [strongest] = [...epcs].sort((a,b) => b[1]-a[1]);
+          const noun = kind === 'pallet' ? 'pallet tag' : 'tag';
+          if (strongest && (epcs.size === 1 || Number.isFinite(strongest[1]))) {
+            const read = {epc:strongest[0],rssi:strongest[1]};
+            if (kind === 'pallet') palletRead = read; else identifyRead = read;
+          } else feedback(strongest ? 'Signal strength unavailable. Move closer to the ' + noun + ' and retry.' : 'No ' + noun + ' read.',true);
+        }
+        render();
+      }
+    }
+    return;
+  }
+  if (['lookup','identify','pallet-task'].includes(view) && ['press','release','cancel'].includes(name)) {
+    if (name === 'press') startUtilityScan();
+    else if (name === 'cancel' || view === 'lookup') stopUtilityScan(name === 'cancel');
+    return;
+  }
+  if (name === 'receipt-barcode') {
+    if (!pendingBarcode || data?.id !== pendingBarcode) return;
+    pendingBarcode = undefined;
+    if (data.value) acceptReceiptBarcode(data.value);
+    else { feedback(data.message || 'No barcode read.',true); render(); }
+    return;
+  }
+  if (receiptCapture && data?.id === receiptCapture.id) {
+    if (receiptCapture.epcs) {
+      if (name === 'reads' || name === 'ended') {
+        for (const read of data.reads ?? []) {
+          const epc = normalizeEpc(read.epc);
+          if (!validEpc(epc)) continue;
+          const previous = receiptCapture.epcs.get(epc);
+          if (previous === undefined && receiptCapture.epcs.size >= 4000) {
+            receiptCapture.overflow = true;
+            stopReceiptScan(true);
+            break;
+          }
+          receiptCapture.epcs.set(epc,(previous ?? 0) + 1);
+        }
+      }
+      if (name === 'ended') {
+        const capture = receiptCapture;
+        receiptCapture = undefined;
+        if (data.interrupted || capture.overflow) {
+          feedback(capture.overflow ? 'Too many carton tags. Count a smaller area.' : data.message || 'Count scan interrupted.',true);
+          render();
+        } else void scanStock({epcs:[...capture.epcs.keys()],readCounts:Object.fromEntries(capture.epcs),
+          reader:'hardware',operationId:capture.id},capture.task);
+      }
+      return;
+    }
+    if (name === 'reads' || name === 'ended') {
+      receiptCapture.epc ||= (data.reads ?? []).map(read => normalizeEpc(read.epc)).find(validEpc) ?? '';
+      if (name === 'reads' && receiptCapture.epc) stopReceiptScan();
+    }
+    if (name === 'ended') {
+      const {epc} = receiptCapture;
+      receiptCapture = undefined;
+      const taskTags = currentStockTask()?.tagged ?? [];
+      const duplicate = !data.interrupted && epc && (taskTags.find(tag => tag.epc === epc) ??
+        connected.stock.find(tag => tag.epc === epc));
+      if (data.interrupted) feedback(data.message || 'Scan interrupted.',true);
+      else if (duplicate) {
+        feedback('This EPC is already tagged to ' + duplicate.sku + (taskTags.includes(duplicate) ? ' in this task.' : '.'),true);
+      } else if (epc) receiptRead = {epc};
+      else feedback(data.message || 'No carton tag read.',true);
+      render();
+    }
+    return;
+  }
+  if (view === 'stock' && ['press','release','cancel'].includes(name)) {
+    if (name === 'press') startStockScan();
+    else stopReceiptScan(name === 'cancel');
+    return;
+  }
   if (builder?.capture && data?.id === builder.capture.id) {
     if (name === 'reads' || name === 'ended') buildCollect(data.reads);
     if (name === 'ended') {
@@ -743,18 +1339,35 @@ window.keypharmEvent = (name,data) => action(() => {
     return;
   }
   if (name === 'reader') {
+    const becameReady = data.ready && !reader.ready;
     reader = data;
-    if (!active && !powerRequest && (view === 'scan' || view === 'sessions' || (view === 'session' && session()?.source === 'C72 hardware'))) render();
+    if (!reader.ready) appliedSessionPower = undefined;
+    if (becameReady && ['session','scan'].includes(view)) applySessionPower(session());
+    if (!active && !powerRequest && !receiptCapture && !utilityScan && (['scan','sessions','stock','lookup','identify','settings','pallet-task'].includes(view) || (view === 'session' && session()?.source === 'C72 hardware'))) render();
   }
   if (name === 'reader-power' && powerRequest?.id === data.id) {
-    const {session:target, actor:changedBy} = powerRequest;
+    const {session:target, actor:changedBy, automatic} = powerRequest;
     powerRequest = undefined;
     reader = {...reader, ready:data.ready ?? reader.ready, profile:data.profile ?? reader.profile};
+    if (automatic) {
+      if (data.ok && reader.profile?.powerDbm === automatic.power) {
+        appliedSessionPower = automatic;
+        feedback('');
+        if (session()?.id === automatic.id) applySessionPower(session());
+      } else feedback(data.message || 'Reader power could not be confirmed.',true);
+      render();
+      if (connected?.hasPending(store.sessions)) void refreshConnected();
+      return;
+    }
     // A session change goes to its log; a home-screen change goes to the device log (FR-35). Every scan still records its power.
     if (data.ok && data.previousPower !== data.profile?.powerDbm) {
       const detail = data.previousPower + ' to ' + data.profile.powerDbm + ' dBm';
       commit(() => target ? log(target,'Reader power changed',detail) :
         (store.audit ??= []).push({at:now(), actor:changedBy, action:'Reader power changed', detail:detail + ' (home screen)'}));
+    }
+    if (data.ok && connected?.controls.power?.requested === data.profile?.powerDbm) {
+      connected.updateControls({applied:data.profile.powerDbm});
+      void refreshConnected();
     }
     feedback(data.message,!data.ok);
     render();
@@ -819,6 +1432,26 @@ document.addEventListener('change', event => action(() => {
     feedback('');
   }
   if (target.id === 'scenario') scenario = target.value;
+  if (target.id === 'stock-task') {
+    stockTaskId = target.value;
+    stockScenario = 'match';
+    receiptProduct = '';
+    receiptUpload = receiptRead = undefined;
+    render();
+    root.querySelector('#stock-task')?.focus();
+  }
+  if (target.id === 'lookup-session') {
+    lookupSessionId = target.value;
+    const manifest = lookupSession()?.manifest;
+    lookupTarget = manifest?.pallets?.[0]?.palletEpc ?? manifest?.palletEpc;
+    lookupRead = undefined;
+    feedback('');
+    if (connected?.controls.lookupPower == null) applySessionPower(lookupSession(), true);
+    render();
+  }
+  if (target.id === 'lookup-target') { lookupTarget = target.value; lookupRead = undefined; render(); }
+  if (target.id === 'stock-scenario') stockScenario = target.value;
+  if (target.id === 'demo-barcode') { demoBarcode = target.checked; feedback(''); render(); }
   if (target.id === 'csv-file' && target.files[0]) {
     const file = target.files[0], uploadSession = selected;
     if (file.size > 512000) throw new Error('Use a CSV smaller than 512 KB.');
@@ -855,9 +1488,86 @@ document.addEventListener('click', event => action(() => {
   if (control.dataset.open) {
     selected = control.dataset.open;
     view = 'session';
+    appliedSessionPower = undefined;
+    if (needsSessionPower(session())) {
+      applySessionPower(session());
+      void refreshConnected();
+    }
     rescanReason = '';
+    scenario = defaultScenario;
   }
-  if (command === 'new' && permits(role,'create')) view = 'new';
+  if (command === 'new' && canCreate()) view = 'new';
+  if (command === 'pallet-task' && connected?.auth && role === 'operator') {
+    palletRead = undefined;
+    palletTask = connected.palletTasks.find(task => task.id === control.dataset.task);
+    if (palletTask) view = 'pallet-task';
+  }
+  if (command === 'tab' && ['sessions','lookup','identify','settings'].includes(control.dataset.page)) {
+    if (view === control.dataset.page) return;
+    view = control.dataset.page;
+    selected = undefined;
+    lookupRead = identifyRead = undefined;
+    feedback('');
+    window.scrollTo(0,0);
+  }
+  if (view === 'pallet-task' && palletRead && !stockScanBusy && command === 'pallet-clear') {
+    palletRead = undefined;
+    feedback('');
+    render();
+    return;
+  }
+  if (view === 'pallet-task' && palletRead && !stockScanBusy && command === 'pallet-send') {
+    palletDialog.querySelector('#pallet-confirm-epc').textContent = palletRead.epc;
+    palletDialog.querySelector('#pallet-confirm-ref').textContent = palletTask?.scanReference ?? palletTask?.reference ?? '';
+    palletDialog.returnValue = 'cancel';
+    palletDialog.showModal();
+    return;
+  }
+  if (command === 'utility-scan') {
+    if (utilityScan) stopUtilityScan(); else startUtilityScan();
+    return;
+  }
+  if (command === 'stock-tasks' && connected?.auth && ['operator','admin'].includes(role)) {
+    view = 'stock';
+    stockTaskId = '';
+    stockScenario = 'match';
+    receiptProduct = '';
+    receiptUpload = receiptRead = undefined;
+    window.scrollTo(0,0);
+  }
+  if (view === 'stock' && command === 'barcode-cancel') { cancelBarcode(); return; }
+  if (view === 'stock' && command === 'barcode-camera' && pendingBarcode) { bridge?.useReceiptBarcodeCamera?.(pendingBarcode); return; }
+  if (view === 'stock' && command === 'untag-close') { root.querySelector('#untag-dialog')?.close(); return; }
+  if (view === 'stock' && command === 'untag-open' && role === 'admin') {
+    const dialog = root.querySelector('#untag-dialog');
+    dialog.querySelector('code').textContent = control.dataset.epc;
+    dialog.querySelector('[name="epc"]').value = control.dataset.epc;
+    dialog.showModal();
+    return;
+  }
+  if (view === 'stock' && ['receipt-epc','count-scan'].includes(command)) {
+    if (receiptCapture) stopReceiptScan(); else startStockScan();
+    return;
+  }
+  if (view === 'stock' && command === 'count-retry') { void scanStock(); return; }
+  if (view === 'stock' && command === 'receipt-simulate') {
+    bridge?.feedback?.('start');
+    receiptRead = {simulation:true};
+    feedback('');
+    render();
+    return;
+  }
+  if (view === 'stock' && command === 'receipt-remove' && !receiptUpload) {
+    receiptRead = undefined;
+    feedback('');
+    render();
+    return;
+  }
+  if (view === 'stock' && command === 'receipt-confirm') { void receiveStockCarton(); return; }
+  if (view === 'stock' && command === 'receipt-barcode-reset') {
+    receiptProduct = '';
+    receiptUpload = receiptRead = undefined;
+  }
   if (command === 'build-open' && s && permits(role,'manifest') && !s.closedAt && !s.confirmedAt) { builder = {tags:{}}; view = 'build'; }
   if (command === 'build-toggle' && view === 'build' && builder) { buildToggle(); return; }
   if (command === 'build-close' && !builder?.capture) { builder = undefined; view = 'session'; }
@@ -866,17 +1576,34 @@ document.addEventListener('click', event => action(() => {
     if (bridge) bridge.saveTemplate(csv,filename); else download(filename,csv);
     return;
   }
-  if (command === 'as-role' && roles[control.dataset.role]) { role = control.dataset.role; pendingImport = undefined; }
-  if (command === 'back') { view = 'sessions'; pendingImport = undefined; }
-  if (command === 'open-scan' && s?.manifest && s.verifiedBy && permits(role,'scan') && !s.closedAt && !s.confirmedAt) {
+  if (command === 'as-role' && !connected && handheldRoles[control.dataset.role]) { role = control.dataset.role; pendingImport = undefined; }
+  if (command === 'back') { goBack(); return; }
+  if (command === 'open-scan' && (!connected || role === 'operator') && s?.manifest && s.verifiedBy && permits(role,'scan') && !s.closedAt && !s.confirmedAt) {
+    if (multiPallet(s) && pendingPallet(s)?.palletEpc !== s.manifest.palletEpc && s.identified) {
+      commit(() => { s.identified = false; });
+    }
     view = 'scan';
     feedback('');
     render();
     focusScan();
     return;
   }
-  if (command === 'scan-details') { view = 'session'; window.scrollTo(0,0); }
+  if (command === 'scan-details') {
+    view = 'session';
+    window.scrollTo(0,0);
+    render();
+    if (compactOperator()) {
+      const results = root.querySelector('#scan-attempts h2');
+      results?.scrollIntoView({block:'start'});
+      results?.focus({preventScroll:true});
+    }
+    return;
+  }
   if (command === 'sample') {
+    if (connected) {
+      if (connected.samples[s?.source]) chooseManifest(connected.samples[s.source],'Sample CSV',s.source === 'Simulation');
+      return;
+    }
     if (s?.source === 'C72 hardware') {
       if (liveSample) chooseManifest(liveSample,liveSampleName);
     } else chooseManifest(SAMPLE,'Demo sample CSV',true);
@@ -891,7 +1618,13 @@ document.addEventListener('click', event => action(() => {
     return;
   }
   if (command === 'reconnect') { bridge?.connectReader(); return; }
-  if (command === 'reset' && view === 'sessions' && role === 'admin' && !builder?.capture) {
+  if (command === 'reset' && view === 'settings' && role === 'admin' && !builder?.capture) {
+    if (connected) {
+      resetDialog.querySelector('form').reset();
+      resetDialog.returnValue = 'cancel';
+      resetDialog.showModal();
+      return;
+    }
     if (!window.confirm('Permanently delete all sessions, loaded manifests, scans, the PoC test plan, saved names, and form drafts on this device? ' +
       'This also stops dashboard sharing. Export evidence first if you need to keep it.')) return;
     localStorage.removeItem(uiKey);
@@ -903,7 +1636,7 @@ document.addEventListener('click', event => action(() => {
     builder = undefined;
     pendingImport = undefined;
     rescanReason = '';
-    scenario = 'Missing one';
+    scenario = defaultScenario;
     simulatedKeys = false;
     dashboardUrl = '';
     dashboardQr = '';
@@ -914,6 +1647,7 @@ document.addEventListener('click', event => action(() => {
       dashboardResetPending = true;
       bridge.shareDashboard(false);
     }
+    view = 'sessions';
     feedback('Local data reset.');
     render();
     window.scrollTo(0,0);
@@ -932,9 +1666,29 @@ document.addEventListener('click', event => action(() => {
   if (command === 'copy' && permits(role,'export')) { bridge?.copyLink(dashboardUrl); feedback('Dashboard link copied.'); return; }
   if (command === 'export' && permits(role,'export')) { exportRecords(store); return; }
   if (command === 'export-one' && s && permits(role,'export')) { exportRecords({sessions:[s]}); return; }
-  if (command === 'continue' && view === 'scan' && permits(role,'confirm') && !s.confirmedAt && canContinue(s,latest(s))) {
-    commit(() => { s.confirmedAt = now(); log(s,'Clean match confirmed','Carton set matched',latest(s).id); });
+  if (command === 'continue' && view === 'scan' && permits(role,'confirm') && !s.confirmedAt && canContinue(s,latestCurrentRun(s))) {
+    const run = latestCurrentRun(s);
+    commit(() => {
+      log(s,'Clean match confirmed',s.manifest.pallet,run.id);
+      if (multiPallet(s)) {
+        (s.palletMatches ??= {})[s.manifest.palletEpc] = run.id;
+        if (pendingPallet(s)) {
+          s.identified = false;
+          return;
+        }
+      }
+      s.confirmedAt = now();
+    });
+    if (!s.confirmedAt) {
+      rescanReason = '';
+      feedback('');
+      render();
+      focusScan();
+      return;
+    }
     view = 'session';
+    confirmWorkflow(multiPallet(s) ? 'All pallets matched' : 'Pallet match recorded',
+      'The result is saved on this handheld. Review and close the session when ready.');
     window.scrollTo(0,0);
   }
   if (command || control.dataset.open) { feedback(''); render(); }
@@ -943,8 +1697,44 @@ root.addEventListener('submit', event => action(() => {
   event.preventDefault();
   if (active || powerRequest) return;
   const form = event.target, data = Object.fromEntries(new FormData(form)), s = session(), drafts = draftPrefix(form.id);
-  const hardwareSession = view === 'session' && s?.source === 'C72 hardware' && !s.closedAt;
-  if (form.id === 'reader-power' && (view === 'sessions' || hardwareSession) &&
+  if (form.id === 'stock-demo' && view === 'stock') { void scanStock({scenario:data.scenario}); return; }
+  if (form.id === 'stock-power' && view === 'stock' && role === 'admin') {
+    const power = Number(data.power);
+    if (!Number.isInteger(power) || power < 5 || power > 30) throw new Error('Choose a power from 5 to 30 dBm.');
+    connected.updateControls({stockPower:power});
+    feedback('Stock task power saved.');
+    void refreshConnected();
+    return;
+  }
+  if (form.id === 'untag-carton' && view === 'stock' && role === 'admin') {
+    root.querySelector('#untag-dialog').close();
+    void untagCarton(data);
+    return;
+  }
+  if (form.id === 'receipt-barcode' && view === 'stock' && role === 'operator') {
+    if (demoBarcode) {
+      bridge?.feedback?.('start');
+      acceptReceiptBarcode(data.identifier);
+    } else if (!pendingBarcode && bridge?.scanReceiptBarcode) {
+      pendingBarcode = id();
+      feedback('');
+      render();
+      bridge.scanReceiptBarcode(pendingBarcode);
+    } else if (!pendingBarcode) feedback('Barcode scanning is unavailable on this device.',true);
+    return;
+  }
+  if (form.id === 'session-power' && connected?.auth && view === 'session' && s?.source === 'C72 hardware' && permits(role,'reader-power')) {
+    const power = data.power === '' ? null : Number(data.power);
+    if (power !== null && (!Number.isInteger(power) || power < 5 || power > 30)) throw new Error('Choose a power from 5 to 30 dBm.');
+    connected.updateControls({sessionPowers:{[s.id]:power}});
+    applySessionPower(s);
+    feedback('Recommended power saved.');
+    render();
+    void refreshConnected();
+    return;
+  }
+  const hardwareSession = !connected && view === 'session' && s?.source === 'C72 hardware' && !s.closedAt;
+  if (form.id === 'reader-power' && (view === 'settings' || hardwareSession) &&
       reader.ready && permits(role,'reader-power') && bridge?.setReaderPower) {
     const power = Number(data.power);
     if (!Number.isInteger(power) || power < 5 || power > 30) throw new Error('Choose a power from 5 to 30 dBm.');
@@ -960,17 +1750,20 @@ root.addEventListener('submit', event => action(() => {
     view = 'session';
     chooseManifest(csv,'Built from scan ' + new Date().toLocaleString());
   }
-  if (form.id === 'create' && permits(role,'create')) {
+  if (form.id === 'create' && canCreate()) {
     if (Object.keys(metadata).some(k => k !== 'notes' && !data[k]?.trim())) throw new Error('Fill in the test setup fields.');
     const record = {...data,id:id(),creator:actor(),createdAt:now(),mode:'POC',runs:[],logs:[],allocation:{}};
     commit(() => { log(record,'Session created',record.planned); store.sessions.push(record); });
     selected = record.id; view = 'session';
+    appliedSessionPower = undefined;
+    applySessionPower(record);
   }
   if (form.id === 'manifest' && s && !s.closedAt && !s.confirmedAt && permits(role,'manifest') && pendingImport) {
+    checkManifestConflict(pendingImport.data,s.id);
     if (s.manifest && !data.reason.trim()) throw new Error('Enter a reason for the revision.');
     // Until the scan locks one pallet, every pallet and carton in the file counts toward the 500-label cap.
     const allocation = {cartons:pendingImport.data.pallets.reduce((n,p) => n + p.cartons.length,0),pallets:pendingImport.data.pallets.length,
-      reserves:Number(data.reserves),candidates:Number(data.candidates)};
+      reserves:Number(data.reserves ?? s.allocation.reserves ?? 0),candidates:Number(data.candidates ?? s.allocation.candidates ?? 0)};
     const total = allocationTotal(allocation) + store.sessions.filter(other => other.id !== s.id).reduce((sum,other) => sum + allocationTotal(other.allocation),0);
     if (total > 500) throw new Error('POC label allocation cannot exceed 500 across sessions.');
     commit(() => {
@@ -980,6 +1773,7 @@ root.addEventListener('submit', event => action(() => {
       s.allocation = allocation;
       s.verifiedBy = s.verifiedAt = null;
       s.identified = false;
+      delete s.palletMatches;
       log(s,'Manifest saved','Revision ' + s.manifest.revision + ' / ' + s.manifest.source +
         ' / ' + total + ' cumulative labels' + (missingSku(s.manifest).length ? ' / ' + missingSku(s.manifest).length + ' cartons without SKU' : '') +
         (data.reason ? ' / ' + data.reason : ''));
@@ -988,6 +1782,7 @@ root.addEventListener('submit', event => action(() => {
   }
   if (form.id === 'verify' && s?.manifest && !s.verifiedBy && !s.closedAt && data.checked && permits(role,'verify')) {
     commit(() => { s.verifiedBy = actor(); s.verifiedAt = now(); log(s,'Physical verification','Pallet contents and unique label assignment confirmed'); });
+    confirmWorkflow('Verification recorded','The confirmation is saved on this handheld and will sync to the dashboard.');
   }
   if (form.id === 'investigate' && s && !s.closedAt && permits(role,'investigate') && latest(s)?.result?.extra.includes(data.epc)) {
     if (!data.note.trim()) throw new Error('Enter the investigation note.');
@@ -999,6 +1794,7 @@ root.addEventListener('submit', event => action(() => {
   }
   if (form.id === 'plan' && permits(role,'manifest') && !store.plan?.closedAt) {
     const tests = parsePlan(data.tests);
+    connected?.updateControls({plan:data.tests});
     commit(() => { store.plan = {tests}; });
   }
   if (form.id === 'close-plan' && permits(role,'close') && store.plan && !store.plan.closedAt) {
@@ -1008,8 +1804,10 @@ root.addEventListener('submit', event => action(() => {
     if (errors.length) throw new Error(errors.join('\n'));
     commit(() => { store.plan.closedAt = now(); store.plan.closure = {actor:actor(), skipped}; });
   }
-  if (form.id === 'close' && canClose(s,data,role)) {
-    commit(() => { s.closedAt = now(); s.closure = {coverage:data.coverage.trim(),actor:actor()}; log(s,'Session closed',s.closure.coverage); });
+  if (form.id === 'close') {
+    if (!canClose(s,data,role)) throw new Error('Review the scans and enter the coverage before closing.');
+    commit(() => { s.closedAt = now(); s.closure = {coverage:data.coverage.trim(),actor:actor(),reviewed:true}; log(s,'Session closed',s.closure.coverage); });
+    confirmWorkflow('Test session closed','The scan evidence remains available in the session.');
   }
   clearDrafts(drafts);
   feedback(''); render();
@@ -1033,10 +1831,16 @@ function download(name,text) {
 // Pointer capture and key-up implement the same hold/release behavior as the physical trigger.
 root.addEventListener('pointerdown',event => {
   if (event.target.id !== 'demo-trigger' || event.button !== 0) return;
+  event.preventDefault();
   event.target.setPointerCapture(event.pointerId);
   action(begin);
 });
-root.addEventListener('pointerup',event => { if (event.target.id === 'demo-trigger') action(() => end()); });
+root.addEventListener('pointerup',event => {
+  if (event.target.id !== 'demo-trigger' || !active || active.hardware) return;
+  // Keep the release gesture on the trigger before replacing it with the next scan screen.
+  const capture = active;
+  setTimeout(() => { if (active === capture) action(() => end()); },0);
+});
 root.addEventListener('pointercancel',event => { if (event.target.id === 'demo-trigger') action(() => end(true)); });
 root.addEventListener('keydown',event => {
   if (event.target.id !== 'demo-trigger' || !['Enter',' '].includes(event.key)) return;
@@ -1060,3 +1864,181 @@ if (ui.selected && store.sessions.some(s => s.id === ui.selected)) {
 } else if (ui.view === 'new') view = 'new';
 render();
 bridge?.connectReader();
+if (connected) {
+  const nativeEvent = window.keypharmEvent;
+  window.keypharmEvent = (name,data) => {
+    if (name === 'workspace-response') connected.receive(data);
+    else nativeEvent(name,data);
+  };
+  connectionPanel.hidden = false;
+  let manualSync = false, lastSyncNotice = '', bubbleTimer;
+  const showConnection = () => {
+    if (!connected.auth) {
+      root.hidden = true;
+      who.textContent = '';
+      if (!connectionPanel.querySelector('form')) {
+        connectionPanel.innerHTML = '<section class="panel"><h1>Sign in</h1>' +
+          '<form class="stack"><label>Username<input name="username" value="testing" autocomplete="username" required></label>' +
+          '<label>Password<input name="password" type="password" autocomplete="current-password" required></label>' +
+          '<button>Sign in</button></form><p class="info-bubble" role="status"></p></section>';
+      }
+    } else if (!connectionPanel.querySelector('[data-workspace="retry"]')) {
+      connectionPanel.innerHTML = '<div class="row spread workspace-strip"><p class="info-bubble workspace-bubble" role="status"></p>' +
+        '<select id="workspace-role" aria-label="Role">' + Object.entries(handheldRoles).map(([key,label]) =>
+          '<option value="' + key + '">' + escape(label) + '</option>').join('') + '</select>' +
+        '<div class="workspace-strip-actions"><button type="button" class="secondary" data-workspace="retry">Sync now</button>' +
+        '<button type="button" class="secondary" data-workspace="logout">Sign out</button></div></div>';
+    }
+    const picker = connectionPanel.querySelector('#workspace-role');
+    if (picker) picker.value = role;
+    const status = connectionPanel.querySelector('[role="status"]');
+    status.textContent = connected.message || (connected.auth ? connected.state : '');
+    if (connected.auth) {
+      status.dataset.visible ??= 'false';
+      if (connected.state === 'Syncing') {
+        status.dataset.visible = 'false';
+        return;
+      }
+      const message = connected.message || (manualSync && connected.state === 'Synced' ? 'Synced' : '');
+      if (message && (message !== lastSyncNotice || manualSync)) {
+        lastSyncNotice = message;
+        if (bridge.showToast) bridge.showToast(message);
+        else {
+          status.dataset.visible = 'true';
+          clearTimeout(bubbleTimer);
+          bubbleTimer = setTimeout(() => { status.dataset.visible = 'false'; },2600);
+        }
+      } else if (!message && connected.state === 'Synced') {
+        status.dataset.visible = 'false';
+        lastSyncNotice = '';
+      }
+      manualSync = false;
+    }
+  };
+  const safe = () => !active && !builder?.capture && !utilityScan && !receiptCapture && !pendingBarcode && !powerRequest && !stockScanBusy && !pendingImport && !resetDialog.open && !palletDialog.open && !root.querySelector('#untag-dialog[open]');
+  const clearConnectedRecords = () => {
+    localStorage.removeItem(uiKey);
+    localStorage.removeItem(key);
+    store = {sessions:[],people:[]};
+    ui = {drafts:{}};
+    view = 'sessions';
+    selected = builder = pendingImport = undefined;
+    query = rescanReason = '';
+    scenario = defaultScenario;
+    receiptProduct = '';
+    receiptUpload = receiptRead = countUpload = undefined;
+    palletTask = palletRead = utilityScan = lookupSessionId = lookupTarget = lookupRead = identifyRead = undefined;
+    pendingRecordRender = true;
+    publish();
+  };
+  let pendingRecordRender = false;
+  const renderReceivedRecord = () => {
+    const focus = document.activeElement;
+    if (!pendingRecordRender || !safe() || (root.contains(focus) && focus.matches('input, textarea, select'))) return;
+    pendingRecordRender = false;
+    render();
+  };
+  const applyRecord = updated => {
+    const index = store.sessions.findIndex(s => s.id === updated.id);
+    if (index < 0) store.sessions.push(updated);
+    else store.sessions[index] = updated;
+    localStorage.setItem(key,JSON.stringify(store));
+    if (['sessions','lookup','identify'].includes(view) || selected === updated.id) pendingRecordRender = true;
+    renderReceivedRecord();
+  };
+  let controlsRevision = connected.controls.revision;
+  let recommendedPower = sessionPower(session());
+  let stockVersion = '', removedVersion = [...connected.removedSessions].join();
+  refreshConnected = () => connected.refresh(() => store.sessions,applyRecord,safe,() => {
+    showConnection();
+    const removed = [...connected.removedSessions].join();
+    if (removed !== removedVersion) {
+      removedVersion = removed;
+      pendingRecordRender = true;
+    }
+    renderReceivedRecord();
+    if (recommendedPower !== sessionPower(session())) {
+      recommendedPower = sessionPower(session());
+      if (safe() && ['session','scan'].includes(view) && needsSessionPower(session())) {
+        applySessionPower(session());
+        if (!document.activeElement?.matches('#session-power input')) render();
+      }
+    }
+    const updatedTasks = connected.stockTasks.map(task => task.id + ':' + task.revision).concat(connected.palletTasks.map(task => task.id)).join();
+    if (updatedTasks !== stockVersion && ['sessions','stock'].includes(view) && !root.querySelector('#untag-dialog[open]') && !document.activeElement?.matches('input, textarea, select')) {
+      stockVersion = updatedTasks;
+      render();
+    }
+    if (safe() && connected.auth && controlsRevision !== connected.controls.revision && !connected.hasPending(store.sessions)) {
+      controlsRevision = connected.controls.revision;
+      if (!store.plan?.closedAt) store.plan = {tests:connected.controls.plan};
+      localStorage.setItem(key,JSON.stringify(store));
+      if (['sessions','stock'].includes(view) && !document.activeElement?.matches('input, textarea, select') && !root.querySelector('#untag-dialog[open]')) render();
+    }
+  },clearConnectedRecords);
+  resetDialog.addEventListener('close',async () => {
+    if (resetDialog.returnValue !== 'reset' || role !== 'admin') return;
+    try {
+      const confirm = new FormData(resetDialog.querySelector('form')).get('confirm');
+      await connected.reset(confirm,clearConnectedRecords);
+      await refreshConnected();
+      confirmWorkflow('Data reset *','Starting inventory restored.');
+    } catch (error) { feedback(error.message,true); }
+  });
+  palletDialog.addEventListener('close',() => {
+    if (palletDialog.returnValue === 'confirm' && palletRead && palletTask && !stockScanBusy) {
+      void submitPalletScan(palletRead.epc);
+    }
+  });
+  connectionPanel.addEventListener('submit',async event => {
+    event.preventDefault();
+    const fields = new FormData(event.target);
+    const button = event.target.querySelector('button');
+    button.disabled = true;
+    try {
+      const user = await connected.signIn(fields.get('username'),fields.get('password'));
+      role = user.role;
+      connected.message = '';
+      render();
+      await refreshConnected();
+    } catch (error) {
+      connected.message = error.message;
+      showConnection();
+      button.disabled = false;
+    }
+  });
+  connectionPanel.addEventListener('click',event => {
+    const command = event.target.closest('button')?.dataset.workspace;
+    if (command === 'retry') { manualSync = true; void refreshConnected(); }
+    if (command === 'logout') {
+      if (!safe() || receiptUpload || countUpload) {
+        connected.message = 'Finish the current action before signing out.';
+        showConnection();
+        return;
+      }
+      try { connected.signOut(store.sessions); connected.message = ''; render(); }
+      catch (error) { connected.message = error.message; }
+      showConnection();
+    }
+  });
+  connectionPanel.addEventListener('change',event => {
+    if (event.target.id !== 'workspace-role') return;
+    try {
+      if (!safe() || receiptUpload || countUpload) throw new Error('Finish the current action before changing role.');
+      const user = connected.switchTo(event.target.value,store.sessions);
+      if (user && role !== user.role) {
+        role = user.role;
+        receiptProduct = '';
+        receiptRead = undefined;
+      }
+      pendingImport = undefined;
+      render();
+      void refreshConnected();
+    } catch (error) { connected.message = error.message; }
+    showConnection();
+  });
+  showConnection();
+  void refreshConnected();
+  setInterval(refreshConnected,5000);
+  window.addEventListener('online',refreshConnected);
+}

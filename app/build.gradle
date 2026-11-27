@@ -7,8 +7,8 @@ android {
         applicationId 'be.keypharm.rfid.poc'
         minSdk 30
         targetSdk 34
-        versionCode 20
-        versionName '0.8.6'
+        versionCode 46
+        versionName '0.9.25'
         ndk { abiFilters 'armeabi-v7a', 'arm64-v8a' }
     }
     compileOptions {
@@ -19,4 +19,5 @@ android {
 
 dependencies {
     implementation files('libs/DeviceAPI_ver20251103_release.aar')
+    implementation 'com.google.zxing:core:3.5.3'
 }
