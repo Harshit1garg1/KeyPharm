@@ -2,11 +2,11 @@ import {actionLabel} from './model.mjs';
 export const RECENT_LIMIT = 50;
 
 export const sections = {
-  sessions: {title:'Sessions', description:'Test setup, verification, closure and scan evidence.'},
-  pallets: {title:'Pallet checks', description:'Pallet identification attempts and their reader evidence.'},
-  scans: {title:'Carton scans', description:'First passes and rescans, with results and reader settings.'},
-  exceptions: {title:'Exceptions', description:'Missing and unexpected EPCs, plus interrupted scans.'},
-  activity: {title:'Activity', description:'Actions recorded by the handheld.'}
+  sessions: {title:'Sessions'},
+  pallets: {title:'Pallet checks'},
+  scans: {title:'Carton scans'},
+  exceptions: {title:'Exceptions'},
+  activity: {title:'Activity'}
 };
 
 export function indexRecords(sessions) {

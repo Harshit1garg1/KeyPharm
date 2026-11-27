@@ -74,7 +74,7 @@ with sync_playwright() as playwright:
     expect(device.get_by_text("Not run", exact=True)).to_have_count(2)
     device.get_by_role("button", name="Home",exact=True).click()
     device.get_by_role("button", name="New test session").click()
-    expect(device.get_by_label("Test ID")).to_have_value("KP-TEST-01")
+    expect(device.get_by_label("Session ID")).to_have_value("KP-TEST-01")
     device.get_by_role("button", name="Create session").click()
     expect(device.locator("#notice")).to_contain_text("Enter your name")
     as_person(device, "operator", "Operator C")
@@ -94,7 +94,9 @@ with sync_playwright() as playwright:
     device.get_by_role("button", name="Open pallet scanner").click()
     expect(device.get_by_role("heading", name="Scan pallet")).to_be_visible()
     expect(device.get_by_role("heading", name="Expected cartons")).to_have_count(0)
-    hold(device)
+    device.evaluate("window.keypharmEvent('press', {key: 139})")
+    expect(device.locator("#scan-results")).to_contain_text("Reading")
+    device.evaluate("window.keypharmEvent('release', {key: 139})")
     expect(device.get_by_role("heading", name="Scan cartons")).to_be_visible()
     expect(device.get_by_text("Pallet verified by UHF EPC.")).to_be_visible()
     expect(device.get_by_label("Rescan reason")).to_have_count(0)
@@ -103,7 +105,9 @@ with sync_playwright() as playwright:
     proceed = device.get_by_role("button", name="Continue", exact=True)
 
     device.get_by_label("Reads *").select_option("Missing one")
-    hold(device)
+    device.evaluate("window.keypharmEvent('press', {key: 139})")
+    expect(device.locator("#scan-results")).to_contain_text("Reading")
+    device.evaluate("window.keypharmEvent('release', {key: 139})")
     expect(proceed).to_be_disabled()
     expect(device.locator("#scan-results")).to_contain_text("Incomplete")
     expect(device.locator(".tag-row[data-tag-status=matched]")).to_have_count(3)
@@ -229,7 +233,7 @@ with sync_playwright() as playwright:
     pick_role(device, "admin")
     device.get_by_role("button", name="Home",exact=True).click()
     device.get_by_role("button", name="New test session").click()
-    device.get_by_label("Test ID").fill("KP-DRAFT")
+    device.get_by_label("Session ID").fill("KP-DRAFT")
     device.get_by_role("button", name="Sessions").click()
     device.get_by_role("button", name="Settings",exact=True).click()
     before_reset = device.evaluate("""() => {
@@ -267,7 +271,7 @@ with sync_playwright() as playwright:
     expect(device.get_by_label("Your name")).to_have_value("")
     expect(device.locator("#people option")).to_have_count(0)
     device.get_by_role("button", name="New test session").click()
-    expect(device.get_by_label("Test ID")).to_have_value("KP-TEST-01")
+    expect(device.get_by_label("Session ID")).to_have_value("KP-TEST-01")
 
     # C72 path with a fake Android bridge: on-screen Start scan / Stop scan drives the same reader calls as the trigger.
     c72 = browser.new_page(viewport={"width":360, "height":700})
@@ -361,8 +365,6 @@ with sync_playwright() as playwright:
     dashboard.goto("https://dashboard.test/dashboard.html")
     assert dashboard.get_by_role("img", name="KeyPharm Laboratories").evaluate("(logo) => logo.complete && logo.naturalWidth > 339")
     assert dashboard.locator(".dashboard-brand").evaluate("(logo) => getComputedStyle(logo).backgroundColor === 'rgba(0, 0, 0, 0)'")
-    assert dashboard.evaluate("getComputedStyle(document.documentElement).colorScheme") == "dark"
-    dashboard.get_by_role("button", name="Light mode", exact=True).click()
     assert dashboard.evaluate("getComputedStyle(document.documentElement).colorScheme") == "light"
     assert dashboard.get_by_role("img", name="KeyPharm Laboratories").evaluate(
         "(logo) => logo.naturalWidth > 339 && getComputedStyle(logo).filter === 'none'")
@@ -381,7 +383,7 @@ with sync_playwright() as playwright:
     assert len(outcome_counts) == 4 and sum(map(int,outcome_counts)) == 3
     assert dashboard.locator(".outcome-chart").evaluate("(chart) => getComputedStyle(chart).backgroundImage.startsWith('conic-gradient')")
     expect(dashboard.locator("[data-total=exceptions]")).to_have_text("2")
-    expect(dashboard.locator("[data-total=activity]")).to_be_visible()
+    expect(dashboard.locator("[data-total=activity]")).to_have_count(0)
     expect(dashboard.locator("#recent-sessions-count")).to_have_text("1")
     expect(dashboard.get_by_role("heading", name="Recent sessions")).to_be_visible()
     expect(dashboard.get_by_role("heading", name="Recent activity")).to_have_count(0)

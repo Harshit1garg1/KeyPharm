@@ -49,12 +49,34 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch()
                 def dashboard(role):
-                    page = browser.new_page(viewport={"width":1280,"height":800},
-                        http_credentials={"username":"testing","password":password})
+                    page = browser.new_page(viewport={"width":1280,"height":800})
                     page.goto(base)
+                    page.get_by_label("Username").fill("testing")
+                    page.get_by_label("Password").fill(password)
+                    page.get_by_role("button",name="Sign in").click()
                     expect(page.get_by_label("Role",exact=True)).to_have_value("operator")
                     page.get_by_label("Role",exact=True).select_option(role)
                     return page
+
+                signed_out = dashboard("admin")
+                old_session = next(cookie["value"] for cookie in signed_out.context.cookies() if cookie["name"] == "keypharm_dashboard")
+                signed_out.get_by_role("button",name="Sign out",exact=True).click()
+                expect(signed_out.get_by_role("heading",name="Sign in")).to_be_visible()
+                assert signed_out.request.get(base + "/api/workspace",headers={"Authorization":auth}).status == 401
+                assert signed_out.request.get(base + "/api/workspace",headers={"Cookie":"keypharm_dashboard=" + old_session}).status == 401
+                expect(signed_out.locator("html")).to_have_attribute("data-theme","light")
+                signed_out.get_by_role("button",name="Dark mode").click()
+                expect(signed_out.locator("html")).to_have_attribute("data-theme","dark")
+                signed_out.get_by_label("Username").fill("testing")
+                signed_out.get_by_label("Password").fill(password)
+                signed_out.get_by_role("button",name="Sign in").click()
+                expect(signed_out.get_by_label("Role",exact=True)).to_have_value("operator")
+                expect(signed_out.locator("html")).to_have_attribute("data-theme","dark")
+                cookie = next(c for c in signed_out.context.cookies() if c["name"] == "keypharm_dashboard")
+                assert 43190 <= cookie["expires"] - time.time() <= 43200
+                signed_out.reload()
+                expect(signed_out.get_by_label("Role",exact=True)).to_be_visible()
+                signed_out.close()
 
                 lead = dashboard("admin")
                 for retired in ("lead","operator","supervisor","viewer","handheld"):
@@ -72,8 +94,10 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 expect(lead.locator(".workspace-subtabs [href='#inventory'] .tab-count")).to_have_text("70")
                 expect(lead.get_by_role("columnheader",name="Reserved",exact=True)).to_have_count(0)
                 assert lead.evaluate("async () => (await document.fonts.load('600 15px Inter'))[0]?.status") == "loaded"
-                expect(lead.locator(".theme-sun")).to_be_visible()
+                expect(lead.locator(".theme-moon")).to_be_visible()
                 lead.screenshot(path=str(root / "build/connected-inventory.png"),full_page=True)
+                lead.get_by_role("button",name="Dark mode",exact=True).click()
+                expect(lead.locator(".theme-sun")).to_be_visible()
                 lead.get_by_role("button",name="Light mode",exact=True).click()
                 expect(lead.get_by_role("row",name="Biotona 35 0")).to_be_visible()
                 expect(lead.locator(".theme-moon")).to_be_visible()
@@ -106,7 +130,7 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 assert rail.bounding_box() == sidebar
                 lead.get_by_role("link", name="Overview").click()
                 expect(lead.locator("#overview-reports")).to_be_visible()
-                expect(lead.locator("[data-total=activity]")).to_be_visible()
+                expect(lead.get_by_role("link", name="Pallets on hand 0")).to_be_visible()
                 expect(lead.locator("#recent-sessions-count")).to_have_text("0")
                 heading_box = lead.locator(".dashboard-heading").bounding_box()
                 sessions_box = lead.locator(".dashboard-sessions").bounding_box()
@@ -144,7 +168,8 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 dock.get_by_role("button",name="Archive",exact=True).click()
                 lead.get_by_role("dialog",name="Archive location?").get_by_role("button",name="Confirm").click()
                 expect(dock).to_contain_text("Archived")
-                lead.get_by_text("Administrator settings",exact=True).click()
+                if lead.locator("#workspace-lead-settings").get_attribute("open") is None:
+                    lead.get_by_text("Administrator settings",exact=True).click()
                 lead.get_by_label("Test plan").fill("KP-OUT-40 Outbound presentation")
                 lead.get_by_label("Requested Power (dBm)").fill("15")
                 lead.get_by_role("button",name="Save test settings").click()
@@ -165,7 +190,7 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 lead.get_by_role("button",name="Dark mode",exact=True).click()
                 assert zone.evaluate("(zone) => getComputedStyle(zone).borderTopStyle") == "dashed"
                 zone.screenshot(path=str(root / "build/csv-picker-dark.png"))
-                lead.get_by_label("Test ID").fill("KP-OUT-40")
+                lead.get_by_label("Session ID").fill("KP-OUT-40")
                 lead.get_by_role("button", name="Use CSV *").click()
                 lead.get_by_role("button", name="Create session").click()
                 expect(lead.get_by_role("link", name="KP-OUT-40")).to_be_visible()
@@ -216,11 +241,6 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                     connectReader() {
                       setTimeout(() => window.keypharmEvent('reader',{ready:true,profile:{region:'ETSI',powerDbm:20}}),0);
                     },
-                    scanReceiptBarcode(id) { window.receiptBarcodeRequest = id; },
-                    useReceiptBarcodeCamera(id) {
-                      setTimeout(() => window.keypharmEvent('receipt-barcode',{id,value:'SUP-001'}),0);
-                    },
-                    cancelReceiptBarcode(){},
                     startStockReader(id,powerDbm) {
                       window.stockRead = {id,powerDbm};
                       const reads = window.testPalletReads ?? (window.testCountEpcs ?? [window.testStockEpc]).map(epc => ({epc}));
@@ -251,7 +271,11 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 expect(lead.get_by_text("C72 reader",exact=False)).to_have_count(0)
                 expect(lead.locator("#workspace-device-pill")).to_have_count(0)
                 expect(lead.locator(".device-details")).to_contain_text("Connected")
-                assert lead.locator("#workspace-lead-settings").bounding_box()["y"] < lead.locator(".devices-section").bounding_box()["y"]
+                lead.wait_for_function("""() => {
+                  const settings = document.querySelector('#workspace-lead-settings');
+                  const devices = document.querySelector('.devices-section');
+                  return settings && devices && settings.getBoundingClientRect().top < devices.getBoundingClientRect().top;
+                }""")
                 lead.screenshot(path=str(root / "build/devices-desktop.png"),full_page=True)
                 for width,height,tag in [(768,1024,"tablet"),(360,740,"mobile")]:
                     lead.set_viewport_size({"width":width,"height":height})
@@ -277,7 +301,7 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 mobile.wait_for_function("window.lastToast === 'Synced'")
                 expect(mobile.locator(".workspace-bubble")).to_have_attribute("data-visible","false")
                 expect(mobile.get_by_label("Role",exact=True).get_by_role("option")).to_have_text(["Operator","Administrator","Supervisor"])
-                expect(mobile.locator("#who")).to_have_text("Operator")
+                expect(mobile.locator("#who")).to_be_hidden()
                 nav = mobile.get_by_role("navigation",name="Main menu")
                 expect(nav.locator("button svg")).to_have_count(4)
                 for tab in ("Home","Search","Lookup","Settings"):
@@ -285,13 +309,17 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 expect(mobile.get_by_role("heading",name="PoC test plan")).to_be_hidden()
                 heights = [mobile.locator(selector).bounding_box()["height"] for selector in
                     ["[data-workspace=retry]","[data-workspace=logout]"]]
-                assert max(heights) == min(heights), heights
+                assert max(heights) == min(heights) == 44, heights
+                header = mobile.locator("#workspace-header-actions")
+                expect(header.get_by_role("button")).to_have_count(2)
+                expect(header.locator("button svg")).to_have_count(2)
+                assert header.get_by_role("button",name="Sync now").bounding_box()["x"] < header.get_by_role("button",name="Sign out").bounding_box()["x"]
                 mobile.get_by_role("button",name="Sync now").focus()
-                lead.get_by_label("Test ID").fill("KP-HANDOFF")
+                lead.get_by_label("Session ID").fill("KP-HANDOFF")
                 lead.get_by_role("button", name="Use CSV *").click()
                 lead.get_by_role("button",name="Create session").click()
                 expect(lead.locator("#workspace-message")).to_contain_text("assigned to KP-OUT-40")
-                expect(lead.get_by_label("Test ID")).to_have_value("KP-HANDOFF")
+                expect(lead.get_by_label("Session ID")).to_have_value("KP-HANDOFF")
                 expect(lead.get_by_role("link",name="KP-HANDOFF")).to_have_count(0)
                 csv = lead.evaluate("""async () => {
                     const headers = {'X-KeyPharm-Role':'admin'};
@@ -335,6 +363,7 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 mobile.get_by_role("button",name="Open pallet scanner").click()
                 expect(mobile.locator("#workspace-connection")).to_be_hidden()
                 expect(mobile.locator("#who")).to_be_hidden()
+                expect(mobile.locator("#workspace-header-actions")).to_be_hidden()
                 mobile.evaluate("window.keypharmEvent('back',{})")
                 expect(mobile.get_by_role("button",name="Open pallet scanner")).to_be_visible()
                 mobile.get_by_role("button",name="Open pallet scanner").click()
@@ -445,7 +474,8 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
 
                 mobile.evaluate("window.keypharmEvent('back',{})")
                 lead.goto(base + "/#devices")
-                lead.get_by_text("Administrator settings",exact=True).click()
+                if lead.locator("#workspace-lead-settings").get_attribute("open") is None:
+                    lead.get_by_text("Administrator settings",exact=True).click()
                 lead.get_by_role("button",name="Reset data *").click()
                 reset = lead.get_by_role("dialog",name="Reset data *")
                 reset.get_by_label("Type RESET").fill("WRONG")
@@ -479,7 +509,7 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
 
                 lead.get_by_role("link",name="Outbound").click()
                 lead.get_by_role("button",name="+ New session").click()
-                lead.get_by_label("Test ID").fill("KP-RESET-DEMO")
+                lead.get_by_label("Session ID").fill("KP-RESET-DEMO")
                 lead.get_by_role("button",name="Use CSV *").click()
                 lead.get_by_role("button",name="Create session").click()
                 expect(mobile.get_by_role("button",name="KP-RESET-DEMO",exact=False)).to_be_visible(timeout=12000)
@@ -518,9 +548,12 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 assert receiving.request.post(base + "/api/stock-action",data={"action":"scan","scenario":"partial","generation":generation},
                     headers={"Authorization":auth,"X-KeyPharm-Role":"operator"}).status == 403
                 mobile.get_by_role("button",name="Stock tasks").click(timeout=15000)
-                expect(mobile.get_by_role("heading",name="Select product")).to_be_visible()
+                product = mobile.get_by_label("Product",exact=True)
+                sku = mobile.get_by_label("SKU",exact=True)
+                expect(product).to_be_visible()
                 for received in range(1,41):
-                    mobile.get_by_role("button",name="Scan barcode").click()
+                    product.select_option(index=1)
+                    sku.select_option(index=1)
                     mobile.get_by_role("button",name="EPC *").click()
                     mobile.get_by_role("button",name="Confirm",exact=True).click()
                     tagged = mobile.get_by_role("dialog",name="Carton tagged")
@@ -576,13 +609,18 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 expect(lead.get_by_role("row",name="Physalis 14 0")).to_be_visible()
                 lead.get_by_role("button",name="View Physalis cartons").click()
                 received_carton = lead.locator('[data-carton="D50000000000000000000001"]')
-                expect(received_carton).to_have_text(re.compile(r"^Physalis-(XS|S|M|L)-\d+$"))
+                expect(received_carton).to_have_text(re.compile(r"^PHYSALIS-(XS|S|M|L)$"))
                 carton_label = received_carton.inner_text()
                 received_carton.click()
-                expect(lead.get_by_role("heading",name=f"{carton_label} history")).to_be_visible()
+                carton_history = lead.get_by_role("heading",name=f"{carton_label} (00001) history")
+                expect(carton_history).to_be_visible()
+                lead.get_by_role("button",name="Close carton history").press("Enter")
+                expect(carton_history).to_have_count(0)
+                expect(received_carton).to_be_focused()
+                received_carton.click()
+                expect(carton_history).to_be_visible()
                 expect(lead.get_by_text("Received",exact=True)).to_be_visible()
-                expect(lead.get_by_label("Destination").locator("option")).to_have_text(["Storage (current)","Staging"])
-                expect(lead.get_by_label("Destination").locator('option[value="Storage"][disabled]')).to_have_count(1)
+                expect(lead.get_by_role("button",name="Move carton",exact=True)).to_have_count(0)
                 hold_form = lead.locator('[data-stock-action="hold"]')
                 hold_form.get_by_label("Reason").fill("Check carton label")
                 hold_form.get_by_role("button",name="Place on hold").click()
@@ -591,7 +629,8 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 lead.locator("#inventory-location").select_option("Hold")
                 expect(lead.get_by_role("row",name=re.compile(rf"{re.escape(carton_label)}.*Held"))).to_be_visible()
                 lead.goto(base + "/#devices")
-                lead.get_by_text("Administrator settings",exact=True).click()
+                if lead.locator("#workspace-lead-settings").get_attribute("open") is None:
+                    lead.get_by_text("Administrator settings",exact=True).click()
                 lead.get_by_label("Requested Power (dBm)").fill("17")
                 lead.get_by_role("button",name="Save test settings").click()
                 expect(lead.locator("#workspace-message")).to_contain_text("Saved.")
@@ -625,7 +664,8 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 lead.get_by_label("Receipt CSV").set_input_files({
                     "name":"supplier-receipt.csv","mimeType":"text/csv",
                     "buffer":(b"receipt_ref,source_ref,destination_location,sku,expected_cartons,carton_id,epc,product_identifier,batch_lot,units_per_carton\n"
-                              b"KP-IN-SKU,Factory,Receiving,Physalis,2,,,SUP-001,LOT-01,10\n"),
+                              b"KP-IN-SKU,Factory,Receiving,Physalis,2,,,SUP-001,LOT-01,10\n"
+                              b"KP-IN-SKU,Factory,Receiving,Tiger Balm,1,,,SUP-002,LOT-02,10\n"),
                 })
                 lead.get_by_role("button",name="Preview receipt").click()
                 expect(lead.get_by_text("Batch/lot LOT-01 · 10 units per carton",exact=True)).to_be_visible()
@@ -635,12 +675,15 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 mobile.get_by_role("button",name="Stock tasks").click(timeout=15000)
                 expect(mobile.get_by_role("option",name="KP-IN-SKU")).to_have_count(1,timeout=15000)
                 mobile.get_by_label("Task").select_option(label="KP-IN-SKU")
-                expect(mobile.get_by_label("Product Identifier")).to_have_value("SUP-001")
-                expect(mobile.get_by_label("Barcode *")).to_be_checked()
-                mobile.get_by_label("Barcode *").uncheck()
-                mobile.get_by_role("button",name="Scan barcode").click()
-                expect(mobile.get_by_role("button",name="Scanning barcode…")).to_be_disabled()
-                mobile.get_by_role("button",name="Use camera").click()
+                product = mobile.get_by_label("Product",exact=True)
+                sku = mobile.get_by_label("SKU",exact=True)
+                product.select_option("SUP-002")
+                expect(sku.get_by_role("option",name="TIGER BALM-M",exact=True)).to_have_count(1)
+                expect(sku.get_by_role("option",name="PHYSALIS-M",exact=True)).to_have_count(0)
+                product.select_option("SUP-001")
+                expect(sku.get_by_role("option",name="PHYSALIS-M",exact=True)).to_have_count(1)
+                expect(mobile.get_by_role("button",name="Scan EPC",exact=True)).to_have_count(0)
+                sku.select_option(label="PHYSALIS-M")
                 mobile.evaluate("window.testStockEpc = 'AB0001'")
                 mobile.get_by_role("button",name="Scan EPC",exact=True).click()
                 assert mobile.evaluate("window.stockRead.powerDbm") == 10
@@ -660,34 +703,74 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 received_carton = next(carton for carton in saved_inventory if carton["epc"] == "AB0001")
                 assert (received_carton["sku"],received_carton["batch_lot"],received_carton["units_per_carton"]) == ("Physalis","LOT-01",10)
                 tagged.get_by_role("button",name="Done").click()
-                mobile.get_by_label("Barcode *").check()
-                mobile.get_by_role("button",name="Scan barcode").click()
+                assert received_carton["variant_size"] == "M"
+                product.select_option("SUP-001")
+                sku.select_option(label="PHYSALIS-M")
                 mobile.get_by_role("button",name="Scan EPC",exact=True).click()
                 expect(mobile.locator("#notice")).to_have_text("This EPC is already tagged to Physalis in this task.")
                 assert mobile.evaluate("window.lastToast") == "This EPC is already tagged to Physalis in this task."
                 expect(mobile.get_by_role("button",name="Untag carton",exact=True)).to_have_count(0)
+                sku.select_option(label="PHYSALIS-L")
+                mobile.evaluate("window.testStockEpc = 'AB0002'")
+                mobile.get_by_role("button",name="Scan EPC",exact=True).click()
+                mobile.get_by_role("button",name="Confirm",exact=True).click()
+                tagged.get_by_role("button",name="Done").click()
+                saved_inventory = lead.request.get(base + "/api/workspace",headers=lead_headers).json()["inventory"]
+                mobile.get_by_role("button",name="Register a pallet").click()
+                mobile.locator('select[name="material"]').select_option("WOOD")
+                mobile.locator('select[name="size"]').select_option("M")
+                expect(mobile.get_by_text("Shape",exact=True)).to_have_count(0)
+                mobile.evaluate("window.testPalletReads = [{epc:'AC0003',rssi:'-35'}]")
+                mobile.get_by_role("button",name="Scan pallet",exact=True).click()
+                expect(mobile.get_by_text("AC0003",exact=True)).to_be_visible()
+                mobile.get_by_role("button",name="Save pallet").click()
+                mobile.get_by_role("dialog",name="Pallet registered").get_by_role("button",name="Done").click()
+                mobile.evaluate("window.testPalletReads = undefined")
                 lead.goto(base + "/#pallet-inventory")
+                expect(lead.get_by_role("row").filter(has_text="AC0003")).to_contain_text("PAL-AC0003")
+                lead.get_by_role("button",name="Configure pallets").click()
+                builder = lead.get_by_role("dialog",name="Configure pallets")
+                config = builder.get_by_role("region",name="Inventory configuration")
+                material = config.locator('form[data-inventory-option="add"]').first
+                material.get_by_label("Name").fill("Aluminum")
+                material.get_by_role("button",name="Add material").click()
+                remove = config.get_by_role("button",name="Remove Aluminum from materials")
+                expect(remove).to_be_visible()
+                expect(config.get_by_text("Aluminum · ALUM",exact=True)).to_be_visible()
+                remove.click()
+                expect(remove).to_have_count(0)
+                builder.get_by_role("button",name="Close",exact=True).click()
+                expect(builder).to_have_count(0)
+                expect(lead.get_by_role("button",name="Configure pallets")).to_be_focused()
                 lead.get_by_label("Pallet inventory CSV").set_input_files({
                     "name":"pallets.csv","mimeType":"text/csv",
-                    "buffer":b"pallet_ref,pallet_epc,sku,size,material\nPAL-SKU,AC0001,EUR-01,1200x800,Wood\nPAL-SKU-2,AC0002,PL-02,1200x1000,Plastic\n",
+                    "buffer":b"pallet_ref,pallet_epc,material,size\nPAL-SKU,AC0001,WOOD,M\nPAL-SKU-2,AC0002,PLAS,L\n",
                 })
                 lead.get_by_role("button",name="Import pallets").click()
-                expect(lead.get_by_role("row",name=re.compile(r"PAL-SKU.*EUR-01.*Wood"))).to_be_visible()
+                expect(lead.get_by_role("row",name=re.compile(r"PAL-SKU.*PAL-WOOD-M.*Wood"))).to_be_visible()
                 lead.goto(base + "/#manifests")
                 create_manifest = lead.locator('[data-manifest-form="sku-pallet"]').first
-                create_manifest.get_by_label("Pallet").select_option("AC0001")
-                create_manifest.locator('input[name="sku:Physalis"]').fill("1")
+                received_sku = re.sub(r"-(\d+)$","",received_carton["carton"])
+                other = next(c for c in saved_inventory if c["epc"] == "AB0002")
+                other_sku = re.sub(r"-(\d+)$","",other["carton"])
+                create_manifest.get_by_label("Pallet type").select_option("PAL-WOOD-M")
+                quantity = create_manifest.locator(f'input[name="sku:{received_sku}"]')
+                real_capacity = sum(c["physical"] and c["state"] == "available" and
+                                    re.sub(r"-(\d+)$","",c["carton"]) == received_sku for c in saved_inventory)
+                expect(quantity).to_have_attribute("max", str(real_capacity))
+                quantity.fill("1")
                 create_manifest.get_by_role("button",name="Generate manifest").click()
                 lead.get_by_text("Add another pallet",exact=True).click()
                 add = lead.locator('[data-manifest-form="sku-pallet"]').last
-                add.get_by_label("Pallet").select_option("AC0002")
-                add.locator('input[name="sku:Physalis"]').fill("1")
+                add.get_by_label("Pallet type").select_option("PAL-PLAS-L")
+                add.locator(f'input[name="sku:{other_sku}"]').fill("1")
                 add.get_by_role("button",name="Add pallet to manifest").click()
                 expect(lead.get_by_text("PAL-SKU-2 · 1 carton",exact=True)).to_be_visible()
                 with lead.expect_download() as latest_download:
                     lead.get_by_role("link",name="Download CSV").click()
                 content = Path(latest_download.value.path()).read_text(encoding="utf-8")
-                assert "quantity" in content and "DEMO-PHY" in content and "AB0001" not in content
+                assert "quantity" in content and "pallet_type" in content and received_sku.upper() in content and "AB0001" not in content
+                lead.get_by_label("Session ID").fill("PAL-SKU")
                 lead.get_by_role("button",name="Create session from manifest").click()
                 expect(lead.get_by_role("link",name="Open session")).to_be_visible()
                 lead.goto(base + "/#manage")
@@ -700,17 +783,36 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                 picker = mobile.get_by_label("Role",exact=True)
                 expect(mobile.locator('#workspace-connection [role="status"]')).to_have_text("Synced",timeout=15000)
                 picker.select_option("supervisor")
-                expect(mobile.locator("#who")).to_have_text("Supervisor")
+                expect(picker).to_have_value("supervisor")
+                expect(mobile.locator("#who")).to_be_hidden()
                 mobile.get_by_label("Contents and label assignment verified").check()
                 mobile.get_by_role("button",name="Record verification").click()
                 mobile.get_by_role("dialog",name="Verification recorded").get_by_role("button",name="Done").click()
                 expect(mobile.locator('#workspace-connection [role="status"]')).to_have_text("Synced",timeout=15000)
                 picker.select_option("operator")
                 expect(mobile.get_by_role("button",name="Open pallet scanner",exact=True)).to_be_visible(timeout=15000)
-                workspace = lead.request.get(base + "/api/workspace",headers=lead_headers).json()
-                alternative = next(c["epc"] for c in workspace["inventory"] if c["sku"] == "Physalis" and
-                    c["state"] == "available" and c["epc"] != "AB0001" and c["epc"] not in workspace["assignedCartonEpcs"])
+                alternative = other["epc"]
+                mobile.get_by_role("button",name="Sessions",exact=True).click()
+                mobile.get_by_role("button",name="Search",exact=True).click()
+                mobile.get_by_label("Session",exact=True).select_option(label="PAL-SKU · Outbound staging")
+                mobile.locator("#lookup-sku").select_option("@pallet")
+                mobile.locator("#lookup-target").select_option("AC0001")
+                expect(mobile.get_by_role("button",name="Start search")).to_be_enabled()
+                mobile.locator("#lookup-sku").select_option(received_sku)
+                mobile.locator("#lookup-target").select_option("AB0001")
+                expect(mobile.locator("#lookup-target option:checked")).to_contain_text("Physalis / PHYSALIS-M")
+                mobile.get_by_label("EPC",exact=True).fill("AB0001")
+                mobile.get_by_role("button",name="Find EPC").click()
+                expect(mobile.get_by_text(received_sku.upper(),exact=True)).to_be_visible()
+                for _ in range(2):
+                    mobile.get_by_role("button",name="Start search").click()
+                    popup = mobile.get_by_role("dialog",name="Searching")
+                    expect(popup.get_by_text("AB0001")).to_be_visible()
+                    popup.get_by_role("button",name="Stop search").click()
+                    expect(popup).to_have_count(0)
                 transport["online"] = False
+                mobile.get_by_role("button",name="Home",exact=True).click()
+                mobile.get_by_role("button",name="PAL-SKU",exact=False).click()
                 mobile.reload()
                 mobile.get_by_role("button",name="Open pallet scanner",exact=True).click()
 
@@ -721,7 +823,7 @@ with tempfile.TemporaryDirectory(dir=root / "build",prefix="workspace-test-") as
                     expect(mobile.get_by_role("button",name="Start scan",exact=True)).to_be_visible()
 
                 scan_outbound(["AC0001"])
-                scan_outbound(["AB0001"])
+                scan_outbound(["AC0001","AB0001"])
                 mobile.get_by_role("button",name="Next pallet").click()
                 scan_outbound(["AC0002"])
                 scan_outbound(["AB0001"])

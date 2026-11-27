@@ -10,23 +10,6 @@ const detail = find('#detail');
 const search = find('#search');
 const refresh = find('#refresh');
 const connection = find('#connection');
-const theme = find('#dashboard-theme');
-const themeKey = 'keypharm-dashboard-theme';
-function applyTheme(mode) {
-  document.documentElement.dataset.theme = mode;
-  const label = mode === 'dark' ? 'Light mode' : 'Dark mode';
-  theme.setAttribute('aria-label',label);
-  theme.title = label;
-}
-let savedTheme;
-try { savedTheme = localStorage.getItem(themeKey); } catch { /* Private storage may be unavailable. */ }
-applyTheme(savedTheme === 'light' ? 'light' : 'dark');
-theme.hidden = false;
-theme.addEventListener('click',() => {
-  const mode = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
-  applyTheme(mode);
-  try { localStorage.setItem(themeKey,mode); } catch { /* The current page still switches themes. */ }
-});
 let data = indexRecords([]);
 let section = 'overview';
 let selected;
@@ -53,12 +36,12 @@ const logBody = log => '<strong>' + escape(actionLabel(log.action)) + '</strong>
 
 function updateOverview() {
   const displayCount = n => previousBody === undefined ? '—' : count.format(n);
-  find('#totals').innerHTML = ['sessions','pallets','scans','exceptions','activity'].map(key =>
+  find('#totals').innerHTML = ['sessions','pallets','scans','exceptions'].map(key =>
     '<a class="dashboard-total" href="#' + key + '"><span>' + sections[key].title + '</span><strong data-total="' +
     key + '">' + displayCount(data.rows[key].length) + '</strong>' +
     (key === 'sessions' && previousBody !== undefined ?
       '<small>' + count.format(data.rows.sessions.length - data.closed) + ' open / ' + count.format(data.closed) + ' closed</small>' : '') +
-    '</a>').join('') + (stockOverview ? [['inventory','Cartons on hand'],['inbound','Open receipts'],['counts','Counts to review']]
+    '</a>').join('') + (stockOverview ? [['pallet-inventory','Pallets on hand'],['inventory','Cartons on hand'],['inbound','Open receipts'],['counts','Counts to review']]
       .map(([key,label]) => '<a class="dashboard-total" href="#' + key + '"><span>' + label + '</span><strong data-total="' + key +
         '">' + count.format(stockOverview[key]) + '</strong></a>').join('') : '');
   for (const chip of document.querySelectorAll('#catalog-tabs [data-tab-count]')) {
@@ -118,7 +101,7 @@ function sessionEvidence(s) {
   const pallets = m?.pallets?.length ? m.pallets : (m ? [m] : []);
   const scans = data.rows.scans.filter(row => row.session === s).slice(0,RECENT_LIMIT);
   const logs = data.rows.activity.filter(row => row.session === s).slice(0,RECENT_LIMIT).map(row => row.log);
-  return facts(['Pallet',m?.pallet],['Pallet EPC',m?.palletEpc],['Session ID',s.id],
+  return facts(['Pallet',m?.pallet],[m?.palletType ? 'Pallet type' : 'Pallet EPC',m?.palletType ?? m?.palletEpc],['Session ID',s.id],
     ['Location / level',joined(s.location,s.level)],['Product mix',s.product],['Pallet type',s.palletType],
     ['Label setup',joined(s.label,s.placement)],['Wrapping / shielding',joined(s.wrapping,s.shielding)],
     ['Scan method',s.method],['Created',time(s.createdAt)],['Created by',s.creator],['Verified by',s.verifiedBy],
@@ -139,9 +122,18 @@ function exceptionEvidence(row) {
     String(log.detail).split(' / ')[0] === row.epc) : null;
   return facts(['Scan',row.scan],['EPC',row.epc],
     ['Operator',row.run.operator],['Recorded',time(row.at)],['Error',row.run.error]) +
+    (row.status === 'Unexpected' ? '<button type="button" data-copy-exception="' + escape(row.epc) + '">Copy EPC</button>' : '') +
     '<div class="exception-subdetails">' + (disposition ? fold('Investigation',logBody(disposition)) : '') +
     fold('Scan evidence','<div class="exception-evidence-content">' + runEvidence(row.run) + '</div>') + '</div>';
 }
+
+detail.addEventListener('click',event => {
+  const button = event.target.closest('[data-copy-exception]');
+  if (!button) return;
+  void navigator.clipboard.writeText(button.dataset.copyException).then(() => {
+    button.textContent = 'EPC copied';
+  }).catch(() => { button.textContent = 'Could not copy EPC'; });
+});
 
 const exceptionCount = total => count.format(total) + (total === 1 ? ' exception' : ' exceptions');
 
@@ -158,7 +150,7 @@ function sessionExceptions(row) {
       const status = item.run.state === 'Interrupted' ? 'Interrupted' : (item.run.result?.status || item.status);
       return '<details class="exception-entry" data-exception="' + escape(item.id) + '"' +
         (open.has(item.id) ? ' open' : '') + '><summary><span class="exception-chevron" aria-hidden="true"></span>' +
-        '<span class="exception-entry-copy"><strong>' + escape(item.title) + '</strong><small>' +
+        '<span class="exception-entry-copy"><strong>' + escape(item.run.result?.extraSkus?.[item.epc] ? 'Extra is ' + item.run.result.extraSkus[item.epc] : item.title) + '</strong><small>' +
         escape(joined(item.scan,item.epc)) + '</small></span>' + badge(status) + '</summary>' +
         '<div class="exception-body">' + exceptionEvidence(item) + '</div></details>';
     }).join('');
@@ -170,7 +162,7 @@ function renderDetail(row) {
   if (section === 'sessions') evidence = sessionEvidence(row.session);
   if (section === 'pallets') {
     const a = row.attempt;
-    evidence = facts(['Test',row.session.testId],['Pallet locked',a.lockedPallet],['Operator',a.actor],
+    evidence = facts(['Test',row.session.testId],['Pallet locked',a.lockedPallet],['Scanned pallet EPC',a.actualPalletEpc],['Operator',a.actor],
       ['Started',time(a.startedAt)],['Finished',time(a.endedAt)],['Region / power',readerPower(a.profile)]) +
       observationDetails(a.observations);
   }
@@ -296,8 +288,7 @@ function navigate(focusTitle = false) {
   find('#page-title').textContent = workspaceSection ? workspaceSection.dataset.workspaceTitle :
     sections[section]?.title ?? 'Overview';
   find('#page-heading').dataset.overview = String(section === 'overview');
-  find('#section-description').textContent = workspaceSection ? '' :
-    (sections[section]?.description ?? (section === 'overview' ? 'Session verification, stock movement, and handheld sync.' : ''));
+  catalog.classList.toggle('panel',scanLogSections.has(section));
   find('#overview').hidden = section !== 'overview';
   catalog.hidden = section === 'overview' || Boolean(workspaceSection);
   if (workspace) workspace.hidden = !workspaceSection;
@@ -316,6 +307,10 @@ async function fetchRecords() {
   refresh.disabled = true;
   try {
     const response = await fetch('records', {cache:'no-store', signal:AbortSignal.timeout(3500)});
+    if (response.status === 401 && find('#workspace-panel')) {
+      window.location.replace('dashboard/sign-in');
+      return;
+    }
     if (!response.ok) throw new Error('Fetch failed');
     const body = await response.text();
     if (body !== previousBody) {

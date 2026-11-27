@@ -1,6 +1,6 @@
 /* Hallmark | Operate | Keypharm scan bench | brand: KeyPharm (spec 2026-11-23) */
 /* Critique: the official mark anchors the header while scan state remains the strongest signal.
-   Handheld: identity sits on the right; each session screen leads with the step due now. */
+   Handheld: header actions sit on the right; each session screen leads with the step due now. */
 :root {
   --paper:#fcfdfc; --workspace:#f1f5f2; --ink:#141215; --subtle:#44564b; --line:#c6d3ca;
   --action:#064d19; --action-deep:#013b10; --focus:#00654b; --match:#236743; --hold:#a33a28;
@@ -119,6 +119,14 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 /* The identity menu opens inward from the right edge. */
 .handheld .mast-inner {min-height:56px;padding-top:8px;padding-bottom:8px}
 #who {position:relative;min-width:0}
+.handheld .mast-inner:has(#workspace-header-actions:not([hidden])) {gap:8px}
+.handheld .mast-inner:has(#workspace-header-actions:not([hidden])) .brand {flex:0 1 auto;margin-inline-end:auto}
+.handheld .mast-inner:has(#workspace-header-actions:not([hidden])) .brand img {width:100%;height:auto;max-width:200px}
+#workspace-header-actions {display:flex;flex:none;gap:4px}
+#workspace-header-actions button {display:grid;place-items:center;width:44px;height:44px;min-height:44px;padding:0}
+#workspace-header-actions [data-workspace="retry"] {background:transparent;border-color:transparent;box-shadow:none;color:var(--ink)}
+#workspace-header-actions [data-workspace="retry"]:hover:not(:disabled) {color:var(--focus)}
+#workspace-header-actions svg {width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
 .who {position:relative}
 .handheld .who > summary {display:flex;align-items:center;gap:8px;margin:0;padding:4px 8px 4px 4px;min-height:48px;background:var(--paper);color:var(--ink);border:1px solid var(--line);border-radius:24px;max-width:190px}
 .handheld .who > summary::after,.handheld .who[open] > summary::after {content:none}
@@ -134,7 +142,7 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 @media(prefers-reduced-motion:reduce) {.who-chevron {transition:none}}
 
 /* Back link above a session, not a full-width button. */
-.subbar {margin:-8px 0 4px}
+.subbar {display:flex;align-items:center;justify-content:space-between;gap:8px;margin:-8px 0 4px}
 .back {min-height:44px;padding:8px 8px 8px 0;gap:4px;background:none;border-color:transparent;color:var(--action)}
 .back:hover:not(:disabled) {background:none;border-color:transparent;color:var(--action-deep);text-decoration:underline}
 .title-row {margin:8px 0 12px}
@@ -213,8 +221,7 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .home .search {margin-bottom:12px}
 .sku-gap {margin:8px 0}
 [hidden] {display:none !important}
-.workspace-strip {position:relative;display:grid;grid-template-columns:minmax(0,1.2fr) repeat(2,minmax(0,1fr));gap:8px;margin-bottom:12px}
-.workspace-strip:not(:has(select)) {grid-template-columns:repeat(2,minmax(0,1fr))}
+.workspace-strip {position:relative;display:flex;margin-bottom:12px}
 .workspace-bubble {
   position:fixed;z-index:8;bottom:calc(72px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);
   width:max-content;max-width:min(320px,calc(100vw - 32px));margin:0;padding:8px 12px;border:0;
@@ -224,6 +231,9 @@ code {font:13px var(--code);overflow-wrap:anywhere}
   position:absolute;width:1px;height:1px;padding:0;border:0;overflow:clip;clip-path:inset(50%);pointer-events:none;
 }
 .workflow-dialog {width:min(calc(100% - 32px),400px);border:1px solid var(--line);border-radius:16px;padding:24px;background:var(--paper);color:var(--ink)}
+.lookup-popup {position:fixed;inset:0;margin:auto;z-index:20;height:fit-content}
+.lookup-popup::backdrop {background:#0008}
+.lookup-popup code {overflow-wrap:anywhere}
 .lookup-indicator {width:112px;height:112px;margin:22px auto 6px;border:3px solid var(--line);border-radius:50%;background:var(--paper)}
 .lookup-indicator:not([data-signal="idle"]) {border-color:var(--action);background:var(--sky);animation:lookup-breathe 1.4s ease-in-out infinite}
 .lookup-indicator[data-signal="medium"] {animation-duration:.9s}
@@ -245,8 +255,6 @@ code {font:13px var(--code);overflow-wrap:anywhere}
 .workflow-dialog[open] .workflow-tick {animation:workflow-tick-in 220ms ease-out both}
 @keyframes workflow-tick-in {from {opacity:0;transform:scale(.72)} to {opacity:1;transform:scale(1)}}
 @media (prefers-reduced-motion:reduce) {.workflow-dialog[open] .workflow-tick {animation:none}}
-.workspace-strip-actions {display:contents}
-.workspace-strip :is(select,button) {height:48px;min-height:48px;min-width:0;margin:0}
-.workspace-strip-actions button {padding-inline:8px}
+.workspace-strip select {height:48px;min-height:48px;min-width:0;margin:0}
 .manifest-options:has(> button:nth-child(2):last-child) {display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
 .manifest-options > button {min-height:48px}

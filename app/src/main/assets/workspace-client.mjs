@@ -15,8 +15,11 @@ export function workspaceClient(bridge) {
   const pending = new Map();
   const client = {auth:read('-auth',null), samples:read('-samples',{}), stock:read('-stock',[]), state:'Unsynced'};
   client.stockTasks = [];
+  client.outboundLocations = read('-outbound-locations',['Outbound staging']);
   client.verificationClaims = read('-verification-claims',{});
+  client.palletClaims = read('-pallet-claims',{});
   client.palletTasks = [];
+  client.palletInventory = read('-pallet-inventory',[]);
   client.removedSessions = new Set(read('-removed-sessions',[]));
   const demoRoles = {admin:'Administrator',operator:'Operator',supervisor:'Supervisor'};
   const storedRole = client.auth?.user.role ?? read('-role','operator');
@@ -35,7 +38,11 @@ export function workspaceClient(bridge) {
     queue = {};
     controlsChange = null;
     client.stock = [];
+    client.palletInventory = [];
+    write('-pallet-inventory',[]);
     client.verificationClaims = {};
+    client.palletClaims = {};
+    write('-pallet-claims',{});
     write('-verification-claims',{});
     client.stockTasks = [];
     client.removedSessions.clear();
@@ -131,6 +138,13 @@ export function workspaceClient(bridge) {
     client.palletTasks = client.palletTasks.filter(item => item.id !== task.id);
     return result;
   };
+  client.registerPallet = async data => {
+    if (refreshing) await refreshing;
+    const pallet = await request('pallet-manifest',{...data,action:'register-pallet',generation});
+    client.palletInventory = [...client.palletInventory.filter(row => row.epc !== pallet.epc),{status:'On hand',...pallet}];
+    write('-pallet-inventory',client.palletInventory);
+    return pallet;
+  };
   client.stockAction = async (task,change) => {
     if (refreshing) await refreshing;
     if (busy) throw new Error('Wait for sync to finish before scanning.');
@@ -155,7 +169,7 @@ export function workspaceClient(bridge) {
       adoptGeneration(workspace.generation,clearRecords);
       client.removedSessions = new Set(workspace.removedSessions ?? []);
       write('-removed-sessions',[...client.removedSessions]);
-      let uploaded = false;
+      let uploaded = false, scanConflict;
       for (const current of changes(list())) {
         if (!safe()) return;
         if (client.auth.user.role === 'reviewer') break;
@@ -182,6 +196,8 @@ export function workspaceClient(bridge) {
         queue[current.id] = entry;
         write('-queue',queue);
         const server = await request('sync',{...entry,generation});
+        scanConflict ??= server.scanConflict;
+        delete server.scanConflict;
         uploaded = true;
         const newest = list().find(s => s.id === current.id);
         const unchanged = newest && fingerprint(newest) === fingerprint(entry.session);
@@ -216,7 +232,13 @@ export function workspaceClient(bridge) {
       client.controls = workspace.controls;
       write('-controls',client.controls);
       client.stock = workspace.inventory;
+      client.outboundLocations = workspace.outboundLocations ?? ['Outbound staging'];
+      write('-outbound-locations',client.outboundLocations);
+      client.palletInventory = workspace.palletInventory ?? [];
+      write('-pallet-inventory',client.palletInventory);
       client.verificationClaims = workspace.verificationClaims ?? {};
+      client.palletClaims = workspace.palletClaims ?? {};
+      write('-pallet-claims',client.palletClaims);
       write('-verification-claims',client.verificationClaims);
       write('-stock',client.stock);
       client.stockTasks = workspace.stockTasks ?? [];
@@ -235,7 +257,7 @@ export function workspaceClient(bridge) {
         write('-samples',client.samples);
       }
       client.state = client.hasPending(list()) ? 'Unsynced' : 'Synced';
-      client.message = '';
+      client.message = scanConflict ?? '';
     } catch (error) {
       if (error.status === 401) {
         write('-role',selectedRole);

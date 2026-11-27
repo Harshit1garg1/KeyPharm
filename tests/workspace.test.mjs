@@ -165,11 +165,13 @@ test('same 40 cartons move from a 38+2 receipt through count, outbound Hold, Mat
     assert.throws(() => command(supervisor,'review',stale,{reason:'Old count'}),/Stock changed/);
     assert.throws(() => command(reviewer,'cancel-count',stale),/role/);
     const inventoryBeforeCancellation = db.inventory();
-    const cancelled = command(operator,'cancel-count',stale);
+    assert.throws(() => command(operator,'cancel-count',stale),/reason/);
+    const cancelled = command(operator,'cancel-count',stale,{reason:'Recount after stock arrival'});
+    assert.equal(cancelled.cancelled.reason,'Recount after stock arrival');
     assert.equal(cancelled.status,'Cancelled');
     assert.deepEqual(cancelled.runs,stale.runs);
     assert.deepEqual(db.inventory(),inventoryBeforeCancellation);
-    assert.throws(() => command(operator,'scan',cancelled,{scenario:'match'}),/closed/);
+    assert.throws(() => command(operator,'scan',cancelled,{scenario:'match'}),/cancelled/);
     let count = command(operator,'count',null,{location:'Storage'});
     count = command(operator,'scan',count,{scenario:'missing'});
     assert.equal(count.runs[0].missing.length,1);
@@ -199,7 +201,7 @@ test('same 40 cartons move from a 38+2 receipt through count, outbound Hold, Mat
     s = action(supervisor,'dispatch');
     assert.equal(onHand(),70);
     assert.equal(s.runs[0].result.status,'Hold');
-    assert.deepEqual(db.stockHistory(epcs[0]).map(event => event.action),['Dispatched','Received']);
+    assert.deepEqual(db.stockHistory(epcs[0]).map(event => event.action),['Dispatched','Staged for outbound','Received']);
     assert.match(db.stockReport('receipts'),/Two cartons|KP-IN-40/);
     db.reset(lead,{generation:0,confirm:'RESET'});
     assert.equal(db.stockTasks().tasks.length,1);
@@ -230,17 +232,17 @@ test('SKU receipt import keeps unknown EPCs out of stock and requires consistent
     assert.equal(db.inventory().some(row => row.epc === 'FE0101'),false);
     assert.equal(db.stockTasks().tasks.find(item => item.id === receipt.id).status,'Partially received');
     assert.equal(db.stockHistory('DE0101').at(-1).action,'EPC registered');
-    assert.throws(() => action(operator,'hold',{epc:'DE0101',from:'Storage',state:'available',reason:'Check'}),/role/);
-    action(supervisor,'hold',{epc:'DE0101',from:'Storage',state:'available',reason:'Check carton identity'});
+    assert.equal(db.inventory().find(row => row.epc === 'DE0101').location,'Inbound staging');
+    assert.throws(() => action(operator,'hold',{epc:'DE0101',from:'Inbound staging',state:'available',reason:'Check'}),/role/);
+    action(supervisor,'hold',{epc:'DE0101',from:'Inbound staging',state:'available',reason:'Check carton identity'});
     assert.equal(db.inventory().find(row => row.epc === 'DE0101').state,'held');
-    action(supervisor,'release',{epc:'DE0101',from:'Hold',state:'held',location:'Staging',reason:'Identity checked'});
-    let count = action(operator,'count',{location:'Storage'});
+    action(supervisor,'release',{epc:'DE0101',from:'Hold',state:'held',location:'Inbound staging',reason:'Identity checked'});
+    assert.equal(db.inventory().find(row => row.epc === 'DE0101').location,'Storage');
+    let count = action(operator,'count',{location:'Inbound staging'});
     count = action(operator,'scan',{id:count.id,revision:count.revision,epcs:['DE0101']});
-    assert.throws(() => action(supervisor,'review',{id:count.id,revision:count.revision,epc:'DE0101'}),/review reason/);
-    action(supervisor,'review',{id:count.id,revision:count.revision,epc:'DE0101',reason:'Verified carton in Storage'});
-    const adjustment = db.stockHistory('DE0101')[0];
-    assert.equal(JSON.parse(adjustment.before_state).location,'Staging');
-    assert.equal(JSON.parse(adjustment.after_state).location,'Storage');
+    assert.throws(() => action(supervisor,'review',{id:count.id,revision:count.revision,epc:'DE0101',reason:'Verified tag'}),/staging workflow/);
+    action(supervisor,'review',{id:count.id,revision:count.revision,reason:'Verified discrepancy'});
+    assert.equal(db.inventory().find(row => row.epc === 'DE0101').location,'Storage');
   } finally {
     db.close();
     rmSync(dir,{recursive:true,force:true});
@@ -599,8 +601,9 @@ test('locations are shared by stock and outbound, with protected and in-use loca
     assert.throws(() => command('add-location',{name:'loading dock'}),/already exists/);
     const dock = db.stockTasks().locationRecords.find(row => row.name === 'Loading Dock');
     const session = db.create(lead,{testId:'DOCK',location:dock.name,source:'Simulation'});
-    const carton = db.inventory().find(c => c.state === 'available');
-    command('transfer',{epc:carton.epc,from:carton.location,state:carton.state,location:dock.name,reason:'Move to dock'});
+    const receipt = command('receipt',{csv:'receipt_ref,source_ref,destination_location,sku,expected_cartons,carton_id,epc,product_identifier\nDOCK-IN,Supplier,Loading Dock,Physalis,1,,,SUP-DOCK'});
+    command('receive-carton',{id:receipt.id,revision:receipt.revision,epc:'ABDD',identifier:'SUP-DOCK'},operator);
+    const carton = db.inventory().find(c => c.epc === 'ABDD');
     const count = command('count',{location:dock.name},operator);
     assert.throws(() => command('archive-location',{locationId:dock.id}),/open|outbound/i);
     command('rename-location',{locationId:dock.id,name:'Dock 2'});
@@ -612,7 +615,14 @@ test('locations are shared by stock and outbound, with protected and in-use loca
     const unused = db.stockTasks().locationRecords.find(row => row.name === 'Unused');
     command('archive-location',{locationId:unused.id});
     assert.equal(db.stockTasks().locations.includes('Unused'),false);
-    assert.throws(() => command('count',{location:'Unused'},operator),/Choose a working location/);
+    assert.throws(() => command('count',{location:'Unused'},operator),/Choose a stock count location/);
+    for (const location of ['Inbound staging','Outbound staging']) {
+      assert.throws(() => command('archive-location',{locationId:location}),/cannot be changed/);
+      assert.throws(() => command('rename-location',{locationId:location,name:'Renamed'}),/cannot be changed/);
+      assert.throws(() => command('transfer',{epc:carton.epc,from:'Dock 2',state:'available',location,reason:'Manual move'}),/cannot perform/);
+    }
+    assert.throws(() => command('count',{location:'Receiving'},operator),/stock count location/);
+    assert.equal(command('count',{location:'Inbound staging'},operator).location,'Inbound staging');
     assert.throws(() => db.create(lead,{testId:'UNUSED',location:'Unused',source:'Simulation'}),/Choose a working location/);
   } finally { db.close(); }
 });
@@ -620,15 +630,23 @@ test('locations are shared by stock and outbound, with protected and in-use loca
 test('SKU manifest validates capacity and dispatches the actual received EPC', () => {
   const db = createWorkspace(':memory:');
   try {
-    const [first,substitute] = db.inventory().filter(c => c.sku === 'Physalis');
+    const receipt = db.stockCommand(lead,{action:'receipt',operationId:randomUUID(),
+      csv:'receipt_ref,source_ref,destination_location,sku,expected_cartons,carton_id,epc,product_identifier\nREAL,Supplier,Storage,Physalis,2,,,REAL-PHY'});
+    assert.equal(db.skuAvailability().Physalis,0);
+    let task = receipt;
+    for (const epc of ['AA0001','AA0002']) {
+      task = db.stockCommand(operator,{action:'receive-carton',id:task.id,revision:task.revision,
+        operationId:randomUUID(),identifier:'REAL-PHY',epc});
+    }
+    const [first,substitute] = db.inventory().filter(c => c.sku === 'Physalis' && c.physical);
     const command = (action,fields) => db.palletManifest(lead,{action,...fields},undefined,[]);
     const imported = command('import-pallets',{csv:'pallet_ref,pallet_epc,sku,size,material\nPAL-SKU,ABCD,EUR-01,1200x800,Wood'});
     assert.equal(imported.imported,1);
     assert.equal(db.palletCatalog()[0].status,'On hand');
-    assert.throws(() => command('sku-pallet',{palletEpc:'ABCD',requirements:[{sku:'DEMO-PHY',quantity:21}]}),/Only 20/);
+    assert.throws(() => command('sku-pallet',{palletEpc:'ABCD',requirements:[{sku:'DEMO-PHY',quantity:3}]}),/Only 2/);
     const draft = command('sku-pallet',{palletEpc:'ABCD',requirements:[{sku:'DEMO-PHY',quantity:1}]});
     assert.ok(!draft.csv.includes(first.epc));
-    assert.equal(db.skuAvailability().Physalis,19);
+    assert.equal(db.skuAvailability().Physalis,1);
     const {sessionId} = command('session',{id:draft.id,testId:'BY-SKU',location:'Staging'});
     let session = db.records().sessions.find(s => s.id === sessionId);
     assert.equal(session.allocation.cartons,1);
@@ -650,7 +668,122 @@ test('SKU manifest validates capacity and dispatches the actual received EPC', (
     assert.equal(db.inventory().find(c => c.epc === first.epc).state,'available');
     assert.equal(db.inventory().find(c => c.epc === substitute.epc).state,'dispatched');
     assert.equal(db.palletCatalog()[0].status,'Dispatched');
+    assert.equal(db.palletClaims().ABCD.status,'Dispatched');
+    assert.throws(() => db.create(lead,{testId:'RETURN',location:'Outbound staging',source:'C72 hardware',
+      csv:'pallet_ref,pallet_epc,carton_ref,carton_epc,sku\nPAL-SKU,ABCD,' + first.carton + ',' + first.epc + ',Physalis'}),
+      /Pallet already dispatched/);
     assert.throws(() => db.stockCommand(lead,{action:'transfer',operationId:randomUUID(),epc:first.epc,from:first.location,
-      state:first.state,location:'Receiving',reason:'Move to warehouse'},true),/warehouse destination/);
+      state:first.state,location:'Receiving',reason:'Move to warehouse'},true),/cannot perform/);
+  } finally { db.close(); }
+});
+
+test('pallet type accepts a different registered tag and preserves distinct carton EPCs', () => {
+  const db = createWorkspace(':memory:');
+  try {
+    const register = (epc,material) => db.palletManifest(operator,{
+      action:'register-pallet',epc,material,size:'M'
+    },'handheld',[]);
+    const first = register('A100','PLAS');
+    const alternate = register('A200','PLAS');
+    register('A300','MET');
+    assert.equal(first.identifier,'PAL-PLAS-M');
+    const longPallet = register('DD1234ABCDEF','WOOD');
+    assert.equal(longPallet.reference,'PAL-ABCDEF');
+    assert.throws(() => register('CC1234ABCDEF','WOOD'),/already uses reference PAL-ABCDEF/);
+    assert.equal(first.identifier,alternate.identifier);
+    const configure = (user,inventoryOption) => db.setControls(user,{
+      operationId:randomUUID(),revision:db.settings().revision,inventoryOption
+    });
+    assert.throws(() => configure(operator,{group:'palletMaterials',action:'add',code:'AL',label:'Aluminum'}),/Administrator access/);
+    const options = configure(lead,{group:'palletMaterials',action:'add',label:'Fiber'}).inventoryOptions;
+    assert.equal(options.palletMaterials.find(option => option.label === 'Fiber').code,'FI');
+    assert.ok(configure(lead,{group:'palletMaterials',action:'add',label:'Cork'}).inventoryOptions.palletMaterials
+      .some(option => option.label === 'Cork' && option.code === 'CORK'));
+    configure(lead,{group:'palletSizes',action:'add',code:'2XL',label:'Extra large'});
+    const enlarged = db.palletManifest(operator,{action:'register-pallet',epc:'A400',material:'MET',size:'2XL'},'handheld',[]);
+    assert.equal(enlarged.identifier,'PAL-MET-2XL');
+    configure(lead,{group:'palletSizes',action:'remove',code:'2XL'});
+    assert.throws(() => db.palletManifest(operator,{action:'register-pallet',epc:'A500',material:'MET',size:'2XL'},'handheld',[]),/configured/);
+    assert.equal(db.palletCatalog().find(row => row.epc === 'A400').identifier,'PAL-MET-2XL');
+    const changeSize = (action,code,label) => configure(lead,{group:'cartonSizes',action,code,label});
+    assert.throws(() => changeSize('add','','Extra large'),/Enter a size code/);
+    changeSize('add','EXTRA','Extra large');
+    changeSize('remove','EXTRA');
+    changeSize('add','2XL','Extra largesa');
+    changeSize('remove','2XL');
+    changeSize('add','2xl','Extra large');
+    assert.equal(db.settings().inventoryOptions.cartonSizes.find(option => option.code === '2XL').label,'Extra large');
+    assert.throws(() => changeSize('add','XXL','Extra large'),/already in use/);
+    const receipt = db.stockCommand(lead,{action:'receipt',operationId:randomUUID(),
+      csv:'receipt_ref,source_ref,destination_location,sku,expected_cartons,carton_id,epc,product_identifier\nIN-SIZE,Supplier,Storage,Physalis,2,,,SUP-SIZE'});
+    const selection = {action:'receive-carton',id:receipt.id,revision:receipt.revision,identifier:'SUP-SIZE',epc:'AD0011',size:'2XL'};
+    assert.throws(() => db.stockCommand(operator,{...selection,operationId:randomUUID(),variantSku:'BIOTONA-2XL'}),/available SKU/);
+    db.stockCommand(operator,{...selection,operationId:randomUUID(),variantSku:'PHYSALIS-2XL'});
+    const tagged = db.inventory().find(row => row.epc === 'AD0011');
+    assert.match(tagged.carton,/^Physalis-2XL-\d+$/);
+    assert.equal(tagged.variant_size,'2XL');
+    assert.equal(db.skuAvailability()['Physalis-2XL'],1);
+    assert.throws(() => register('A200','MET'),/already registered/);
+    const currentReceipt = db.stockTasks().tasks.find(task => task.id === receipt.id);
+    db.stockCommand(operator,{...selection,operationId:randomUUID(),revision:currentReceipt.revision,epc:'AD0012',variantSku:'PHYSALIS-2XL'});
+    const sku = 'Physalis-2XL';
+    const [one,two] = db.inventory().filter(row => row.physical && row.variant_size === '2XL');
+    const admin = (action,data) => db.palletManifest(lead,{action,...data},undefined,[]);
+    const draft = admin('sku-pallet',{palletType:first.identifier,requirements:[{sku,quantity:2}]});
+    const {sessionId} = admin('session',{id:draft.id,testId:'TYPED',location:'Staging'});
+    let session = db.records().sessions.find(row => row.id === sessionId);
+    session = db.action(supervisor,{id:sessionId,revision:session.workspaceRevision,action:'physical',confirmed:true});
+    const slot = session.manifest.palletEpc;
+    const record = epc => db.sync(operator,{revision:session.workspaceRevision,operationId:randomUUID(),session:{
+      ...session,identified:true,confirmedAt:'2026-11-27',
+      palletAttempts:[{id:randomUUID(),palletEpc:slot,actualPalletEpc:epc,manifestRevision:1,result:'Identified',observations:{[epc]:{count:1}}}],
+      runs:[{id:randomUUID(),palletEpc:slot,source:session.source,state:'Finished',manifestRevision:1,
+        observations:{[epc]:{count:1},[one.epc]:{count:4},[two.epc]:{count:1}}}]
+    }});
+    assert.throws(() => record('A300'),/does not match/);
+    session = record(alternate.epc);
+    assert.deepEqual(new Set(session.runs[0].result.matched),new Set([one.epc,two.epc]));
+    db.action(lead,{id:sessionId,revision:session.workspaceRevision,action:'dispatch',confirmed:true},true);
+    assert.equal(db.palletCatalog().find(row => row.epc === first.epc).status,'On hand');
+    assert.equal(db.palletCatalog().find(row => row.epc === alternate.epc).status,'Dispatched');
+  } finally { db.close(); }
+});
+
+test('receipt cancellation and inventory removals require reasons and retain audit evidence', () => {
+  const db = createWorkspace(':memory:');
+  const stock = (user,action,fields) => db.stockCommand(user,{action,operationId:randomUUID(),...fields},true);
+  const pallet = (user,action,fields) => db.palletManifest(user,{action,...fields});
+  try {
+    const receipt = stock(lead,'receipt',{
+      csv:'receipt_ref,source_ref,destination_location,sku,expected_cartons,carton_id,epc,product_identifier\nCANCEL,Supplier,Storage,Physalis,2,,,CANCEL-PHY'
+    });
+    const partial = stock(operator,'receive-carton',{id:receipt.id,revision:receipt.revision,epc:'CC0001',identifier:'CANCEL-PHY'});
+    const openCount = stock(operator,'count',{location:'Storage'});
+    const scannedCount = stock(operator,'scan',{id:openCount.id,revision:openCount.revision,scenario:'match'});
+    const task = {id:partial.id,revision:partial.revision};
+    assert.throws(() => stock(lead,'cancel-receipt',task),/reason/);
+    const cancelled = stock(lead,'cancel-receipt',{...task,reason:'Order cancelled'});
+    assert.equal(cancelled.cancelled.by,lead.name);
+    assert.ok(Date.parse(cancelled.cancelled.at));
+    assert.deepEqual(cancelled.runs,partial.runs);
+    assert.equal(stock(supervisor,'review',{id:scannedCount.id,revision:scannedCount.revision}).status,'Reviewed');
+    const carton = db.inventory().find(item => item.epc === 'CC0001');
+    assert.equal(carton.state,'available');
+    assert.throws(() => stock(operator,'receive-carton',{...task,revision:cancelled.revision,identifier:'CANCEL-PHY',epc:'CC0002'}),/cancelled/);
+    const item = {epc:carton.epc,state:carton.state,from:carton.location,reason:'Damaged in storage'};
+    assert.throws(() => stock(operator,'remove-carton',item),/role/);
+    stock(lead,'remove-carton',item);
+    assert.equal(db.inventory().some(row => row.epc === carton.epc),false);
+    assert.equal(db.stockHistory(carton.epc)[0].reason,item.reason);
+    assert.equal(db.stockHistory(carton.epc)[0].actor,lead.name);
+    pallet(lead,'import-pallets',{csv:'pallet_ref,pallet_epc,material,size\nPAL-DD0001,DD0001,WOOD,M'});
+    assert.throws(() => pallet(lead,'remove-pallet',{epc:'DD0001'}),/reason/);
+    pallet(lead,'remove-pallet',{epc:'DD0001',reason:'Broken board'});
+    assert.equal(db.palletCatalog().length,0);
+    assert.equal(db.stockHistory('DD0001')[0].reason,'Broken board');
+    assert.throws(() => db.create(lead,{testId:'REMOVED',location:'Storage',source:'C72 hardware',
+      csv:'pallet_ref,pallet_epc,carton_ref,carton_epc,sku\nPAL-DD0001,DD0001,' + carton.carton + ',' + carton.epc + ',Physalis'}),
+      /pallet removed from inventory/);
+    assert.match(db.stockReport('movements'),/Order cancelled/);
   } finally { db.close(); }
 });

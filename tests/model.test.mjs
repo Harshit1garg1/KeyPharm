@@ -350,3 +350,12 @@ test('lookup lists a SKU-matched carton only under a confirmed run', () => {
   assert.deepEqual(confirmed, {kind:'carton', title:'Carton C-2',
     rows:[['SKU', 'Ginger'], ['Session', 'KP-SKU · Dock 1 · pallet P1']]});
 });
+
+test('lookup shows current SKU and recognizes a pallet in the synced inventory', () => {
+  const carton = describeTag('A001',[],[{epc:'A001',carton:'Physalis-M-15',sku:'Physalis',variant_size:'L'}]);
+  assert.equal(carton.title,'Carton');
+  assert.deepEqual(carton.rows.slice(0,2),[['Product','Physalis'],['SKU','PHYSALIS-L']]);
+  const pallet = describeTag('B001',[],[],[{epc:'B001',reference:'PAL-B001',identifier:'PAL-WOOD-M',status:'On hand'}]);
+  assert.equal(pallet.kind,'pallet');
+  assert.deepEqual(pallet.rows,[['Pallet type','PAL-WOOD-M'],['Status','On hand']]);
+});

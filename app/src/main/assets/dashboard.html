@@ -1,7 +1,7 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="en" data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="description" content="Review records from the KeyPharm RFID handheld."><meta name="color-scheme" content="dark light">
-<title>KeyPharm records</title><link rel="icon" type="image/svg+xml" href="keypharm-favicon.svg"><link rel="stylesheet" href="dashboard.css"><script type="module" src="dashboard.mjs"></script></head>
+<title>KeyPharm records</title><link rel="icon" type="image/svg+xml" href="keypharm-favicon.svg"><link rel="stylesheet" href="dashboard.css"><script type="module" src="dashboard-theme.mjs"></script><script type="module" src="dashboard.mjs"></script></head>
 <body>
 <a class="dashboard-skip" href="#content">Skip to dashboard</a>
 <div class="dashboard-shell">
@@ -21,10 +21,7 @@
     </div>
   </form>
   <div class="row dashboard-toolbar-actions">
-    <button type="button" id="dashboard-theme" aria-label="Light mode" title="Light mode" hidden>
-      <svg class="theme-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg>
-      <svg class="theme-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.9 13.2A9 9 0 1 1 10.8 3.1a7 7 0 0 0 10.1 10.1Z"/></svg>
-    </button>
+    <button type="button" id="dashboard-theme" aria-label="Dark mode" title="Dark mode" hidden></button>
     <button type="button" id="refresh" aria-label="Refresh records" title="Refresh records">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 10a8 8 0 1 0-.9 6M20 4v6h-6"/></svg>
     </button>
@@ -38,8 +35,7 @@
 <main id="content" class="dashboard-content" tabindex="-1">
   <p id="connection" class="status" role="status">Loading records…</p>
   <header id="page-heading" class="dashboard-heading" data-overview="true">
-    <div><h1 id="page-title" tabindex="-1">Overview</h1>
-      <p id="section-description"></p></div>
+    <h1 id="page-title" tabindex="-1">Overview</h1>
   </header>
   <div id="overview">
     <div id="totals" class="dashboard-totals" aria-label="Record totals"></div>
@@ -47,7 +43,7 @@
       <section class="panel dashboard-sessions">
         <div class="panel-heading row spread"><div class="row"><h2>Recent sessions</h2><span id="recent-sessions-count" class="count-pill" hidden></span></div><a href="#sessions">View all sessions</a></div>
         <table>
-          <thead><tr><th scope="col">Test ID</th><th scope="col">Pallet</th><th scope="col">Source</th><th scope="col">Status</th></tr></thead>
+          <thead><tr><th scope="col">Session ID</th><th scope="col">Pallet</th><th scope="col">Source</th><th scope="col">Status</th></tr></thead>
           <tbody id="recent-sessions"></tbody>
         </table>
         <p id="sessions-empty" class="muted">Waiting for records…</p>

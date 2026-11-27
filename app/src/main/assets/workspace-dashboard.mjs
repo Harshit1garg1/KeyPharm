@@ -1,6 +1,6 @@
 import {escapeHtml as escape} from './model.mjs';
 import {movementControls,receiptCartonDetails,reportsCard,stockPage} from './stock-dashboard.mjs';
-import {demoSku,displaySource,palletCartonCount} from './model.mjs';
+import {demoSku,displaySource,palletCartonCount,cartonLabel,defaultInventoryOptions,cartonSku,signOutIcon} from './model.mjs';
 
 const nav = document.querySelector('#dashboard-nav');
 const workspaceSections = [
@@ -20,7 +20,14 @@ rolePicker.id = 'dashboard-role';
 rolePicker.setAttribute('aria-label','Role');
 for (const [value,label] of Object.entries(roleNames)) rolePicker.add(new Option(label,value));
 rolePicker.value = role;
-document.querySelector('.dashboard-toolbar-actions').prepend(rolePicker);
+const toolbar = document.querySelector('.dashboard-toolbar-actions');
+toolbar.prepend(rolePicker);
+const signOut = document.createElement('form');
+signOut.method = 'post';
+signOut.action = 'dashboard/sign-out';
+signOut.innerHTML = '<button type="submit" aria-label="Sign out" title="Sign out">' + signOutIcon + '</button>';
+signOut.addEventListener('submit',() => sessionStorage.removeItem(roleKey));
+toolbar.append(signOut);
 for (const [target,label,icon,aliases] of workspaceSections) {
   const link = document.createElement('a');
   link.href = '#' + target;
@@ -50,6 +57,7 @@ const readApi = async (path, body) => {
   const headers = {'X-KeyPharm-Role':role};
   if (body) headers['Content-Type'] = 'application/json';
   const response = await fetch(path,{cache:'no-store',headers,...(body ? {method:'POST',body:JSON.stringify(body)} : {})});
+  if (response.status === 401) window.location.replace("dashboard/sign-in");
   const result = await response.json();
   if (!response.ok) throw new Error(result.message ?? 'Request failed.');
   return result;
@@ -101,6 +109,27 @@ function validateCsvSelection(input) {
   showCsvSelection(input);
 }
 
+let inventoryConfig;
+function inventoryConfigurator(current) {
+  const groups = current === 'pallet-inventory' ? [['palletMaterials','Materials'],['palletSizes','Pallet sizes']] :
+    [['cartonSizes','Carton sizes']];
+  const catalogs = data.controls.inventoryOptions ?? defaultInventoryOptions;
+  return '<section class="inventory-config" aria-label="Inventory configuration">' + groups.map(([group,title]) => {
+    const options = catalogs[group].filter(option => !option.archived);
+    return '<div><h3>' + title + '</h3><ul>' + options.map(({code,label}) =>
+      '<li><span>' + escape(label) + (label === code ? '' : ' · ' + escape(code)) + '</span>' +
+      '<form data-inventory-option="remove"><input type="hidden" name="group" value="' + group + '">' +
+      '<input type="hidden" name="code" value="' + escape(code) + '"><button type="submit" aria-label="Remove ' +
+      escape(label) + ' from ' + title.toLowerCase() + '"' + (options.length === 1 ? ' disabled' : '') + '>Remove</button></form></li>'
+    ).join('') + '</ul><form class="stock-action" data-inventory-option="add">' +
+    '<input type="hidden" name="group" value="' + group + '">' +
+    '<label>Code<input name="code" ' + (group === 'palletMaterials' ? 'placeholder="Auto"' : 'required') +
+    ' maxlength="20" pattern="[A-Za-z0-9]+"></label>' +
+    '<label>Name<input name="label" maxlength="40"></label><button class="primary-button">Add ' +
+    (group === 'palletMaterials' ? 'material' : 'size') + '</button></form></div>';
+  }).join('') +
+    '<p>Removed options stay on existing records.</p></section>';
+}
 function inventoryTabs(current) {
   const tasks = stockData?.tasks.filter(item => item.status !== 'Cancelled') ?? [];
   const counts = {
@@ -109,24 +138,32 @@ function inventoryTabs(current) {
     inbound:tasks.filter(item => item.type === 'receipt').length,
     counts:tasks.filter(item => item.type === 'count').length
   };
-  return '<nav class="workspace-subtabs" aria-label="Inventory views">' +
+  const config = data.user.role === 'admin' && ['inventory','pallet-inventory'].includes(current);
+  return '<div class="inventory-toolbar"><nav class="workspace-subtabs" aria-label="Inventory views">' +
     [['inventory','Stock'],['pallet-inventory','Pallets'],['inbound','Inbound'],['counts','Stock counts']].map(([key,label]) =>
       '<a href="#' + key + '"' + (current === key ? ' aria-current="page"' : '') + '>' + label +
       ' <span class="tab-count">' + counts[key] + '</span></a>').join('') +
-    '</nav>';
+    '</nav>' + (config ? '<button type="button" data-inventory-config="' + current + '" aria-haspopup="dialog">' +
+      (current === 'inventory' ? 'Configure stock' : 'Configure pallets') + '</button>' : '') +
+    '</div>';
 }
 
 function palletInventory() {
   const importForm = data.user.role === 'admin' ? '<form class="stock-action" data-manifest-form="import-pallets">' +
-    '<label>Pallet inventory CSV<input type="file" name="csv" accept=".csv,text/csv" required></label>' +
-    '<button class="primary-button">Import pallets</button>' +
-    '<a href="data:text/csv;charset=utf-8,pallet_ref%2Cpallet_epc%2Csku%2Csize%2Cmaterial%0A" download="pallet-inventory-template.csv">Download template</a></form>' : '';
+    '<div class="pallet-import-file"><div class="pallet-import-label"><label for="pallet-inventory-csv">Pallet inventory CSV</label> ' +
+    '(<a href="data:text/csv;charset=utf-8,pallet_ref%2Cpallet_epc%2Cmaterial%2Csize%0A" download="pallet-inventory-template.csv">Download template</a>)</div>' +
+    '<input id="pallet-inventory-csv" type="file" name="csv" accept=".csv,text/csv" required></div>' +
+    '<button class="primary-button">Import pallets</button></form>' : '';
   const rows = (data.palletInventory ?? []).map(pallet => '<tr><th scope="row">' + escape(pallet.reference) + '</th><td>' +
-    escape(pallet.sku) + '</td><td>' + escape(pallet.size) + '</td><td>' + escape(pallet.material) + '</td><td><code>' +
-    escape(pallet.epc) + '</code></td><td>' + statusBadge(pallet.status) + '</td></tr>').join('');
+    escape(pallet.identifier) + '</td><td>' + escape(pallet.size) + '</td><td>' + escape(pallet.material) + '</td><td><code>' +
+    escape(pallet.epc) + '</code></td><td>' + statusBadge(pallet.status) + '</td>' +
+    (data.user.role === 'admin' ? '<td>' + (pallet.status === 'On hand' ?
+      '<form class="stock-action" data-stock-action="remove-pallet"><input type="hidden" name="epc" value="' + escape(pallet.epc) +
+      '"><button aria-label="Remove pallet ' + escape(pallet.reference) + '">Remove</button></form>' : '') + '</td>' : '') + '</tr>').join('');
   return '<h2>Pallet inventory</h2>' + importForm + (rows ? '<div class="workspace-table"><table aria-label="Pallet inventory">' +
-    '<thead><tr><th scope="col">Pallet</th><th scope="col">SKU</th><th scope="col">Size</th><th scope="col">Material</th>' +
-    '<th scope="col">EPC</th><th scope="col">Status</th></tr></thead><tbody>' + rows + '</tbody></table></div>' : '<p>No pallets imported.</p>');
+    '<thead><tr><th scope="col">Pallet</th><th scope="col">Identifier</th><th scope="col">Size</th><th scope="col">Material</th>' +
+    '<th scope="col">EPC</th><th scope="col">Status</th>' +
+    (data.user.role === 'admin' ? '<th scope="col">Actions</th>' : '') + '</tr></thead><tbody>' + rows + '</tbody></table></div>' : '<p>No pallets imported.</p>');
 }
 function inventory() {
   const stock = inventoryLocation ? data.inventory.filter(c => c.location === inventoryLocation) : data.inventory;
@@ -155,15 +192,18 @@ function inventory() {
 }
 function cartonDetails(sku,cartons) {
   const active = history && cartons.find(c => c.epc === history.epc);
-  const events = active ? '<div class="dashboard-fold-body"><h3>' + escape(active.carton) + ' history</h3>' +
+  const events = active ? '<div class="dashboard-fold-body"><header class="row spread carton-history-heading"><h3>' +
+    escape(cartonSku(active) === active.sku ? cartonLabel(active.carton) : demoSku(cartonSku(active))) +
+    ' (' + escape(active.epc.slice(-5)) + ') history</h3>' +
+    '<button type="button" data-close-carton-history aria-label="Close carton history" title="Close carton history">×</button></header>' +
     receiptCartonDetails(active) +
     (history.entries.length ? '<ul class="log">' + history.entries.map(entry => '<li><strong>' + escape(entry.action) + '</strong> · ' +
       escape(entry.ref) + ' · ' + escape(entry.actor) + ' · ' + escape(new Date(entry.at).toLocaleString()) +
       (entry.reason ? '<br>' + escape(entry.reason) : '') + '</li>').join('') + '</ul>' : '<p>No movements recorded.</p>') +
-    movementControls(active,data.user.role,stockData.warehouseLocations ?? []) + '</div>' : '';
+    movementControls(active,data.user.role) + '</div>' : '';
   return '<h2 id="inventory-cartons-title">' + escape(sku) + ' cartons (' + cartons.length + ')</h2>' + events + '<div class="workspace-table"><table>' +
     '<thead><tr><th scope="col">Carton</th><th scope="col">EPC</th><th scope="col">Location</th><th scope="col">Tag source</th><th scope="col">Stock status</th></tr></thead><tbody>' +
-    cartons.map(c => '<tr><th scope="row"><button type="button" data-carton="' + escape(c.epc) + '">' + escape(c.carton) +
+    cartons.map(c => '<tr><th scope="row"><button type="button" data-carton="' + escape(c.epc) + '">' + escape(cartonSku(c) === c.sku ? cartonLabel(c.carton) : demoSku(cartonSku(c))) +
       '</button></th><td><code>' + escape(c.epc) + '</code></td><td>' + escape(c.location) + '</td><td>' +
       (c.physical ? 'Physical test tag' : c.registered ? 'Registered tag' : 'Synthetic') + '</td><td>' +
       statusBadge(c.state === 'dispatched' ? 'Dispatched' : c.state === 'held' ? 'Held' : 'On hand') +
@@ -211,13 +251,13 @@ function outboundTable() {
     (rows ? '<a href="api/evidence.csv" download>Export evidence CSV</a>' : '') + '</div></div>' +
     (rows ? '<div class="workspace-table"><table><thead><tr>' + (canConfirmDispatch ?
       '<th scope="col" class="dispatch-select"><input type="checkbox" data-select-all aria-label="Select all dispatchable sessions"></th>' : '') +
-      '<th scope="col">Test ID</th><th scope="col">Location</th><th scope="col">Source</th><th scope="col">Status</th>' +
+      '<th scope="col">Session ID</th><th scope="col">Location</th><th scope="col">Source</th><th scope="col">Status</th>' +
       '<th scope="col">Actions</th><th scope="col" aria-label="More actions"></th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table></div>' : '<p class="muted">No sessions yet.</p>');
 }
 let manifestSelected;
 function outboundLocation() {
-  return '<label>Location<select name="location" required>' + (stockData?.locations ?? []).filter(name => name !== 'Hold').map(name =>
+  return '<label>Location<select name="location" required>' + (stockData?.outboundLocations ?? []).map(name =>
     '<option value="' + escape(name) + '"' + (name === stockData.stagingLocation ? ' selected' : '') +
     '>' + escape(name) + '</option>').join('') + '</select></label>';
 }
@@ -231,15 +271,20 @@ function manifestSettings() {
   const onHand = (data.palletInventory ?? []).filter(pallet => pallet.status === 'On hand');
   function choosePallet(add) {
     if (!onHand.length) return '<p>No pallets on hand. <a href="#pallet-inventory">Open pallet inventory</a>.</p>';
-    const options = onHand.map(pallet => '<option value="' + escape(pallet.epc) + '">' +
-      escape([pallet.reference,pallet.sku,pallet.size,pallet.material].join(' / ')) + '</option>').join('');
-    const quantities = Object.entries(data.skuAvailability ?? {}).map(([sku,count]) => {
-      const max = Math.max(0,count);
-      return '<label>' + escape(sku + ' / ' + demoSku(sku) + ' (' + max + ' available)') + '<input type="number" min="0" max="' +
-        max + '" step="1" name="sku:' + escape(sku) + '" value="0"' + (max ? '' : ' disabled') + '></label>';
-    }).join('');
-    return form('sku-pallet',(add ? hiddenId : '') + '<label>Pallet<select name="palletEpc" required><option value="">Choose a pallet</option>' +
-      options + '</select></label>' + quantities + submit(add ? 'Add pallet to manifest' : 'Generate manifest'));
+    const used = new Set(add ? draft.pallets.map(pallet => pallet.palletEpc) : []);
+    const types = [...new Set(onHand.filter(pallet => !used.has(pallet.epc)).map(pallet => pallet.identifier))];
+    const options = types.map(type => '<option value="' + escape(type) + '">' + escape(type) + '</option>').join('');
+    const stock = Object.entries(data.skuAvailability ?? {});
+    const quantities = stock.filter(([sku,count]) => count > 0 && !stock.some(([variant]) =>
+      variant.startsWith(sku + '-'))).map(([sku,count]) =>
+      '<label><span>' + escape(demoSku(sku)) + '</span><small class="muted">' + count +
+      ' available</small><input type="number" min="0" max="' + count +
+      '" step="1" name="sku:' + escape(sku) + '" value="0"></label>').join('');
+    if (!quantities) return '<p>No tagged cartons are available for this manifest.</p>';
+    return form('sku-pallet',(add ? hiddenId : '') +
+      '<label class="manifest-pallet-type">Pallet type<select name="palletType" required><option value="">Choose a pallet type</option>' +
+      options + '</select></label><fieldset class="manifest-quantities"><legend>Carton quantities</legend><div>' +
+      quantities + '</div></fieldset>' + submit(add ? 'Add pallet to manifest' : 'Generate manifest'));
   }
   const chooser = drafts.length ? '<label>Manifests (' + drafts.length + ')<select id="manifest-selection">' + drafts.map(item =>
     '<option value="' + escape(item.id) + '"' + (draft.id === item.id ? ' selected' : '') + '>' +
@@ -247,7 +292,7 @@ function manifestSettings() {
   if (!draft) return choosePallet(false);
   const pallets = draft.pallets ?? (draft.csv ? [{pallet:draft.reference,palletEpc:draft.palletEpc,cartons:draft.cartons}] : []);
   const details = pallets.map(pallet => '<details class="dashboard-fold"><summary><span>' + escape(pallet.pallet) + ' · ' +
-    palletCartonCount(pallet) + (palletCartonCount(pallet) === 1 ? ' carton' : ' cartons') + '</span></summary><div class="dashboard-fold-body"><p><code>' + escape(pallet.palletEpc) +
+    palletCartonCount(pallet) + (palletCartonCount(pallet) === 1 ? ' carton' : ' cartons') + '</span></summary><div class="dashboard-fold-body"><p><code>' + escape(pallet.palletType ?? pallet.palletEpc) +
     '</code></p><ul class="log">' + (pallet.requirements ? pallet.requirements.map(({sku,quantity}) =>
       '<li>' + escape(sku + ' / ' + demoSku(sku)) + ' · ' + quantity + '</li>') : pallet.cartons.map(carton =>
       '<li>' + escape(carton.carton + ' / ' + carton.sku + ' / ' + carton.epc) + '</li>')).join('') + '</ul></div></details>').join('');
@@ -255,7 +300,7 @@ function manifestSettings() {
     '" download data-manifest-download>Download CSV</a></p>' : '';
   const session = draft.sessionId ? (draft.sessionRemovedAt ? '<p>Session removed.</p>' :
     '<p><a href="#sessions/' + encodeURIComponent(draft.sessionId) + '">Open session</a></p>') : draft.csv ?
-    form('session',hiddenId + '<label>Test ID<input name="testId" required maxlength="80" value="' + escape(draft.reference) +
+    form('session',hiddenId + '<label>Session ID<input name="testId" required maxlength="80" value="' + escape(draft.reference) +
       '"></label>' + outboundLocation() + submit('Create session from manifest')) : '';
   const add = draft.matchBy === 'sku' && draft.status === 'Manifest ready' ?
     '<details class="dashboard-fold"><summary><span>Add another pallet</span></summary><div class="dashboard-fold-body">' +
@@ -266,11 +311,12 @@ function manifestSettings() {
     form('cancel',hiddenId + '<button>Remove pallet manifest</button>') + '</section>';
 }
 
+let adminSettingsOpen = true;
 function adminSettings() {
   if (data.user.role !== 'admin') return '';
   const setting = data.controls;
   return '<details id="workspace-lead-settings" class="dashboard-fold"' +
-    (panel.querySelector('#workspace-lead-settings[open]') ? ' open' : '') + '><summary><span>Administrator settings</span></summary>' +
+    (adminSettingsOpen ? ' open' : '') + '><summary><span>Administrator settings</span></summary>' +
     '<div class="dashboard-fold-body"><form id="workspace-settings">' +
     '<div class="workspace-fields"><label class="workspace-field-wide">Test plan<textarea name="plan" rows="3" placeholder="Test ID and description">' +
     escape(setting.plan.map(item => [item.id,item.title].filter(Boolean).join(' ')).join('\n')) + '</textarea></label>' +
@@ -298,11 +344,11 @@ function locationSettings() {
     '<button class="primary-button">Add location</button></form>' : '';
   const rows = list.map(location => {
     const name = escape(location.name);
-    const controls = admin && !location.archived && location.id !== 'Hold' ?
+    const controls = admin && !location.archived && !location.protected ?
       '<form class="stock-action" data-stock-action="rename-location"><input type="hidden" name="locationId" value="' + escape(location.id) + '">' +
       nameField('Rename ' + name,location.name) + '<button>Save name</button>' +
       '<button type="submit" formnovalidate data-location-archive>Archive</button></form>' :
-      statusBadge(location.archived ? 'Archived' : location.id === 'Hold' ? 'Protected' : 'Active');
+      statusBadge(location.archived ? 'Archived' : location.protected ? 'Protected' : 'Active');
     return '<tr><th scope="row">' + name + '</th><td>' + controls + '</td></tr>';
   }).join('');
   return '<details id="workspace-locations" class="dashboard-fold"' + open + '><summary><span>Locations</span></summary>' +
@@ -315,7 +361,7 @@ function manage() {
     '<button type="button" data-outbound-panel="create" aria-pressed="' + (outboundPanel === 'create') + '">+ New session</button>' +
     '<button type="button" data-outbound-panel="manifest" aria-pressed="' + (outboundPanel === 'manifest') + '">+ Build manifest</button></div>' +
     (outboundPanel === 'create' ? '<div class="workspace-outbound-tools"><form id="workspace-create"><h2>New session</h2><div class="workspace-fields">' +
-      '<label>Test ID<input name="testId" maxlength="80" required></label>' + outboundLocation() +
+      '<label>Session ID<input name="testId" maxlength="80" required></label>' + outboundLocation() +
       '<label>Reader source<select name="source"><option value="Simulation">Scan *</option><option value="C72 hardware">RFID handheld</option></select></label></div>' +
       '<div class="workspace-create-actions"><div class="workspace-csv-choice">' + csvPicker('create-csv-status') +
       '<span class="workspace-csv-divider" aria-hidden="true">&#92;</span>' +
@@ -333,6 +379,7 @@ const milestones = {
   receive:['Receipt confirmed','Inventory is updated.'],
   review:['Count reviewed','Scan evidence is saved.'],
   'cancel-count':['Count cancelled','You can open a fresh count for this location.'],
+  'cancel-receipt':['Task cancelled','Received cartons and scan history are retained.'],
   outbound:['Pallet prepared','Open it in Outbound.'],
   reset:['Data reset *','Starting inventory restored.']
 };
@@ -352,6 +399,8 @@ const render = () => {
     }
   }
   if (!data) { panel.textContent = message || 'Loading workspace…'; return; }
+  const previousSettings = panel.querySelector('#workspace-lead-settings');
+  if (previousSettings) adminSettingsOpen = previousSettings.open;
   const current = section();
   const body = current === 'inventory' ? inventoryTabs(current) + inventory() :
     current === 'pallet-inventory' ? inventoryTabs(current) + palletInventory() :
@@ -359,11 +408,25 @@ const render = () => {
     ['manage','manifests'].includes(current) ? manage() :
     current === 'devices' ? adminSettings() + locationSettings() + stockPage('devices',data,stockData,stockSelection,receiptPreview) :
     stockPage(current,data,stockData,stockSelection,receiptPreview);
-  panel.innerHTML = '<p id="workspace-message" role="status">' + escape(message) + '</p>' + body +
+  const configuring = data.user.role === 'admin' && inventoryConfig === current;
+  const builder = configuring ? '<dialog class="inventory-builder" aria-labelledby="inventory-builder-title">' +
+    '<header><h2 id="inventory-builder-title">' + (current === 'pallet-inventory' ? 'Configure pallets' : 'Configure stock') +
+    '</h2><form method="dialog"><button autofocus>Close</button></form></header>' +
+    '<p role="status">' + escape(message) + '</p>' + inventoryConfigurator(current) + '</dialog>' : '';
+  panel.innerHTML = '<p id="workspace-message" role="status"' + (configuring ? ' hidden' : '') + '>' + escape(message) + '</p>' + body +
     '<dialog id="workspace-dialog" aria-labelledby="workspace-dialog-title"><form method="dialog" id="workspace-dialog-form">' +
     '<h2 id="workspace-dialog-title"></h2><p></p><div class="workspace-dialog-fields"></div>' +
     '<div class="row workspace-actions"><button value="cancel" formnovalidate>Cancel</button>' +
-    '<button class="primary-button" value="confirm">Confirm</button></div></form></dialog>';
+    '<button class="primary-button" value="confirm">Confirm</button></div></form></dialog>' + builder;
+  const inventoryDialog = panel.querySelector('.inventory-builder');
+  if (inventoryDialog) {
+    inventoryDialog.addEventListener('close',() => {
+      inventoryConfig = undefined;
+      panel.querySelector('#workspace-message').hidden = false;
+      panel.querySelector('[data-inventory-config]')?.focus();
+    });
+    inventoryDialog.showModal();
+  }
   updateSelection();
 };
 function updateSelection() {
@@ -403,8 +466,9 @@ async function load(background = false) {
     data = updated;
     stockData = ops;
     window.dispatchEvent(new CustomEvent('stock-overview',{detail:{
+      'pallet-inventory':data.palletInventory.filter(pallet => pallet.status === 'On hand').length,
       inventory:data.inventory.filter(c => c.state !== 'dispatched').length,
-      inbound:stockData.tasks.filter(t => t.type === 'receipt' && t.status !== 'Completed').length,
+      inbound:stockData.tasks.filter(t => t.type === 'receipt' && !['Completed','Cancelled'].includes(t.status)).length,
       counts:stockData.tasks.filter(t => t.type === 'count' && t.status === 'In progress').length
     }}));
   } catch (error) {
@@ -430,7 +494,7 @@ async function mutate(path, payload) {
     if (path === 'api/session') outboundPanel = '';
     if (['count','receipt'].includes(payload.action) && result.id) stockSelection = result.id;
     if (payload.action === 'receipt') { receiptPreview = receiptCsv = undefined; }
-    if (['transfer','hold','release'].includes(payload.action) && history?.epc === payload.epc) {
+    if (['hold','release'].includes(payload.action) && history?.epc === payload.epc) {
       history.entries = await readApi('api/carton-history?epc=' + encodeURIComponent(payload.epc));
     }
     message = 'Saved.';
@@ -488,6 +552,13 @@ panel.addEventListener('click', async event => {
     } catch (error) { panel.querySelector('#workspace-message').textContent = error.message; }
     return;
   }
+  const configure = event.target.closest('[data-inventory-config]');
+  if (configure) {
+    inventoryConfig = configure.dataset.inventoryConfig;
+    message = '';
+    render();
+    return;
+  }
   const togglePanel = event.target.closest('[data-outbound-panel]');
   if (togglePanel) {
     const next = togglePanel.dataset.outboundPanel;
@@ -498,6 +569,13 @@ panel.addEventListener('click', async event => {
   }
 });
 panel.addEventListener('submit', async event => {
+  if (event.target.dataset.inventoryOption) {
+    event.preventDefault();
+    const values = Object.fromEntries(new FormData(event.target));
+    await mutate('api/settings',{revision:data.controls.revision,operationId:crypto.randomUUID(),
+      inventoryOption:{...values,action:event.target.dataset.inventoryOption}});
+    return;
+  }
   if (event.target.dataset.manifestForm) {
     event.preventDefault();
     const action = event.target.dataset.manifestForm;
@@ -533,8 +611,7 @@ panel.addEventListener('submit', async event => {
   if (event.target.dataset.stockAction) {
     event.preventDefault();
     const values = new FormData(event.target);
-    const requestedAction = event.submitter?.hasAttribute('data-location-archive') ? 'archive-location' : event.target.dataset.stockAction;
-    const action = requestedAction === 'transfer' && values.get('location') === 'Hold' ? 'hold' : requestedAction;
+    const action = event.submitter?.hasAttribute('data-location-archive') ? 'archive-location' : event.target.dataset.stockAction;
     const record = event.target.closest('[data-stock-record]');
     const dialog = panel.querySelector('dialog');
     const change = {...Object.fromEntries(values),action,operationId:crypto.randomUUID(),
@@ -556,15 +633,23 @@ panel.addEventListener('submit', async event => {
     if (action === 'receipt') change.csv = receiptCsv;
     if (values.has('epcs')) change.epcs = values.get('epcs').trim().split(/[\s,;]+/).filter(Boolean);
     if (['count','scan','receipt','add-location','rename-location'].includes(action)) { await mutate('api/stock-action',change); return; }
+    const needsReason = ['cancel-count','cancel-receipt','remove-carton','remove-pallet'].includes(action);
     dialog.returnValue = 'cancel';
     dialog.querySelector('h2').textContent = action === 'hold' ? 'Place on hold' :
-    action === 'cancel-count' ? 'Cancel count?' : action === 'archive-location' ? 'Archive location?' : event.submitter.textContent;
+    action === 'cancel-count' ? 'Cancel count?' : action === 'cancel-receipt' ? 'Cancel task?' :
+    action === 'remove-pallet' ? 'Remove pallet?' : action === 'archive-location' ? 'Archive location?' : event.submitter.textContent;
     dialog.querySelector('p').textContent = action === 'untag' ? 'Remove this EPC from the receipt and return the carton to outstanding.' :
-    action === 'cancel-count' ? 'Remove this count from the list and keep its scan history. Inventory stays the same.' :
+    action === 'cancel-count' ? 'Close this count and keep its scan history.' :
+    action === 'cancel-receipt' ? 'Stop receiving on this task. Cartons already received stay in stock.' :
+    action === 'remove-carton' ? 'Remove this carton from active stock and keep its history.' :
+    action === 'remove-pallet' ? 'Remove this pallet from active inventory and keep its history.' :
     action === 'archive-location' ? 'Remove this location from new work. Existing history is kept.' : '';
-    dialog.querySelector('.workspace-dialog-fields').replaceChildren();
+    dialog.querySelector('.workspace-dialog-fields').innerHTML = needsReason ?
+      '<label>Reason<input name="reason" required maxlength="240"></label>' : '';
     dialog.addEventListener('close',() => {
-      if (dialog.returnValue === 'confirm') void mutate('api/stock-action',change);
+      if (dialog.returnValue !== 'confirm') return;
+      if (needsReason) change.reason = dialog.querySelector('input[name="reason"]').value;
+      void mutate(action === 'remove-pallet' ? 'api/pallet-manifest' : 'api/stock-action',change);
     },{once:true});
     dialog.showModal();
     return;
@@ -604,6 +689,14 @@ panel.addEventListener('click', async event => {
   if (task) {
     stockSelection = task.dataset.stockOpen;
     render();
+    return;
+  }
+  if (event.target.closest('[data-close-carton-history]')) {
+    const epc = history.epc;
+    history = undefined;
+    historyRequest++;
+    render();
+    panel.querySelector('[data-carton="' + CSS.escape(epc) + '"]')?.focus({preventScroll:true});
     return;
   }
   const carton = event.target.closest('[data-carton]');

@@ -123,9 +123,18 @@ small,.muted {color:var(--muted)}
 }
 .dashboard-toolbar-actions {gap:8px;flex-wrap:nowrap;justify-self:end}
 #dashboard-role {min-height:36px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink);font-size:13.5px}
-#connection:empty,#section-description:empty {display:none}
+#connection:empty {display:none}
 .dashboard-toolbar-actions button,.status {border-radius:24px}
 .dashboard-toolbar-actions button {display:grid;place-items:center;width:36px;min-height:36px;padding:0}
+.dashboard-toolbar-actions form {margin:0}
+.pallet-import-file {flex:1;min-width:min(100%,160px)}
+.pallet-import-file input {width:100%}
+.pallet-import-label {margin-bottom:6px}
+.stock-action .pallet-import-label label {display:inline;min-width:0}
+.dashboard-sign-in {width:min(100% - 32px,380px);margin:clamp(32px,12vh,120px) auto;padding:24px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+.dashboard-sign-in header {display:flex;align-items:center;justify-content:space-between;gap:12px}
+.dashboard-sign-in form {display:grid;gap:12px;margin-top:16px}
+.dashboard-sign-in label {display:grid;gap:6px}
 .dashboard-toolbar-actions svg {width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
 .theme-moon,:root[data-theme="light"] .theme-sun {display:none}
 :root[data-theme="light"] .theme-moon {display:block}
@@ -133,7 +142,6 @@ small,.muted {color:var(--muted)}
 .status.hold {color:var(--amber);border-color:color-mix(in srgb,var(--amber) 45%,var(--line));background:var(--amber-deep)}
 #connection {margin-bottom:12px}
 .dashboard-heading h1 {font:650 clamp(28px,3.1vw,42px)/1.12 var(--display-font);letter-spacing:-0.024em}
-.dashboard-heading p {margin-top:8px;color:var(--muted);font-size:15px;max-width:68ch}
 .dashboard-heading {margin-bottom:var(--section-gap)}
 #overview {display:grid;gap:var(--section-gap)}
 .dashboard-totals {
@@ -322,10 +330,26 @@ noscript p {margin-top:16px}
 .devices-section h2 {margin-bottom:12px}
 #workspace-lead-settings + #workspace-locations {margin-top:12px}
 #workspace-locations + .devices-section {margin-top:20px;padding-top:20px;border-top:1px solid var(--line)}
+.inventory-toolbar {display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+.inventory-toolbar .workspace-subtabs {margin:0}
+.inventory-toolbar > button {margin-inline-start:auto}
+.workspace-panel .inventory-builder {width:min(760px,calc(100% - 32px))}
+.inventory-builder header {display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
+.inventory-builder header h2 {margin:0}
+.inventory-config {display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:16px;margin-bottom:20px;padding:16px;border:1px solid var(--line);border-radius:12px}
+.inventory-config h3,.inventory-config p {margin:0}
+.inventory-config p {grid-column:1/-1}
+.inventory-config ul {list-style:none;padding:0;margin:8px 0}
+.inventory-config li {display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--line)}
 #workspace-locations .stock-action {margin:0;max-width:560px}
 #workspace-locations td .stock-action label {min-width:min(100%,160px)}
 .workspace-subtabs {display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}
 .dashboard-catalog .workspace-subtabs {grid-column:1/-1;margin-bottom:0}
+.dashboard-catalog.panel > section {border:0;border-radius:0;background:transparent;padding:0}
+.dashboard-catalog.panel > .dashboard-detail {border-inline-start:1px solid var(--line);padding-inline-start:16px}
+@media (max-width:920px) {
+  .dashboard-catalog.panel > .dashboard-detail {border-inline-start:0;border-top:1px solid var(--line);padding:16px 0 0}
+}
 .workspace-subtabs :is(a,button) {
   display:inline-flex;align-items:center;gap:8px;min-height:40px;padding:8px 12px;border:1px solid var(--line);border-radius:24px;
   background:var(--base);color:var(--muted);font-size:14px;font-weight:600;text-decoration:none;box-shadow:none;
@@ -375,7 +399,15 @@ noscript p {margin-top:16px}
 .stock-action {display:flex;align-items:end;gap:8px;flex-wrap:wrap;margin-block:12px}
 .stock-action label {flex:1;min-width:160px}
 .manifest-form .workspace-table {flex-basis:100%;min-width:0}
-.stock-action[data-stock-action="cancel-count"] {margin:0 0 0 auto}
+.manifest-form[data-manifest-form="sku-pallet"] {display:grid;justify-items:start;gap:16px}
+.manifest-form .manifest-pallet-type {width:min(100%,18rem);min-width:0}
+.manifest-quantities {width:min(100%,54rem);min-width:0;margin:0;padding:0;border:0}
+.manifest-quantities legend {padding:0;margin-bottom:8px;font-weight:650}
+.manifest-quantities > div {display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,11rem),1fr));gap:12px 16px}
+.manifest-quantities div > label {min-width:0}
+.manifest-quantities small {font-weight:400}
+.manifest-quantities input {width:5.5rem;max-width:100%}
+.stock-action:is([data-stock-action="cancel-count"],[data-stock-action="cancel-receipt"]) {margin:0 0 0 auto}
 .stock-action[data-stock-action="cancel-count"] button {width:36px;min-height:36px;padding:0;font-size:20px;line-height:1}
 [data-stock-record] {min-width:0}
 [data-stock-record] .workspace-table {margin-top:12px}
@@ -460,8 +492,10 @@ noscript p {margin-top:16px}
 }
 @media (max-width:420px) {
   .panel {padding:12px}
-  .dashboard-heading p {font-size:13.5px}
   .dashboard-sessions table {font-size:13px}
   .dashboard-sessions th:nth-child(3),.dashboard-sessions td:nth-child(3) {display:none}
   .dashboard-sessions th:first-child {width:40%}
 }
+
+.carton-history-heading h3 {margin:0}
+.carton-history-heading button {min-width:40px;padding-inline:8px;font-size:20px;line-height:1}

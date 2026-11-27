@@ -1,7 +1,7 @@
-import {SAMPLE, EXTRA_EPC, normalizeEpc, validEpc, parseManifest, compare, scanDelta, canContinue, canClose, isCurrentManifestRun,
+import {SAMPLE, EXTRA_EPC, normalizeEpc, validEpc, parseManifest, compareOutbound, scanDelta, canContinue, canClose, isCurrentManifestRun,
   roles, permits, allocationTotal, dashboardSnapshot, evidenceCsv, specEvidenceCsv, evidenceSummary,
   parsePlan, planCoverage, closePlanErrors, lockPallet, lockTo, pendingPallet, otherPallet, inManifest, manifestCsv, missingSku, unexported,
-  displaySource, matchesQuery, skuBreakdown, statusLabel, manifestFor, outboundManifestConflict, receiptProducts, demoSku, palletCartonCount, describeTag, actionLabel} from './model.mjs';
+  displaySource, matchesQuery, skuBreakdown, statusLabel, manifestFor, outboundManifestConflict, receiptProducts, demoSku, palletCartonCount, describeTag, actionLabel, cartonLabel, cartonSku, receiptSizes, matchPalletType, matchesPalletIdentifier, defaultInventoryOptions, skuProduct, signOutIcon} from './model.mjs';
 import qrcode from './qrcode-generator.mjs';
 import {workspaceClient} from './workspace-client.mjs';
 
@@ -11,6 +11,8 @@ const notice = document.querySelector('#notice');
 const bridge = window.KeypharmAndroid;
 const connected = workspaceClient(bridge);
 const connectionPanel = document.querySelector('#workspace-connection');
+const headerActions = document.querySelector('#workspace-header-actions');
+const syncIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11a9 9 0 0 1 15.5-5.5L21 8m0-5v5h-5m5 5a9 9 0 0 1-15.5 5.5L3 16m0 5v-5h5"/></svg>';
 const workflowDialog = document.querySelector('#workflow-confirmation');
 document.querySelector('#workflow-dismiss').addEventListener('click',() => workflowDialog.close());
 function confirmWorkflow(title, detail, tagged = []) {
@@ -24,7 +26,7 @@ const liveSample = bridge?.liveSampleManifest?.() ?? '';
 const liveSampleName = 'KP-LIVE-SORTED-01.csv';
 const key = connected ? 'keypharm-connected-records-v1' : 'keypharm-poc-v1';
 const metadata = {
-  testId:'Test ID', location:'Location', level:'Storage level', product:'Product mix', palletType:'Pallet type',
+  testId:'Session ID', location:'Location', level:'Storage level', product:'Product mix', palletType:'Pallet type',
   label:'Label type and size', placement:'Label position and orientation', wrapping:'Wrapping',
   shielding:'Shielding', method:'Scan method', planned:'Planned test', notes:'Setup notes'
 };
@@ -98,10 +100,10 @@ if (connected) document.body.append(resetDialog,palletDialog);
 let selected;
 let view = 'sessions';
 let stockTaskId = '', stockScenario = 'match', stockScanBusy = false, countUpload;
-let receiptProduct = '', receiptCapture, receiptRead, receiptUpload;
-let demoBarcode = true, pendingBarcode;
+let receiptProduct = '', receiptSize, receiptCapture, receiptRead, receiptUpload;
 // The Search tab keeps the internal name 'lookup'; the Lookup tab is 'identify'.
-let palletTask, palletRead, utilityScan, lookupSessionId, lookupTarget, lookupRead, lookupTimer, identifyRead;
+let registration = false;
+let palletTask, palletRead, utilityScan, lookupSessionId, lookupTarget, lookupSku, lookupRead, lookupEpc, lookupTimer, identifyRead;
 const identifyPower = () => connected?.controls.identifyPower ?? 10; // dBm: low by default, so the tag held close wins.
 let pendingImport;
 let rescanReason = '';
@@ -127,7 +129,7 @@ function saveUi() {
     else localStorage.setItem(uiKey,JSON.stringify({view, selected, drafts:ui.drafts}));
   } catch {}
 }
-const draftable = el => el.form?.id && el.name && !['reader-power','stock-demo','receipt-barcode'].includes(el.form.id) &&
+const draftable = el => el.form?.id && el.name && !['reader-power','stock-demo','epc-search'].includes(el.form.id) &&
   !['file','checkbox','radio','hidden','submit','button'].includes(el.type);
 const draftPrefix = formId => (['session','scan','build'].includes(view) ? selected : '') + '|' + formId + '|';
 function clearDrafts(prefix) {
@@ -201,7 +203,6 @@ try {
 
 // The name in the header signs every record (see actor()); roles stay local.
 function identityMenu(open) {
-  if (connected) return connected.auth ? '<span class="mode">' + escape(connected.auth.user.name) + '</span>' : '';
   const locked = active || powerRequest ? 'disabled' : '';
   const name = store.person;
   return '<details class="who" id="who-menu"' + (open ? ' open' : '') + '><summary aria-label="Role and name">' +
@@ -216,10 +217,10 @@ function identityMenu(open) {
       escape(name) + '" ' + locked + '></label><datalist id="people">' +
       store.people.map(person => '<option value="' + escape(person) + '"></option>').join('') + '</datalist></div></details>';
 }
-function subbar() {
+function subbar(trailing = '') {
   return '<nav class="subbar">' + button('back','<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">' +
     '<path d="M10 3L5 8l5 5" fill="none" stroke="currentColor" stroke-width="2"/></svg>Sessions',
-    'class="back" ' + (active || powerRequest ? 'disabled' : '')) + '</nav>';
+    'class="back" ' + (active || powerRequest ? 'disabled' : '')) + trailing + '</nav>';
 }
 // The session moves through four steps; the screen always leads with the one step that is due now.
 const STEPS = [['manifest','Cartons'],['verify','Verify'],['scan','Scan'],['close','Close']];
@@ -238,9 +239,11 @@ function render() {
   root.hidden = Boolean(connected && !connected.auth);
   const scanner = view === 'scan' || Boolean(builder?.capture || receiptCapture || utilityScan);
   who.hidden = scanner;
+  headerActions.hidden = scanner || !connected?.auth;
   connectionPanel.hidden = !connected || scanner;
   // Keep the menu open across re-renders, e.g. right after a role change.
-  who.innerHTML = storageError ? '' : identityMenu(document.querySelector('#who-menu')?.open);
+  who.hidden = Boolean(connected);
+  who.innerHTML = storageError || connected ? '' : identityMenu(document.querySelector('#who-menu')?.open);
   if (storageError) {
     root.innerHTML = '<p class="status hold">Could not open the local records. Reopen the application before scanning.</p>';
     return;
@@ -252,11 +255,19 @@ function render() {
   const screen = view === 'scan' ? scanPanel(s) : view === 'build' ? buildPanel(s) : view === 'new' ? subbar() + creation() :
     view === 'pallet-task' ? subbar() + palletTaskPanel() : view === 'lookup' ? lookupPanel() : view === 'identify' ? identifyPanel() :
     view === 'settings' ? settingsPanel() : view === 'session' ? subbar() + showSession(s) :
-    view === 'stock' ? subbar() + palletScanRequests() + stockPanel() : history();
+    view === 'stock' ? subbar(role === 'operator' ? button('register-pallet','Register a pallet','class="secondary"') : '') + palletScanRequests() + stockPanel() : history();
   root.innerHTML = screen + (!scanner && ['sessions','lookup','identify','settings'].includes(view) ? bottomTabs() : '');
   for (const el of root.querySelectorAll('form[id] [name]')) {
     const k = draftable(el) && draftPrefix(el.form.id) + el.name;
     if (k && k in ui.drafts) el.value = ui.drafts[k];
+  }
+  const searchDialog = root.querySelector('.lookup-popup');
+  if (searchDialog) {
+    searchDialog.addEventListener('cancel',event => {
+      event.preventDefault();
+      stopUtilityScan();
+    });
+    searchDialog.showModal();
   }
   saveUi();
   if (active) updateScan();
@@ -272,12 +283,13 @@ function goBack() {
   if (stockScanBusy) return;
   if (['lookup','identify','settings','pallet-task'].includes(view)) {
     view = view === 'pallet-task' ? 'stock' : 'sessions';
+    registration = false;
+    palletRead = undefined;
     lookupRead = identifyRead = undefined;
     feedback('');
     render();
     return;
   }
-  if (pendingBarcode) { cancelBarcode(); return; }
   if (receiptCapture) { stopReceiptScan(true); return; }
   if (powerRequest || stockScanBusy) return;
   if (view === 'stock' && receiptUpload) { feedback('Retry the pending confirmation first.',true); return; }
@@ -315,7 +327,7 @@ function history() {
     '">' + escape(nextLabel(s)) +
     '</span></button>').join('');
   return '<section class="home"><div class="row spread section-head"><h1>Sessions</h1>' +
-    (connected?.auth && (role === 'admin' || (compactOperator() && (connected.stockTasks.length || connected.palletTasks.length))) ?
+    (connected?.auth && (role === 'admin' || compactOperator()) ?
       button('stock-tasks','Stock tasks','class="secondary"') : connected ? '' : '<small>' + total + ' of 500 labels used</small>') + '</div>' +
     (sessions.length > 1 ? '<input type="search" id="search" class="search" aria-label="Search sessions" maxlength="80" ' +
       'placeholder="Search sessions" value="' + escape(query) + '">' : '') +
@@ -357,7 +369,7 @@ function stockPanel() {
     '<button class="secondary">Save power</button></form>' : '';
   if (!task) return '<section class="panel stack"><h1>Stock tasks</h1>' + power + '<p>No stock tasks.</p></section>';
   const option = (value,label,selected) => '<option value="' + escape(value) + '"' + (selected ? ' selected' : '') + '>' + escape(label) + '</option>';
-  const selector = '<label>Task<select id="stock-task"' + (receiptCapture || pendingBarcode || receiptUpload || countUpload || stockScanBusy ? ' disabled' : '') + '>' +
+  const selector = '<label>Task<select id="stock-task"' + (receiptCapture || receiptUpload || countUpload || stockScanBusy ? ' disabled' : '') + '>' +
     (countUpload ? [task] : connected.stockTasks).map(item => option(item.id,item.reference ?? item.id,item.id === task.id)).join('') + '</select></label>';
   if (task.type === 'receipt') {
     const tags = taggedList(task.tagged,admin && !task.outbound);
@@ -385,26 +397,30 @@ const stockPower = () => connected.stockPower();
 function taggedList(tags = [],canUntag = false) {
   if (!tags.length) return '';
   return '<section class="tagged-cartons"><h3>Tagged cartons</h3><ul class="log">' + tags.slice().reverse().map(tag =>
-    '<li><strong>' + escape(tag.sku) + '</strong> · ' + escape(demoSku(tag.sku)) +
+    '<li><strong>' + escape(tag.sku) + '</strong> · ' + escape(cartonSku(tag) === tag.sku ? cartonLabel(tag.carton) : demoSku(cartonSku(tag))) +
     '<br><code>' + escape(tag.epc) + '</code>' + (canUntag && tag.state === 'available' ?
       '<br>' + button('untag-open','Untag carton','class="secondary" data-epc="' + escape(tag.epc) + '"') : '') + '</li>').join('') + '</ul></section>';
 }
+const inventoryChoices = group => (connected?.controls.inventoryOptions?.[group] ?? defaultInventoryOptions[group]).filter(option => !option.archived);
 function receiptPanel(task,option) {
   const products = receiptProducts(task);
   const remaining = [...new Map(products.map(item => [item.sku,item.remaining])).values()].reduce((sum,n) => sum+n,0);
   const progress = '<p role="status">' + task.received.length + ' received · ' + remaining + ' outstanding</p>';
   if (!remaining) return progress;
-  const product = products.find(item => item.identifier === receiptProduct && item.remaining > 0);
-  if (!product) return progress + '<form class="stack" id="receipt-barcode"><h2>Select product</h2>' +
-    (demoBarcode ? '<label>Product Identifier<select name="identifier">' + products.filter(item => item.remaining > 0).map(item =>
-      option(item.identifier,item.identifier === item.sku ? item.identifier : item.identifier + ' · ' + item.sku)).join('') +
-      '</select></label>' : '') +
-    '<button class="scan-cta"' + (pendingBarcode ? ' disabled>Scanning barcode…' : '>Scan barcode') + '</button>' +
-    (pendingBarcode ? '<div class="row">' + button('barcode-camera','Use camera','class="secondary"') +
-      button('barcode-cancel','Cancel','class="secondary"') + '</div>' : '') +
-    '<label class="check"><input type="checkbox" id="demo-barcode"' + (demoBarcode ? ' checked' : '') +
-    (pendingBarcode ? ' disabled' : '') + '>Barcode *</label></form>';
-  const details = progress + '<h2>Scan EPC</h2><p><strong>Product Identifier</strong> ' + escape(product.identifier) + '</p>';
+  const outstanding = products.filter(item => item.remaining > 0);
+  const product = outstanding.find(item => item.identifier === receiptProduct);
+  const disabled = receiptCapture || receiptRead || receiptUpload ? ' disabled' : '';
+  const productPicker = '<label>Product<select id="receipt-product" aria-label="Product"' + disabled + '>' +
+    option('','Choose a product',!product) + outstanding.map(item =>
+      option(item.identifier,item.identifier === item.sku ? item.sku : item.sku + ' · ' + item.identifier,
+        item === product)).join('') + '</select></label>';
+  if (!product) return progress + productPicker;
+  const sizes = receiptSizes(task,product.sku,inventoryChoices('cartonSizes'));
+  if (!receiptUpload && !sizes.some(size => size.code === receiptSize)) receiptSize = '';
+  const details = progress + productPicker + '<label>SKU<select id="receipt-size" aria-label="SKU"' + disabled + '>' +
+    option('','Choose a SKU',!receiptSize) + sizes.map(size =>
+      option(size.code,demoSku(product.sku + '-' + size.code),size.code === receiptSize)).join('') + '</select></label>';
+  if (!receiptSize) return details;
   if (receiptRead) return details + '<div class="receipt-read"><span><strong>Pending tag</strong>' +
     (receiptRead.epc ? '<code>' + escape(receiptRead.epc) + '</code>' : '<span>EPC *</span>') + '</span>' +
     (!receiptUpload ? button('receipt-remove','×','class="secondary receipt-remove" aria-label="Remove scanned tag"') : '') +
@@ -412,31 +428,23 @@ function receiptPanel(task,option) {
       'class="scan-cta" ' + (stockScanBusy ? 'disabled' : ''));
   return details + button('receipt-epc',receiptCapture?.ending ? 'Finishing…' : receiptCapture ? 'Stop scan' : 'Scan EPC',
       'class="scan-cta" ' + (!bridge?.startStockReader || !reader.ready || receiptCapture?.ending || stockScanBusy ? 'disabled' : '')) +
-    (!receiptCapture && !stockScanBusy ? button('receipt-simulate','EPC *','class="secondary"') +
-      button('receipt-barcode-reset','Scan another barcode','class="secondary"') : '');
-}
-function acceptReceiptBarcode(value) {
-  const barcode = String(value ?? '').trim();
-  const task = currentStockTask();
-  if (task?.type !== 'receipt' || !receiptProducts(task).some(line => line.identifier === barcode && line.remaining > 0)) {
-    feedback('This barcode does not match a product still outstanding on this receipt.',true);
-    render();
-    return;
-  }
-  receiptProduct = barcode;
-  feedback('');
-  render();
-}
-function cancelBarcode() {
-  const request = pendingBarcode;
-  pendingBarcode = undefined;
-  if (request) bridge?.cancelReceiptBarcode?.(request);
-  feedback('');
-  render();
+    (!receiptCapture && !stockScanBusy ? button('receipt-simulate','EPC *','class="secondary"') : '');
 }
 function palletTaskPanel() {
   const label = utilityScan ? 'Scanning pallet…' : 'Scan pallet';
   const disabled = stockScanBusy ? ' disabled' : '';
+  if (registration) {
+    return '<section class="panel stack"><h1>Register a pallet</h1>' +
+      '<form id="pallet-registration" class="stack">' +
+      [['Material','palletMaterials'],['Size','palletSizes']].map(([label,group]) =>
+        '<label>' + label + '<select name="' + label.toLowerCase() + '" required><option value="">Choose ' +
+        label.toLowerCase() + '</option>' + inventoryChoices(group).map(option =>
+          '<option value="' + escape(option.code) + '">' + escape(option.label) + '</option>').join('') + '</select></label>').join('') +
+      (palletRead ? '<p>Scanned pallet EPC <code>' + escape(palletRead.epc) + '</code></p>' +
+        button('pallet-clear','Clear tag','class="secondary"' + disabled) +
+        '<button' + disabled + '>Save pallet</button>' :
+        button('utility-scan',label,'class="scan-cta" ' + (!reader.ready || utilityScan || stockScanBusy ? 'disabled' : ''))) + '</form></section>';
+  }
   const controls = palletRead ? '<div class="receipt-read"><span><strong>Scanned pallet tag</strong><code>' + escape(palletRead.epc) +
     '</code>' + (Number.isFinite(palletRead.rssi) ? '<small>RSSI ' + escape(palletRead.rssi) + ' dBm</small>' : '') + '</span>' +
     button('pallet-clear','×','class="secondary receipt-remove" aria-label="Clear pallet tag and rescan"' + disabled) + '</div>' +
@@ -448,28 +456,69 @@ function palletTaskPanel() {
 function lookupPanel() {
   const s = lookupSession();
   const sessions = visibleSessions().filter(entry => entry.manifest).reverse();
-  const title = '<section class="panel stack"><h1>Search for a tag</h1>';
-  if (!sessions.length) return title + '<p>No sessions with a manifest yet.</p></section>';
+  const title = '<section class="panel stack"><h1>Search for a tag</h1>' +
+    '<form id="epc-search" class="stack"><label>EPC<input name="epc" value="' + escape(lookupEpc || '') +
+    '" placeholder="Enter or paste EPC" autocomplete="off" required maxlength="128"' + (utilityScan ? ' disabled' : '') +
+    '></label><button type="submit" class="secondary"' + (utilityScan ? ' disabled' : '') + '>Find EPC</button></form>';
+  if (lookupEpc) {
+    const tag = describeTag(lookupEpc,visibleSessions(),connected?.stock,connected?.palletInventory);
+    const details = '<div class="tag-result"><h2>' + escape(tag.title) + '</h2>' + lookupFields(tag) + '</div>';
+    return title + details + lookupControls() +
+      button('clear-epc-search','Search by session','class="secondary" ' + (utilityScan ? 'disabled' : '')) + '</section>';
+  }
   const picker = '<label>Session<select id="lookup-session" aria-label="Session"' + (utilityScan || powerRequest ? ' disabled' : '') + '>' +
-    '<option value="">Choose a session</option>' + sessions.map(entry => '<option value="' + escape(entry.id) + '"' +
+    '<option value="">All inventory</option>' + sessions.map(entry => '<option value="' + escape(entry.id) + '"' +
       (entry.id === s?.id ? ' selected' : '') + '>' + escape(entry.testId + ' · ' + entry.location) + '</option>').join('') + '</select></label>';
-  if (!s) return title + picker + '</section>';
-  const pallets = s.manifest.pallets?.length ? s.manifest.pallets : [s.manifest];
-  const tags = pallets.flatMap(pallet => [[pallet.palletEpc,'Pallet ' + pallet.pallet],
-    ...(pallet.requirements ? scanStockFor(s,pallet).filter(carton => carton.state === 'available' &&
-      pallet.requirements.some(row => row.sku === carton.sku)) : pallet.cartons)
-      .map(carton => [carton.epc,carton.carton + (carton.sku ? ' · ' + carton.sku : '')])]);
-  if (!tags.some(([epc]) => epc === lookupTarget)) lookupTarget = tags[0]?.[0];
-  return title + picker + '<label>Tag<select id="lookup-target"' +
-    (utilityScan ? ' disabled' : '') + '>' + tags.map(([epc,label]) => '<option value="' + escape(epc) + '"' +
-      (epc === lookupTarget ? ' selected' : '') + '>' + escape(label) + '</option>').join('') + '</select></label>' +
-    '<code>' + escape(lookupTarget) + '</code><div class="lookup-indicator" data-signal="idle" aria-hidden="true"></div>' +
-    '<p id="lookup-label" class="lookup-label" role="status">Ready to search</p><small id="lookup-rssi" class="lookup-label muted">RSSI —</small>' +
-    button('utility-scan',utilityScan ? utilityScan.ending ? 'Finishing…' : 'Stop search' : 'Start search',
-      'class="scan-cta" ' + (!bridge?.startReader || !reader.ready || utilityScan?.ending || powerRequest ? 'disabled' : '')) + '</section>';
+  const pallets = s ? (s.manifest.pallets?.length ? s.manifest.pallets : [s.manifest]) : [];
+  const stock = connected?.stock ?? [];
+  const products = new Map();
+  const label = (product,sku) => product + (sku !== product ? ' / ' + demoSku(sku) : '');
+  const include = (product,sku) => { if (sku) products.set(sku,label(product,sku)); };
+  const cartonTags = s ? pallets.flatMap(pallet => pallet.requirements ? scanStockFor(s,pallet).filter(carton =>
+    carton.physical && carton.state === 'available' && pallet.requirements.some(row =>
+      [carton.sku,cartonSku(carton)].includes(skuProduct(row.sku)))) :
+    pallet.cartons.map(carton => stock.find(row => row.epc === carton.epc) ?? carton)) :
+    stock.filter(carton => carton.state === 'available');
+  for (const carton of cartonTags) include(skuProduct(carton.sku),cartonSku(carton));
+  const registered = connected?.palletInventory ?? [];
+  const tags = lookupSku === '@pallet' ? (s ? pallets.flatMap(pallet => {
+    if (!pallet.palletType) return [registered.find(row => row.epc === pallet.palletEpc) ??
+      {epc:pallet.palletEpc,reference:pallet.pallet,location:s.location}];
+    const actual = s.palletAttempts?.findLast(attempt => attempt.result === 'Identified' &&
+      attempt.manifestRevision === s.manifest.revision && attempt.palletEpc === pallet.palletEpc)?.actualPalletEpc;
+    return registered.filter(row => row.epc === actual || (!actual && row.status === 'On hand' &&
+      matchesPalletIdentifier(pallet.palletType,row.identifier)));
+  }) : registered.filter(row => row.status !== 'Dispatched')) :
+    cartonTags.filter(carton => cartonSku(carton) === lookupSku);
+  const items = [...new Map(tags.map(item => [item.epc,item])).values()].sort((a,b) =>
+    (a.location ?? '').localeCompare(b.location ?? '',undefined,{numeric:true}) || a.epc.localeCompare(b.epc));
+  if (!items.some(item => item.epc === lookupTarget)) lookupTarget = '';
+  const option = (value,label,selected) => '<option value="' + escape(value) + '"' +
+    (value === selected ? ' selected' : '') + '>' + escape(label) + '</option>';
+  const searching = utilityScan?.kind === 'lookup';
+  const productPicker = '<label>Product / SKU<select id="lookup-sku"' + (searching ? ' disabled' : '') + '>' +
+    option('','Choose a product',lookupSku) + [...products].sort((a,b) => a[1].localeCompare(b[1])).map(([sku,name]) => option(sku,name,lookupSku)).join('') +
+    option('@pallet','Pallet',lookupSku) + '</select></label>';
+  const cartonPicker = !lookupSku ? '' : items.length ? '<label>Tag<select id="lookup-target"' +
+    (searching ? ' disabled' : '') + '>' + option('','Choose a tag',lookupTarget) +
+    items.map(item => option(item.epc,[item.location,lookupSku === '@pallet' ? item.reference : products.get(lookupSku),item.epc].filter(Boolean).join(' / '),lookupTarget)).join('') +
+    '</select></label>' : '<p>No available tags for this selection.</p>';
+  return title + picker + productPicker + cartonPicker + lookupControls() + '</section>';
+}
+function lookupControls() {
+  return utilityScan?.kind === 'lookup' ? '<dialog class="workflow-dialog lookup-popup" aria-labelledby="lookup-title">' +
+    '<h2 id="lookup-title">Searching</h2><code>' + escape(lookupTarget) + '</code>' +
+    '<div class="lookup-indicator" data-signal="idle" aria-hidden="true"></div>' +
+    '<p id="lookup-label" class="lookup-label" role="status">Looking for tag</p><small id="lookup-rssi" class="lookup-label muted">RSSI —</small>' +
+    button('utility-scan',utilityScan.ending ? 'Finishing…' : 'Stop search','class="scan-cta" ' + (utilityScan.ending ? 'disabled' : '')) +
+    '</dialog>' : button('utility-scan','Start search','class="scan-cta" ' +
+      (!lookupTarget || !bridge?.startReader || !reader.ready || powerRequest ? 'disabled' : ''));
+}
+function lookupFields(tag) {
+  return tag.rows.length ? '<dl>' + tag.rows.map(([label,value]) => '<dt>' + escape(label) + '</dt><dd>' + escape(value) + '</dd>').join('') + '</dl>' : '';
 }
 function identifyPanel() {
-  const tag = identifyRead && describeTag(identifyRead.epc,visibleSessions(),connected?.stock);
+  const tag = identifyRead && describeTag(identifyRead.epc,visibleSessions(),connected?.stock,connected?.palletInventory);
   const result = !tag ? '' : '<div class="tag-result" role="status"><h2>' + escape(tag.title) + '</h2><dl>' +
     tag.rows.map(([label,value]) => '<dt>' + escape(label) + '</dt><dd>' + escape(value) + '</dd>').join('') +
     '<dt>EPC</dt><dd><code>' + escape(identifyRead.epc) + '</code></dd></dl>' +
@@ -503,14 +552,14 @@ function lookupPulse() {
 function startUtilityScan() {
   if (utilityScan || stockScanBusy || powerRequest || !reader.ready) return;
   const kind = ['lookup','identify'].includes(view) ? view : 'pallet';
-  const lookupPower = connected?.controls.lookupPower;
+  const lookupPower = connected?.controls.lookupPower ?? (lookupEpc || !lookupSession() ? identifyPower() : null);
   if (kind === 'lookup') {
     if (!bridge?.startReader || !lookupTarget) return;
     if (lookupPower == null && !applySessionPower(lookupSession(), true)) {
       feedback('Wait for reader power before searching.',true);
       return;
     }
-  } else if (!bridge?.startStockReader || (kind === 'pallet' && (role !== 'operator' || !palletTask || palletRead))) return;
+  } else if (!bridge?.startStockReader || (kind === 'pallet' && (role !== 'operator' || (!registration && !palletTask) || palletRead))) return;
   utilityScan = {id:id(),kind,epcs:new Map()};
   lookupRead = identifyRead = undefined;
   feedback('');
@@ -547,7 +596,7 @@ async function submitPalletScan(epc) {
 function startStockScan() {
   const task = currentStockTask();
   if (!task || role !== 'operator' || receiptCapture || countUpload || stockScanBusy || !reader.ready || !bridge?.startStockReader) return;
-  if (task.type === 'receipt' && (receiptRead || !receiptProduct)) return;
+  if (task.type === 'receipt' && (receiptRead || !receiptProduct || !receiptSize)) return;
   receiptCapture = {id:id(),task,epc:'',epcs:task.type === 'count' ? new Map() : null,ending:false};
   feedback('');
   bridge.startStockReader(receiptCapture.id,stockPower());
@@ -561,7 +610,11 @@ function stopReceiptScan(interrupted = false) {
 }
 async function receiveStockCarton() {
   if (stockScanBusy || role !== 'operator' || !receiptRead) return;
-  receiptUpload ??= {task:currentStockTask(),change:{action:'receive-carton',identifier:receiptProduct,operationId:id(),...receiptRead}};
+  const stockTask = currentStockTask();
+  const product = receiptProducts(stockTask).find(row => row.identifier === receiptProduct);
+  if (!receiptUpload && (!product || !receiptSize)) return;
+  receiptUpload ??= {task:stockTask,change:{action:'receive-carton',identifier:receiptProduct,size:receiptSize,
+    variantSku:demoSku(product.sku + '-' + receiptSize),operationId:id(),...receiptRead}};
   const {task,change} = receiptUpload;
   stockScanBusy = true;
   feedback('');
@@ -651,7 +704,10 @@ function creation() {
   const next = planCoverage(store.plan, store.sessions).tests.find(t => t.status === 'Not run');
   const values = {...defaults, ...(next && {testId:next.id, planned:next.title || defaults.planned})};
   const essential = ['testId','location','level','method'];
-  const input = name => field(name,metadata[name],values[name],'maxlength="160" ' +
+  const input = name => name === 'location' && connected?.auth ?
+    '<label>Location<select name="location" required>' + connected.outboundLocations.map(location =>
+      '<option' + (location === 'Outbound staging' ? ' selected' : '') + '>' + escape(location) + '</option>').join('') +
+    '</select></label>' : field(name,metadata[name],values[name],'maxlength="160" ' +
     (name === 'notes' ? '' : 'required') + (name === 'testId' ? ' list="planned-tests"' : ''));
   return '<form id="create" class="stack"><h1>New test session</h1><label>Reader source<select name="source">' +
     (bridge ? '<option value="C72 hardware">RFID handheld</option>' : '') + '<option value="Simulation">Scan *</option></select></label>' +
@@ -917,10 +973,10 @@ function scanPanel(s) {
     (s.identified ? 'Scan cartons' : 'Scan pallet') + '</h1><span class="reader-state" data-ready="' + ready + '">' +
     escape(isHardware ? (ready ? 'Reader ready' : 'Reader unavailable') : 'Scan *') + '</span></div>' +
     '<div class="scan-target"><div class="scan-signal" data-reading="false" aria-hidden="true"></div><div>' +
-    '<p class="provenance">' + escape(target?.pallet ?? s.manifest.pallet) + '</p>' +
+    '<p class="provenance">' + escape((target ?? s.manifest).palletType ?? (target ?? s.manifest).pallet) + '</p>' +
     (s.identified ? '<p class="muted">Pallet verified by UHF EPC.</p>' : '<p>Scan near the pallet tag.</p>') +
     (isHardware && reader.profile?.powerDbm != null ? '<p class="muted">Reader power: ' + escape(reader.profile.powerDbm) + ' dBm</p>' : '') +
-    '<p class="muted">' + (isHardware ? 'Tap Start scan, or hold the handheld trigger and release to finish.' : 'Hold the trigger *. Release to finish.') + '</p></div></div>' +
+    '<p class="muted">' + (isHardware ? 'Tap Start scan, or hold the handheld trigger and release to finish.' : 'Hold the handheld trigger or the button below. Release to finish.') + '</p></div></div>' +
     (isHardware && !ready ? '<p class="status hold">' + escape(reader.message) + '</p>' +
       button('reconnect','Check reader','class="secondary"') : '') +
     '<p id="scan-clock" class="scan-clock" hidden></p><div id="scan-results" class="scan-results">' + scanSummary(s) + '</div>' +
@@ -950,8 +1006,24 @@ function scanStockFor(s,manifest) {
     return !used.has(carton.epc) && (!claimedBy || claimedBy === s.id);
   });
 }
+function scannedTagConflict(epc,s) {
+  if (!connected) return '';
+  const carton = connected.stock.find(row => row.epc === epc);
+  const pallet = connected.palletClaims[epc];
+  const owner = connected.verificationClaims[epc];
+  if (carton?.state === 'dispatched' || pallet?.status === 'Dispatched') return 'Tag already dispatched.';
+  if (pallet && pallet.id !== s?.id) return 'Pallet assigned to ' + (pallet.reference || 'another session') + '.';
+  if (owner && owner !== s?.id) {
+    const other = visibleSessions().find(session => session.id === owner);
+    return other ? 'Carton assigned to ' + other.testId + '.' : 'Carton assigned to another session or manifest.';
+  }
+  return '';
+}
 function compareSession(s,manifest,epcs) {
-  return compare(manifest,epcs,scanStockFor(s,manifest));
+  const actual = manifest.palletType && s.palletAttempts?.findLast(attempt =>
+    attempt.manifestRevision === manifest.revision && attempt.palletEpc === manifest.palletEpc && attempt.actualPalletEpc);
+  const blocked = new Set(epcs.filter(epc => scannedTagConflict(epc,s)));
+  return compareOutbound(actual ? {...manifest,actualPalletEpc:actual.actualPalletEpc} : manifest,epcs,scanStockFor(s,manifest),blocked);
 }
 function scanResult(s) {
   if (!s.identified) return null;
@@ -969,20 +1041,25 @@ function scanSummary(s,r = scanResult(s)) {
 function tagRows(s,r = scanResult(s)) {
   const matched = new Set(r.matched);
   const pending = active || !latestCurrentRun(s)?.result;
-  const row = (epc,title,state,label) => '<li class="tag-row" data-tag-status="' + state + '"><div><strong>' +
-    escape(title) + '</strong><code>' + escape(epc) + '</code></div><span class="tag-badge">' + label + '</span></li>';
+  const row = (epc,title,state,label,detail = '') => '<li class="tag-row" data-tag-status="' + state + '"><div><strong>' +
+    escape(title) + '</strong><code>' + escape(epc) + '</code>' + (detail ? '<small>' + escape(detail) + '</small>' : '') +
+    (state === 'unexpected' ? button('copy-epc','Copy EPC','class="secondary" data-epc="' + escape(epc) + '"') : '') +
+    '</div><span class="tag-badge">' + label + '</span></li>';
+  const extra = epc => {
+    const carton = connected?.stock.find(item => item.epc === epc);
+    const other = otherPallet(s.manifest,epc);
+    const title = carton ? 'Extra is ' + demoSku(cartonSku(carton)) : other ? 'Belongs to pallet ' + other : 'Outside this pallet';
+    return row(epc,title,'unexpected','Unexpected',scannedTagConflict(epc,s));
+  };
   if (s.manifest.requirements) {
     const observed = (r.matchedCartons ?? []).map(carton => row(carton.epc,carton.sku + ' · ' + demoSku(carton.sku),'matched','Expected'));
     const shortages = s.manifest.requirements.flatMap(({sku}) => {
       const missing = r.missing.filter(product => product === sku).length;
       return missing ? [row('',sku + ' · ' + demoSku(sku),pending ? 'waiting' : 'missing',missing + (pending ? ' to scan' : ' missing'))] : [];
     });
-    return [...observed,...shortages,...r.extra.map(epc => row(epc,'Outside this pallet','unexpected','Unexpected'))].join('');
+    return [...observed,...shortages,...r.extra.map(extra)].join('');
   }
-  return r.extra.map(epc => {
-    const other = otherPallet(s.manifest,epc);
-    return row(epc,other ? 'Belongs to pallet ' + other : 'Outside this pallet','unexpected','Unexpected');
-  }).join('') +
+  return r.extra.map(extra).join('') +
     s.manifest.cartons.map(c => matched.has(c.epc) ? row(c.epc,c.carton,'matched','Expected') :
       pending ? row(c.epc,c.carton,'waiting','Waiting') : row(c.epc,c.carton,'missing','Missing')).join('');
 }
@@ -1100,6 +1177,11 @@ function collect(reads) {
     if (!observations[epc]) {
       observations[epc] = {count:0,first:at};
       if (active.kind === 'cartons' || inManifest(s.manifest,epc)) fresh++;
+      const conflict = scannedTagConflict(epc,s);
+      if (conflict && !active.tagConflict) {
+        active.tagConflict = conflict;
+        feedback(conflict,true);
+      }
     }
     const entry = observations[epc];
     entry.last = at;
@@ -1136,9 +1218,17 @@ function finalize(interrupted, message) {
     if (capture.kind === 'pallet') {
       const seen = Object.keys(capture.observations);
       const target = multiPallet(s) ? pendingPallet(s) : null;
-      const lock = interrupted ? null : target ?
-        lockPallet({pallets:[target]},capture.observations[target.palletEpc] ? {[target.palletEpc]:capture.observations[target.palletEpc]} : {}) :
-        lockPallet(s.manifest,capture.observations);
+      const planned = target ?? s.manifest;
+      const used = new Set(Object.keys(s.palletMatches ?? {}).map(slot => s.palletAttempts?.findLast(attempt =>
+        attempt.manifestRevision === s.manifest.revision && attempt.palletEpc === slot)?.actualPalletEpc));
+      const observations = Object.fromEntries(Object.entries(capture.observations).filter(([epc]) => !scannedTagConflict(epc,s)));
+      const available = (connected?.palletInventory ?? []).map(pallet => connected.palletClaims[pallet.epc]?.id === s.id ?
+        {...pallet,status:'On hand'} : pallet);
+      const actual = !interrupted && planned.palletType && matchPalletType(planned,observations,available,used);
+      const lock = interrupted || (!planned.palletType && scannedTagConflict(planned.palletEpc,s)) ? null : planned.palletType ?
+        actual && {pallet:planned,rssi:parseFloat(observations[actual.epc].rssi),seen:1} :
+        target ? lockPallet({pallets:[target]},observations[target.palletEpc] ?
+          {[target.palletEpc]:observations[target.palletEpc]} : {}) : lockPallet(s.manifest,observations);
       s.identified = Boolean(lock);
       if (lock && lock.pallet.palletEpc !== s.manifest.palletEpc) {
         s.manifest = lockTo(s.manifest,lock.pallet);
@@ -1146,10 +1236,10 @@ function finalize(interrupted, message) {
       (s.palletAttempts ??= []).push({
         id:capture.id, startedAt:capture.startedAt, endedAt, observations:capture.observations,
         profile:s.palletPending?.profile, actor:actor(), result:s.identified ? 'Identified' : 'Unconfirmed',
-        lockedPallet:lock?.pallet.pallet, palletEpc:lock?.pallet.palletEpc, manifestRevision:s.manifest.revision
+        lockedPallet:lock?.pallet.pallet, palletEpc:lock?.pallet.palletEpc, actualPalletEpc:actual?.epc, manifestRevision:s.manifest.revision
       });
       delete s.palletPending;
-      log(s,lock ? 'Pallet locked' : 'Pallet not confirmed',lock ? lock.pallet.pallet + ' / strongest signal ' +
+      log(s,lock ? 'Pallet locked' : 'Pallet not confirmed',lock ? (actual?.epc ?? lock.pallet.pallet) + ' / strongest signal ' +
         (Number.isFinite(lock.rssi) ? lock.rssi + ' dBm' : 'not reported') + ' / ' + lock.seen + ' of its tags read / ' +
         seen.length + ' EPCs in range' : seen.join(', ') || 'No valid EPC read',capture.id);
     } else {
@@ -1167,7 +1257,8 @@ function finalize(interrupted, message) {
   active = undefined;
   rescanReason = '';
   if (capture.kind === 'pallet' && s.identified) scenario = defaultScenario;
-  feedback(capture.kind === 'pallet' && !s.identified ? 'Pallet EPC not confirmed. Scan closer to the displayed pallet and retry.' : '',capture.kind === 'pallet' && !s.identified);
+  const unmatched = capture.kind === 'pallet' && !s.identified;
+  feedback(capture.tagConflict || (unmatched ? 'Pallet EPC not confirmed. Scan closer to the displayed pallet and retry.' : ''),Boolean(capture.tagConflict || unmatched));
   render();
   if (capture.kind === 'pallet' && s.identified) focusScan();
 }
@@ -1255,7 +1346,10 @@ window.keypharmEvent = (name,data) => action(() => {
           const noun = kind === 'pallet' ? 'pallet tag' : 'tag';
           if (strongest && (epcs.size === 1 || Number.isFinite(strongest[1]))) {
             const read = {epc:strongest[0],rssi:strongest[1]};
-            if (kind === 'pallet') palletRead = read; else identifyRead = read;
+            if (kind === 'pallet') {
+              const conflict = scannedTagConflict(read.epc);
+              if (conflict) feedback(conflict,true); else palletRead = read;
+            } else identifyRead = read;
           } else feedback(strongest ? 'Signal strength unavailable. Move closer to the ' + noun + ' and retry.' : 'No ' + noun + ' read.',true);
         }
         render();
@@ -1266,13 +1360,6 @@ window.keypharmEvent = (name,data) => action(() => {
   if (['lookup','identify','pallet-task'].includes(view) && ['press','release','cancel'].includes(name)) {
     if (name === 'press') startUtilityScan();
     else if (name === 'cancel' || view === 'lookup') stopUtilityScan(name === 'cancel');
-    return;
-  }
-  if (name === 'receipt-barcode') {
-    if (!pendingBarcode || data?.id !== pendingBarcode) return;
-    pendingBarcode = undefined;
-    if (data.value) acceptReceiptBarcode(data.value);
-    else { feedback(data.message || 'No barcode read.',true); render(); }
     return;
   }
   if (receiptCapture && data?.id === receiptCapture.id) {
@@ -1312,6 +1399,7 @@ window.keypharmEvent = (name,data) => action(() => {
       const duplicate = !data.interrupted && epc && (taskTags.find(tag => tag.epc === epc) ??
         connected.stock.find(tag => tag.epc === epc));
       if (data.interrupted) feedback(data.message || 'Scan interrupted.',true);
+      else if (epc && scannedTagConflict(epc)) feedback(scannedTagConflict(epc),true);
       else if (duplicate) {
         feedback('This EPC is already tagged to ' + duplicate.sku + (taskTags.includes(duplicate) ? ' in this task.' : '.'),true);
       } else if (epc) receiptRead = {epc};
@@ -1397,8 +1485,8 @@ window.keypharmEvent = (name,data) => action(() => {
     render();
   }
   if (name === 'error') feedback(data.message,true);
-  if (name === 'press' && session()?.source === 'C72 hardware') begin();
-  if (name === 'release' && active?.hardware) end();
+  if (name === 'press') begin();
+  if (name === 'release') end();
   if (name === 'cancel' && active) end(true);
   // Settings read back from the reader as this run started (FR-08), replacing the snapshot from the last connect.
   if (name === 'started' && active?.id === data.id && data.profile) {
@@ -1442,16 +1530,23 @@ document.addEventListener('change', event => action(() => {
   }
   if (target.id === 'lookup-session') {
     lookupSessionId = target.value;
-    const manifest = lookupSession()?.manifest;
-    lookupTarget = manifest?.pallets?.[0]?.palletEpc ?? manifest?.palletEpc;
+    lookupSku = lookupTarget = '';
     lookupRead = undefined;
     feedback('');
     if (connected?.controls.lookupPower == null) applySessionPower(lookupSession(), true);
     render();
   }
+  if (target.id === 'lookup-sku') { lookupSku = target.value; lookupTarget = ''; render(); }
   if (target.id === 'lookup-target') { lookupTarget = target.value; lookupRead = undefined; render(); }
+  if (target.id === 'receipt-product') {
+    receiptProduct = target.value;
+    receiptSize = '';
+    feedback('');
+    render();
+    root.querySelector('#receipt-size')?.focus();
+  }
+  if (target.id === 'receipt-size') { receiptSize = target.value; render(); root.querySelector('[data-action=receipt-epc]')?.focus(); }
   if (target.id === 'stock-scenario') stockScenario = target.value;
-  if (target.id === 'demo-barcode') { demoBarcode = target.checked; feedback(''); render(); }
   if (target.id === 'csv-file' && target.files[0]) {
     const file = target.files[0], uploadSession = selected;
     if (file.size > 512000) throw new Error('Use a CSV smaller than 512 KB.');
@@ -1485,6 +1580,21 @@ document.addEventListener('click', event => action(() => {
   if (control?.id === 'hw-toggle') { if (active) end(); else begin(); return; }
   if (!control || active || powerRequest) return;
   const s = session(), command = control.dataset.action;
+  if (command === 'copy-epc') {
+    const epc = control.dataset.epc;
+    if (bridge?.copyLink) {
+      bridge.copyLink(epc);
+      feedback('EPC copied.');
+    } else if (navigator.clipboard) {
+      void navigator.clipboard.writeText(epc).then(() => feedback('EPC copied.')).catch(() => feedback('Could not copy the EPC.',true));
+    }
+    return;
+  }
+  if (command === 'clear-epc-search') {
+    lookupEpc = lookupTarget = '';
+    render();
+    return;
+  }
   if (control.dataset.open) {
     selected = control.dataset.open;
     view = 'session';
@@ -1497,7 +1607,15 @@ document.addEventListener('click', event => action(() => {
     scenario = defaultScenario;
   }
   if (command === 'new' && canCreate()) view = 'new';
+  if (command === 'register-pallet' && view === 'stock' && role === 'operator') {
+    registration = true;
+    palletRead = undefined;
+    view = 'pallet-task';
+    render();
+    return;
+  }
   if (command === 'pallet-task' && connected?.auth && role === 'operator') {
+    registration = false;
     palletRead = undefined;
     palletTask = connected.palletTasks.find(task => task.id === control.dataset.task);
     if (palletTask) view = 'pallet-task';
@@ -1535,8 +1653,6 @@ document.addEventListener('click', event => action(() => {
     receiptUpload = receiptRead = undefined;
     window.scrollTo(0,0);
   }
-  if (view === 'stock' && command === 'barcode-cancel') { cancelBarcode(); return; }
-  if (view === 'stock' && command === 'barcode-camera' && pendingBarcode) { bridge?.useReceiptBarcodeCamera?.(pendingBarcode); return; }
   if (view === 'stock' && command === 'untag-close') { root.querySelector('#untag-dialog')?.close(); return; }
   if (view === 'stock' && command === 'untag-open' && role === 'admin') {
     const dialog = root.querySelector('#untag-dialog');
@@ -1564,10 +1680,6 @@ document.addEventListener('click', event => action(() => {
     return;
   }
   if (view === 'stock' && command === 'receipt-confirm') { void receiveStockCarton(); return; }
-  if (view === 'stock' && command === 'receipt-barcode-reset') {
-    receiptProduct = '';
-    receiptUpload = receiptRead = undefined;
-  }
   if (command === 'build-open' && s && permits(role,'manifest') && !s.closedAt && !s.confirmedAt) { builder = {tags:{}}; view = 'build'; }
   if (command === 'build-toggle' && view === 'build' && builder) { buildToggle(); return; }
   if (command === 'build-close' && !builder?.capture) { builder = undefined; view = 'session'; }
@@ -1697,6 +1809,30 @@ root.addEventListener('submit', event => action(() => {
   event.preventDefault();
   if (active || powerRequest) return;
   const form = event.target, data = Object.fromEntries(new FormData(form)), s = session(), drafts = draftPrefix(form.id);
+  if (form.id === 'epc-search' && !utilityScan) {
+    const epc = normalizeEpc(data.epc);
+    if (!validEpc(epc)) { feedback('Enter a valid hexadecimal EPC.',true); return; }
+    lookupEpc = lookupTarget = epc;
+    lookupRead = undefined;
+    feedback('');
+    render();
+    return;
+  }
+  if (form.id === 'pallet-registration' && registration && palletRead && !stockScanBusy) {
+    stockScanBusy = true;
+    void connected.registerPallet({...data,epc:palletRead.epc}).then(pallet => {
+      clearDrafts(drafts);
+      registration = false;
+      palletRead = undefined;
+      view = 'stock';
+      confirmWorkflow('Pallet registered',pallet.identifier + ' · ' + pallet.epc);
+    }).catch(error => feedback(error.message,true)).finally(() => {
+      stockScanBusy = false;
+      render();
+    });
+    render();
+    return;
+  }
   if (form.id === 'stock-demo' && view === 'stock') { void scanStock({scenario:data.scenario}); return; }
   if (form.id === 'stock-power' && view === 'stock' && role === 'admin') {
     const power = Number(data.power);
@@ -1709,18 +1845,6 @@ root.addEventListener('submit', event => action(() => {
   if (form.id === 'untag-carton' && view === 'stock' && role === 'admin') {
     root.querySelector('#untag-dialog').close();
     void untagCarton(data);
-    return;
-  }
-  if (form.id === 'receipt-barcode' && view === 'stock' && role === 'operator') {
-    if (demoBarcode) {
-      bridge?.feedback?.('start');
-      acceptReceiptBarcode(data.identifier);
-    } else if (!pendingBarcode && bridge?.scanReceiptBarcode) {
-      pendingBarcode = id();
-      feedback('');
-      render();
-      bridge.scanReceiptBarcode(pendingBarcode);
-    } else if (!pendingBarcode) feedback('Barcode scanning is unavailable on this device.',true);
     return;
   }
   if (form.id === 'session-power' && connected?.auth && view === 'session' && s?.source === 'C72 hardware' && permits(role,'reader-power')) {
@@ -1871,6 +1995,9 @@ if (connected) {
     else nativeEvent(name,data);
   };
   connectionPanel.hidden = false;
+  headerActions.innerHTML =
+    '<button type="button" class="secondary" data-workspace="retry" aria-label="Sync now" title="Sync now">' + syncIcon + '</button>' +
+    '<button type="button" class="secondary" data-workspace="logout" aria-label="Sign out" title="Sign out">' + signOutIcon + '</button>';
   let manualSync = false, lastSyncNotice = '', bubbleTimer;
   const showConnection = () => {
     if (!connected.auth) {
@@ -1882,12 +2009,10 @@ if (connected) {
           '<label>Password<input name="password" type="password" autocomplete="current-password" required></label>' +
           '<button>Sign in</button></form><p class="info-bubble" role="status"></p></section>';
       }
-    } else if (!connectionPanel.querySelector('[data-workspace="retry"]')) {
+    } else if (!connectionPanel.querySelector('#workspace-role')) {
       connectionPanel.innerHTML = '<div class="row spread workspace-strip"><p class="info-bubble workspace-bubble" role="status"></p>' +
         '<select id="workspace-role" aria-label="Role">' + Object.entries(handheldRoles).map(([key,label]) =>
-          '<option value="' + key + '">' + escape(label) + '</option>').join('') + '</select>' +
-        '<div class="workspace-strip-actions"><button type="button" class="secondary" data-workspace="retry">Sync now</button>' +
-        '<button type="button" class="secondary" data-workspace="logout">Sign out</button></div></div>';
+          '<option value="' + key + '">' + escape(label) + '</option>').join('') + '</select></div>';
     }
     const picker = connectionPanel.querySelector('#workspace-role');
     if (picker) picker.value = role;
@@ -1915,7 +2040,7 @@ if (connected) {
       manualSync = false;
     }
   };
-  const safe = () => !active && !builder?.capture && !utilityScan && !receiptCapture && !pendingBarcode && !powerRequest && !stockScanBusy && !pendingImport && !resetDialog.open && !palletDialog.open && !root.querySelector('#untag-dialog[open]');
+  const safe = () => !active && !builder?.capture && !utilityScan && !receiptCapture && !powerRequest && !stockScanBusy && !pendingImport && !resetDialog.open && !palletDialog.open && !root.querySelector('#untag-dialog[open]');
   const clearConnectedRecords = () => {
     localStorage.removeItem(uiKey);
     localStorage.removeItem(key);
@@ -1927,7 +2052,8 @@ if (connected) {
     scenario = defaultScenario;
     receiptProduct = '';
     receiptUpload = receiptRead = countUpload = undefined;
-    palletTask = palletRead = utilityScan = lookupSessionId = lookupTarget = lookupRead = identifyRead = undefined;
+    registration = false;
+    palletTask = palletRead = utilityScan = lookupSessionId = lookupTarget = lookupSku = lookupRead = lookupEpc = identifyRead = undefined;
     pendingRecordRender = true;
     publish();
   };
@@ -1948,7 +2074,7 @@ if (connected) {
   };
   let controlsRevision = connected.controls.revision;
   let recommendedPower = sessionPower(session());
-  let stockVersion = '', removedVersion = [...connected.removedSessions].join();
+  let stockVersion = '', lookupVersion = '', removedVersion = [...connected.removedSessions].join();
   refreshConnected = () => connected.refresh(() => store.sessions,applyRecord,safe,() => {
     showConnection();
     const removed = [...connected.removedSessions].join();
@@ -1963,6 +2089,10 @@ if (connected) {
         applySessionPower(session());
         if (!document.activeElement?.matches('#session-power input')) render();
       }
+    }
+    if (safe() && ['lookup','identify'].includes(view) && !document.activeElement?.matches('input, select')) {
+      const version = JSON.stringify([connected.stock,connected.palletInventory]);
+      if (version !== lookupVersion) { lookupVersion = version; render(); }
     }
     const updatedTasks = connected.stockTasks.map(task => task.id + ':' + task.revision).concat(connected.palletTasks.map(task => task.id)).join();
     if (updatedTasks !== stockVersion && ['sessions','stock'].includes(view) && !root.querySelector('#untag-dialog[open]') && !document.activeElement?.matches('input, textarea, select')) {
@@ -2007,7 +2137,7 @@ if (connected) {
       button.disabled = false;
     }
   });
-  connectionPanel.addEventListener('click',event => {
+  headerActions.addEventListener('click',event => {
     const command = event.target.closest('button')?.dataset.workspace;
     if (command === 'retry') { manualSync = true; void refreshConnected(); }
     if (command === 'logout') {

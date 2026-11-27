@@ -16,8 +16,27 @@ export const displaySource = value => value == null ? value : value === 'C72 har
   ['Sample CSV','Demo sample CSV'].includes(value) ? 'CSV *' : String(value).replace(/\bC72\b/gi, 'UHF');
 
 const productCodes = {Physalis:'DEMO-PHY','Tiger Balm':'DEMO-TB',Biotona:'DEMO-BIO'};
-export const demoSku = sku => productCodes[sku] ?? sku;
-export const skuProduct = sku => Object.keys(productCodes).find(product => productCodes[product] === sku) ?? productSku(sku);
+const cartonVariant = /^(.+)-([A-Z0-9]+)-\d+$/i;
+export const cartonSku = carton => {
+  if (carton.variant_size) return carton.sku + '-' + carton.variant_size;
+  const variant = cartonVariant.exec(carton.carton);
+  return variant && variant[1].toUpperCase() === String(carton.sku ?? '').toUpperCase() ?
+    carton.sku + '-' + variant[2].toUpperCase() : carton.sku;
+};
+export const cartonLabel = label => String(label ?? '').replace(cartonVariant,(_,product,size) =>
+  Object.keys(productCodes).some(name => name.toUpperCase() === product.toUpperCase()) ?
+    (product + '-' + size).toUpperCase() : _);
+export const demoSku = sku => productCodes[sku] ?? String(sku ?? '').toUpperCase();
+export function skuProduct(sku) {
+  const value = String(sku ?? '');
+  const upper = value.toUpperCase();
+  for (const [product,code] of Object.entries(productCodes)) {
+    const family = product.toUpperCase();
+    if (upper === code || upper === family) return product;
+    if (upper.startsWith(family + '-')) return product + upper.slice(family.length);
+  }
+  return productSku(value);
+}
 
 export function receiptProducts(task) {
   const quantities = task.quantities ?? Object.fromEntries([...new Set(task.expected.map(carton => carton.sku))]
@@ -26,6 +45,14 @@ export function receiptProducts(task) {
   return identifiers.map(([identifier,sku]) => ({identifier,sku,remaining:quantities[sku] - (task.receivedBySku?.[sku] ??
     task.expected.filter(carton => carton.sku === sku && task.received.includes(carton.epc)).length)}));
 }
+export function receiptSizes(task,sku,sizes) {
+  if (task.mode === 'SKU') return sizes;
+  const outstanding = task.expected.filter(carton => carton.sku === sku && !task.received.includes(carton.epc));
+  if (!outstanding.length || outstanding.some(carton => cartonSku(carton) === sku)) return sizes;
+  const codes = new Set(outstanding.map(carton => cartonSku(carton).slice(sku.length + 1)));
+  return [...codes].map(code => sizes.find(size => size.code === code) ?? {code,label:code});
+}
+export const signOutIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6a2 2 0 0 1-2-2v-1M14 12H3m4-4-4 4 4 4"/></svg>';
 export const validEpc = value => /^(?:[0-9A-F]{2}){2,31}$/.test(value);
 function cells(line, row, sep, size = columns.length) {
   const parts = [...line.matchAll(csvLine(sep))];
@@ -59,16 +86,38 @@ export function manifestCsv(palletRef, palletEpc, epcs, sku = '') {
     [ref, pallet, 'Carton ' + String(i + 1).padStart(2,'0'), epc, item].join(','))].join('\n') + '\n';
 }
 const skuColumns = ['pallet_ref','pallet_epc','sku','quantity'];
+const typedSkuColumns = [...skuColumns,'pallet_type'];
+export const defaultInventoryOptions = {
+  palletMaterials:[{code:'PLAS',label:'Plastic'},{code:'MET',label:'Metal'},{code:'WOOD',label:'Wood'}],
+  palletSizes:['S','M','L'].map(code => ({code,label:code})),
+  cartonSizes:['XS','S','M','L'].map(code => ({code,label:code}))
+};
+const palletCode = (value,options) => options.find(option =>
+  [option.code,option.label].some(entry => entry.toUpperCase() === value.toUpperCase()))?.code ??
+  value.toUpperCase().replace(/[^A-Z0-9]/g,'');
+export const palletIdentifier = ({material,size},options = defaultInventoryOptions) =>
+  'PAL-' + palletCode(material,options.palletMaterials) + '-' + palletCode(size,options.palletSizes);
+export const matchesPalletIdentifier = (required,actual) => {
+  if (required === actual) return true;
+  const [material,size] = required.split(' / ');
+  return Boolean(size && palletIdentifier({material,size}) === actual);
+};
+export function matchPalletType(target, observations, inventory, used = new Set()) {
+  return inventory.filter(pallet => pallet.status === 'On hand' && matchesPalletIdentifier(target.palletType,pallet.identifier) &&
+    !used.has(pallet.epc) && Object.hasOwn(observations,pallet.epc))
+    .sort((a,b) => (parseFloat(observations[b.epc].rssi) || -Infinity) - (parseFloat(observations[a.epc].rssi) || -Infinity))[0];
+}
 export function skuManifestCsv(pallets) {
-  return [skuColumns.join(','),...pallets.flatMap(pallet => pallet.requirements.map(({sku,quantity}) =>
-    [pallet.pallet,pallet.palletEpc,demoSku(sku),quantity].map(csvCell).join(',')))].join('\n');
+  const typed = pallets.some(pallet => pallet.palletType);
+  return [(typed ? typedSkuColumns : skuColumns).join(','),...pallets.flatMap(pallet => pallet.requirements.map(({sku,quantity}) =>
+    [pallet.pallet,pallet.palletEpc,demoSku(sku),quantity,...(typed ? [pallet.palletType ?? ''] : [])].map(csvCell).join(',')))].join('\n');
 }
 export const palletCartonCount = pallet => pallet.requirements?.reduce((sum,row) => sum + row.quantity,0) ?? pallet.cartons.length;
 
-function parseSkuManifest(text) {
+function parseSkuManifest(text, columns = skuColumns) {
   const pallets = new Map(), tags = new Set();
   let labels = 0;
-  for (const [pallet,tag,code,value] of parseCsvRows(text,skuColumns)) {
+  for (const [pallet,tag,code,value,palletType] of parseCsvRows(text,columns)) {
     const palletEpc = normalizeEpc(tag), sku = skuProduct(code), quantity = Number(value);
     if (!pallet || pallet.length > 80 || /^[=+@-]/.test(pallet) || !validEpc(palletEpc) || !sku ||
         !Number.isInteger(quantity) || quantity < 1 || quantity > 499) throw new Error('Enter a pallet reference, EPC, SKU and whole carton quantity.');
@@ -76,11 +125,11 @@ function parseSkuManifest(text) {
     if (!row) {
       if (tags.has(palletEpc)) throw new Error('A pallet EPC can appear under one pallet reference only.');
       tags.add(palletEpc);
-      row = {pallet,palletEpc,cartons:[],requirements:[]};
+      row = {pallet,palletEpc,cartons:[],requirements:[],...(palletType ? {palletType} : {})};
       pallets.set(pallet,row);
       labels++;
     }
-    if (row.palletEpc !== palletEpc || row.requirements.some(item => item.sku === sku)) throw new Error('Use one quantity per SKU on each pallet.');
+    if (row.palletEpc !== palletEpc || (row.palletType ?? '') !== (palletType ?? '') || row.requirements.some(item => item.sku === sku)) throw new Error('Use one quantity per SKU on each pallet.');
     row.requirements.push({sku,quantity});
     labels += quantity;
     if (labels > 500) throw new Error('A manifest can use up to 500 labels.');
@@ -93,6 +142,7 @@ export function parseManifest(text) {
   const lines = text.replace(/^\uFEFF/, '').trim().split(/\r?\n/);
   const header = lines.shift().toLowerCase();
   if ([',',';'].some(separator => header.split(separator).map(field => field.trim()).join() === skuColumns.join())) return parseSkuManifest(text);
+  if ([',',';'].some(separator => header.split(separator).map(field => field.trim()).join() === typedSkuColumns.join())) return parseSkuManifest(text,typedSkuColumns);
   const sep = [',', ';'].find(s => header.split(s).map(h => h.trim()).join() === columns.join());
   if (!sep) throw new Error('Use the five headers from the sample CSV, separated by commas or semicolons.');
   if (!lines.length) throw new Error('Manifest needs at least one carton.');
@@ -189,7 +239,8 @@ export function matchesQuery(s, query, status = '') {
 // "Carton 01" already says what it is; "ST-9" needs the word in front.
 const named = (kind, ref) => String(ref).toLowerCase().startsWith(kind.toLowerCase() + ' ') ? String(ref) : kind + ' ' + ref;
 // Lookup tab: say what one scanned tag is, from records already on the handheld. Read-only.
-export function describeTag(epc, sessions, stock = []) {
+export function describeTag(epc, sessions, stock = [], palletInventory = []) {
+  const registeredPallet = palletInventory.find(pallet => pallet.epc === epc);
   const item = stock.find(carton => carton.epc === epc);
   const uses = [];
   for (const s of [...sessions].reverse()) {
@@ -200,18 +251,26 @@ export function describeTag(epc, sessions, stock = []) {
     for (const pallet of palletsOf(s.manifest)) {
       const carton = pallet.cartons?.find(c => c.epc === epc) ?? runs.filter(run => run.palletEpc === pallet.palletEpc)
         .flatMap(run => run.result?.matchedCartons ?? []).find(c => c.epc === epc);
-      if (pallet.palletEpc !== epc && !carton) continue;
+      const actual = s.palletAttempts?.findLast(attempt => attempt.result === 'Identified' &&
+        attempt.manifestRevision === s.manifest.revision && attempt.palletEpc === pallet.palletEpc)?.actualPalletEpc;
+      if ((pallet.palletType ? actual : pallet.palletEpc) !== epc && !carton) continue;
       uses.push({pallet, carton, session:[s.testId, s.location, 'pallet ' + pallet.pallet,
         s.dispatchedAt ? 'dispatched' : s.closedAt ? 'closed' : ''].filter(Boolean).join(' · ')});
     }
   }
   const carton = item ?? uses.find(use => use.carton)?.carton;
-  if (!carton && !uses.length) return {kind:'unknown', title:'Not in records', rows:[]};
+  if (!carton && !uses.length && !registeredPallet) return {kind:'unknown', title:'Not in records', rows:[]};
   const state = item?.state ?? '';
-  const rows = carton ? [['SKU', carton.sku], ['Location', item?.location],
+  const sku = carton ? cartonSku(carton) : '';
+  const product = skuProduct(carton?.sku);
+  const knownProduct = Object.hasOwn(productCodes,product);
+  const rows = carton ? [...(knownProduct ? [['Product',product]] : []),
+    ['SKU', knownProduct && sku !== product ? demoSku(sku) : sku], ['Location', item?.location],
     ['State', state.charAt(0).toUpperCase() + state.slice(1)], ['Batch', item?.batch_lot],
-    ['Units per carton', item?.units_per_carton]] : [['Cartons expected', palletCartonCount(uses[0].pallet)]];
-  return {kind:carton ? 'carton' : 'pallet', title:carton ? named('Carton', carton.carton) : named('Pallet', uses[0].pallet.pallet),
+    ['Units per carton', item?.units_per_carton]] : [
+    ['Pallet type',registeredPallet?.identifier ?? uses[0]?.pallet.palletType], ['Status',registeredPallet?.status],
+    ['Cartons expected',uses.length ? palletCartonCount(uses[0].pallet) : undefined]];
+  return {kind:carton ? 'carton' : 'pallet', title:carton ? (knownProduct ? 'Carton' : named('Carton', carton.carton)) : named('Pallet', registeredPallet?.reference ?? uses[0].pallet.pallet),
     rows:[...rows, ...uses.map(use => ['Session', use.session])]
       .filter(([, value]) => value || value === 0).map(([label, value]) => [label, String(value)])};
 }
@@ -235,21 +294,22 @@ export const actionLabel = action => action === 'Physical verification' ? 'Verif
 // Section 9.3 lists "Unexpected reads" as its own state; FR-15 calls it Hold. Show both.
 export const statusLabel = status => status === 'Hold' ? 'Hold: unexpected reads' : status;
 export const pendingPallet = session => session.manifest?.pallets?.find(pallet => !session.palletMatches?.[pallet.palletEpc]);
-export const lockTo = (manifest, pallet) => ({...manifest, pallet:pallet.pallet, palletEpc:pallet.palletEpc, cartons:pallet.cartons, requirements:pallet.requirements});
+export const lockTo = (manifest, pallet) => ({...manifest, pallet:pallet.pallet, palletEpc:pallet.palletEpc, cartons:pallet.cartons, requirements:pallet.requirements, palletType:pallet.palletType});
 // The other loaded pallet an unexpected EPC belongs to, if any.
 export const otherPallet = (manifest, epc) =>
   palletsOf(manifest).find(p => p.palletEpc !== manifest.palletEpc && tagsOf(p).includes(epc))?.pallet;
 
 export function compare(manifest, observed, inventory = []) {
   if (manifest.requirements) {
-    const remaining = new Map(manifest.requirements.map(({sku,quantity}) => [sku,quantity]));
+    const remaining = new Map(manifest.requirements.map(({sku,quantity}) => [skuProduct(sku),quantity]));
     const catalog = new Map(inventory.filter(carton => carton.state === 'available').map(carton => [carton.epc,carton]));
     const matched = [], extra = [], matchedCartons = [];
     for (const epc of new Set(observed.map(normalizeEpc))) {
-      if (!epc || epc === manifest.palletEpc) continue;
+      if (!epc || epc === (manifest.actualPalletEpc ?? manifest.palletEpc)) continue;
       const carton = catalog.get(epc);
-      if (!carton || !remaining.get(carton.sku)) { extra.push(epc); continue; }
-      remaining.set(carton.sku,remaining.get(carton.sku) - 1);
+      const sku = carton && (remaining.get(cartonSku(carton)) ? cartonSku(carton) : carton.sku);
+      if (!remaining.get(sku)) { extra.push(epc); continue; }
+      remaining.set(sku,remaining.get(sku) - 1);
       matched.push(epc);
       matchedCartons.push({epc,sku:carton.sku,carton:carton.carton});
     }
@@ -266,6 +326,13 @@ export function compare(manifest, observed, inventory = []) {
   const percent = expected.size ? Math.round(matched.length * 1000 / expected.size) / 10 : null;
   const status = extra.length ? 'Hold' : (missing.length || !expected.size ? 'Incomplete' : 'Match');
   return {expected: expected.size, matched, missing, extra, percent, status};
+}
+
+export function compareOutbound(manifest,observed,inventory,blocked) {
+  const eligible = observed.filter(epc => !blocked.has(epc));
+  const result = compare(manifest,eligible,inventory);
+  const refused = observed.filter(epc => blocked.has(epc));
+  return refused.length ? {...result,extra:[...new Set([...result.extra,...refused])],status:'Hold'} : result;
 }
 
 export function scanDelta(previous, current) {

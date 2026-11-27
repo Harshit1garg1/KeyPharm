@@ -1,7 +1,7 @@
 import {DatabaseSync} from 'node:sqlite';
 import {randomUUID} from 'node:crypto';
-import {parseManifest, parseCsvRows, skuManifestCsv, palletCartonCount, skuProduct, parsePlan, compare, normalizeEpc, validEpc, canClose, outboundManifestConflict, lockTo, pendingPallet} from '../app/src/main/assets/model.mjs';
-import {nextCartonLabel,stockWorkflows} from './stock-workflows.mjs';
+import {parseManifest, parseCsvRows, skuManifestCsv, palletCartonCount, skuProduct, parsePlan, compareOutbound, normalizeEpc, validEpc, canClose, outboundManifestConflict, lockTo, pendingPallet, cartonSku, demoSku, palletIdentifier, matchesPalletIdentifier, defaultInventoryOptions} from '../app/src/main/assets/model.mjs';
+import {nextCartonLabel,stockWorkflows,OUTBOUND_STAGING} from './stock-workflows.mjs';
 
 export const products = [
   {sku:'Physalis', quantity:20},
@@ -12,6 +12,7 @@ const time = () => new Date().toISOString();
 const fail = (message, status = 409) => { throw Object.assign(new Error(message), {status}); };
 const eq = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 const eligible = new Set(products.map(p => p.sku));
+const productFamily = sku => products.find(product => sku.startsWith(product.sku + '-'))?.sku ?? sku;
 const reviewRoles = ['admin','reviewer'];
 const dispatchRoles = ['admin','supervisor'];
 const sessionActionRoles = {manifest:['admin'],reopen:['admin'],physical:['supervisor'],approve:reviewRoles,dispatch:dispatchRoles,remove:['admin']};
@@ -38,6 +39,7 @@ export function createWorkspace(path, hardwareCsv = '') {
       sku TEXT NOT NULL, size TEXT NOT NULL, material TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS pallet_manifests (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS dashboard_sessions (id TEXT PRIMARY KEY, expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, body TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, actor TEXT NOT NULL, session TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS audit (
@@ -179,8 +181,10 @@ export function createWorkspace(path, hardwareCsv = '') {
   };
   const sessions = () => db.prepare('SELECT id FROM sessions ORDER BY rowid DESC').all().map(row => readSession(row.id));
   const activeSessions = () => sessions().filter(session => !session.removedAt);
-  const settings = () => JSON.parse(db.prepare("SELECT value FROM settings WHERE key='test-controls'").get()?.value ??
-    '{"revision":0,"plan":[],"power":null}');
+  const inventoryOptions = () => JSON.parse(db.prepare("SELECT value FROM settings WHERE key='inventory-options'").get()?.value ??
+    JSON.stringify(defaultInventoryOptions));
+  const settings = () => ({...JSON.parse(db.prepare("SELECT value FROM settings WHERE key='test-controls'").get()?.value ??
+    '{"revision":0,"plan":[],"power":null}'),inventoryOptions:inventoryOptions()});
   const generation = () => Number(db.prepare("SELECT value FROM settings WHERE key='generation'").get()?.value ?? 0);
   const insertManifestRev = db.prepare(`INSERT INTO manifest_revisions
     (session_id,revision,source,pallet_ref,pallet_epc,carton_count,imported_at,manifest_json)
@@ -268,6 +272,38 @@ export function createWorkspace(path, hardwareCsv = '') {
     const current = settings();
     if (current.lastOperation === input.operationId) return current;
     if (!input.operationId || input.revision !== current.revision) fail('Test controls changed. Refresh and review them.');
+    if (input.inventoryOption !== undefined) {
+      const {group,action,label} = input.inventoryOption ?? {};
+      const material = group === 'palletMaterials';
+      const name = typeof label === 'string' ? label.trim() : '';
+      const candidate = name.normalize('NFKD').replace(/[^a-z0-9]/gi,'').toUpperCase();
+      const generated = candidate.length > 4 ? candidate.slice(0,Math.floor(candidate.length / 2)) : candidate;
+      const code = String(input.inventoryOption?.code ?? '').trim().toUpperCase() || (material && action === 'add' ? generated : '');
+      if (!material && action === 'add' && !code) fail('Enter a size code.',400);
+      if (!Object.hasOwn(defaultInventoryOptions,group) || !/^[A-Z0-9]{1,20}$/.test(code)) fail('Enter a valid option code.',400);
+      const options = current.inventoryOptions[group];
+      if (action === 'add') {
+        const displayName = name || code;
+        const upperName = displayName.toUpperCase();
+        const existing = options.find(option => option.code === code);
+        const restoring = existing?.archived && (!material || existing.label.toUpperCase() === upperName);
+        const conflict = options.some(option => option !== (restoring ? existing : null) &&
+          (material || !option.archived) && (option.code === code ||
+            option.label.toUpperCase() === upperName || option.label.toUpperCase() === code || option.code === upperName));
+        if (displayName.length > 40 || conflict) fail('That option code or name is already in use.',400);
+        if (restoring) {
+          existing.label = displayName;
+          delete existing.archived;
+        } else options.push({code,label:displayName});
+      } else if (action === 'remove') {
+        const active = options.filter(option => !option.archived);
+        const option = active.find(entry => entry.code === code);
+        if (active.length <= 1 || !option) fail('Keep at least one option in each list.',400);
+        option.archived = true;
+      } else fail('Choose add or remove.',400);
+      db.prepare("INSERT INTO settings VALUES ('inventory-options',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        .run(JSON.stringify(current.inventoryOptions));
+    }
     if (input.plan !== undefined) {
       if (typeof input.plan !== 'string' || input.plan.length > 12000) fail('Enter a valid test plan.',400);
       current.plan = input.plan.trim() ? parsePlan(input.plan) : [];
@@ -350,26 +386,64 @@ export function createWorkspace(path, hardwareCsv = '') {
     const otherDrafts = manifests().filter(draft => !ignoreDrafts.includes(draft.id) && draft.status === 'Manifest ready');
     const committed = [...otherSessions.map(s => s.manifest),...otherDrafts];
     const fixed = new Set(committed.flatMap(cartonsOf).map(carton => carton.epc));
-    for (const carton of stockOps.inventory()) {
-      if (carton.state === 'available' && !fixed.has(carton.epc)) available.set(carton.sku,(available.get(carton.sku) ?? 0) + 1);
+    const counted = new Map();
+    for (const session of otherSessions) {
+      const matched = verifiedCartons(session);
+      if (session.manifest?.matchBy !== 'sku') continue;
+      const used = new Map();
+      for (const carton of matched) {
+        fixed.add(carton.epc);
+        const row = stock(carton.epc);
+        if (!row?.physical || row.state !== 'available') continue;
+        const sku = cartonSku(row);
+        used.set(sku,(used.get(sku) ?? 0) + 1);
+      }
+      counted.set(session.manifest,used);
     }
-    for (const {sku,quantity} of committed.flatMap(requiredRows)) available.set(sku,(available.get(sku) ?? 0) - quantity);
+    for (const carton of stockOps.inventory()) {
+      if (!carton.physical || carton.state !== 'available' || fixed.has(carton.epc)) continue;
+      for (const sku of new Set([carton.sku,cartonSku(carton)])) available.set(sku,(available.get(sku) ?? 0) + 1);
+    }
+    for (const manifest of committed) {
+      const used = counted.get(manifest);
+      for (const {sku:storedSku,quantity} of requiredRows(manifest).sort((a,b) => (a.sku === productFamily(a.sku)) - (b.sku === productFamily(b.sku)))) {
+        const sku = skuProduct(storedSku);
+        let outstanding = quantity;
+        for (const [key,count] of used ?? []) {
+          if (key !== sku && productFamily(key) !== sku) continue;
+          const covered = Math.min(outstanding,count);
+          used.set(key,count - covered);
+          outstanding -= covered;
+        }
+        for (const key of new Set([sku,productFamily(sku)])) available.set(key,(available.get(key) ?? 0) - outstanding);
+      }
+    }
+    for (const [sku,count] of available) {
+      if (productFamily(sku) !== sku) available.set(sku,Math.min(count,available.get(productFamily(sku))));
+    }
     return available;
   }
   function checkStock(manifest,currentId,ignoreDrafts = []) {
     if (manifest.matchBy === 'sku') {
       const availability = skuCapacity(currentId,ignoreDrafts);
-      for (const {sku,quantity} of requiredRows(manifest)) {
-        const available = Math.max(0,availability.get(sku) ?? 0);
-        if (!eligible.has(sku) || quantity > available) fail('Only ' + available + ' cartons of ' + sku + ' are available.');
-        availability.set(sku,available - quantity);
+      for (const {sku:storedSku,quantity} of requiredRows(manifest)) {
+        const sku = skuProduct(storedSku);
+        const family = productFamily(sku);
+        const available = Math.max(0,Math.min(availability.get(sku) ?? 0,availability.get(family) ?? 0));
+        if (!eligible.has(family) || quantity > available) fail('Only ' + available + ' cartons of ' + sku + ' are available.');
+        for (const key of new Set([sku,family])) availability.set(key,availability.get(key) - quantity);
       }
       return;
+    }
+    const removedPallet = db.prepare('SELECT 1 FROM pallet_inventory WHERE epc=? AND removed=1');
+    if (manifest.pallets.some(pallet => removedPallet.get(pallet.palletEpc))) {
+      fail('This manifest includes a pallet removed from inventory.');
     }
     const inventory = [];
     for (const c of cartonsOf(manifest)) {
       const carton = stock(c.epc);
       if (!eligible.has(c.sku) || carton?.sku !== c.sku) fail('EPC ' + c.epc + ' has no matching stock SKU.');
+      if (carton.state === 'removed') fail('EPC ' + c.epc + ' was removed from stock.');
       if (carton.state === 'expected') fail('EPC ' + c.epc + ' has not been received.');
       inventory.push(carton);
     }
@@ -418,45 +492,126 @@ export function createWorkspace(path, hardwareCsv = '') {
       fail('This EPC is already registered. Scan an unused pallet tag.');
     }
   }
-  function palletCatalog() {
+  if (!db.prepare('PRAGMA table_info(pallet_inventory)').all().some(column => column.name === 'shape')) {
+    db.exec("ALTER TABLE pallet_inventory ADD COLUMN shape TEXT NOT NULL DEFAULT 'Unspecified'");
+  }
+  if (!db.prepare('PRAGMA table_info(pallet_inventory)').all().some(column => column.name === 'removed')) {
+    db.exec('ALTER TABLE pallet_inventory ADD COLUMN removed INTEGER NOT NULL DEFAULT 0');
+  }
+  function catalogPallet(pallet) {
+    const {shape,removed,...record} = pallet;
+    const identifier = /^PAL-[A-Z0-9]+-[A-Z0-9]+$/.test(pallet.sku) ? pallet.sku : palletIdentifier(pallet);
+    return {...record,identifier};
+  }
+  function palletClaims() {
     const used = new Map();
     for (const draft of manifests().filter(row => row.status === 'Manifest ready')) {
-      for (const pallet of draftPallets(draft)) used.set(pallet.palletEpc,'In manifest');
+      for (const pallet of draftPallets(draft)) !pallet.palletType && used.set(pallet.palletEpc,{id:draft.id,reference:draft.reference,status:'In manifest'});
     }
     for (const session of sessions().filter(row => row.dispatchedAt || !row.removedAt)) {
-      for (const pallet of session.manifest?.pallets ?? []) used.set(pallet.palletEpc,session.dispatchedAt ? 'Dispatched' : 'In session');
+      for (const pallet of session.manifest?.pallets ?? []) {
+        const actual = session.palletAttempts?.findLast(attempt => attempt.manifestRevision === session.manifest.revision &&
+          attempt.palletEpc === pallet.palletEpc && attempt.result === 'Identified')?.actualPalletEpc;
+        const epc = pallet.palletType ? actual : pallet.palletEpc;
+        if (epc && used.get(epc)?.status !== 'Dispatched') {
+          used.set(epc,{id:session.id,reference:session.testId,status:session.dispatchedAt ? 'Dispatched' : 'In session'});
+        }
+      }
     }
-    return db.prepare('SELECT * FROM pallet_inventory ORDER BY reference').all()
-      .map(pallet => ({...pallet,status:used.get(pallet.epc) ?? 'On hand'}));
+    return Object.fromEntries(used);
+  }
+  function palletCatalog() {
+    const claims = palletClaims();
+    return db.prepare('SELECT * FROM pallet_inventory WHERE removed=0 ORDER BY reference').all()
+      .map(pallet => ({...catalogPallet(pallet),status:claims[pallet.epc]?.status ?? 'On hand'}));
   }
   function importPallets(text) {
-    const rows = parseCsvRows(text,['pallet_ref','pallet_epc','sku','size','material']);
+    if (typeof text !== 'string') fail('Choose a pallet inventory CSV.',400);
+    const columns = ['pallet_ref','pallet_epc','sku','size','material'];
+    const header = text.split(/\r?\n/,1)[0].split(/[,;]/).map(cell => cell.trim().toLowerCase().replace(/^\uFEFF/,''));
+    const legacy = header.includes('sku');
+    const rows = parseCsvRows(text,legacy ? (header.includes('shape') ? [...columns,'shape'] : columns) :
+      ['pallet_ref','pallet_epc','material','size']);
+    const {palletMaterials,palletSizes} = inventoryOptions();
     if (rows.length > 500) fail('Import up to 500 pallets at a time.',400);
-    const insert = db.prepare('INSERT INTO pallet_inventory VALUES (?,?,?,?,?)');
+    const insert = db.prepare('INSERT INTO pallet_inventory (epc,reference,sku,size,material) VALUES (?,?,?,?,?)');
     const duplicate = db.prepare('SELECT 1 FROM pallet_inventory WHERE epc=? OR reference=?');
-    for (const [reference,tag,sku,size,material] of rows) {
+    for (const [reference,tag,code,size,oldMaterial] of rows) {
       const epc = normalizeEpc(tag);
-      if (!validEpc(epc) || ![reference,sku,size,material].every(value => value && value.length <= 80 && !/^[=+@-]/.test(value))) {
-        fail('Each pallet needs a valid reference, EPC, SKU, size and material.',400);
+      const material = legacy ? oldMaterial : code;
+      if (!validEpc(epc) || ![reference,size,material].every(value => value && value.length <= 80 && !/^[=+@-]/.test(value))) {
+        fail('Each pallet needs a valid reference, EPC, material and size.',400);
       }
       if (duplicate.get(epc,reference) || stock(epc)) fail('Pallet reference or EPC already exists: ' + reference + '.');
-      insert.run(epc,reference,sku,size,material);
+      palletAvailable(epc);
+      const materialOption = palletMaterials.find(option => !option.archived && (option.code === material.toUpperCase() ||
+        option.label.toUpperCase() === material.toUpperCase()));
+      const sizeOption = palletSizes.find(option => !option.archived && (option.code === size.toUpperCase() || option.label.toUpperCase() === size.toUpperCase()));
+      if (!legacy && (!materialOption || !sizeOption)) fail('Use a configured pallet material and size.',400);
+      const identifier = materialOption && sizeOption ? 'PAL-' + materialOption.code + '-' + sizeOption.code : palletIdentifier({material,size});
+      insert.run(epc,reference,identifier,sizeOption?.label ?? size,materialOption?.label ?? material);
     }
     return {imported:rows.length,reference:rows.length + ' pallets'};
   }
   function palletManifest(user,input,deviceId,devices) {
+    if (input.action === 'remove-pallet') {
+      if (deviceId || user.role !== 'admin') fail('Administrator access required.',403);
+      const reason = typeof input.reason === 'string' ? input.reason.trim() : '';
+      if (!reason || reason.length > 240) fail('Enter a removal reason of up to 240 characters.',400);
+      const catalog = palletCatalog();
+      const pallet = catalog.find(row => row.epc === normalizeEpc(input.epc));
+      if (!pallet || pallet.status !== 'On hand') fail('Only an on-hand pallet can be removed.');
+      const typedSlots = [
+        ...manifests().filter(draft => draft.status === 'Manifest ready').flatMap(draftPallets),
+        ...activeSessions().filter(session => !session.closedAt && !session.dispatchedAt).flatMap(session =>
+          (session.manifest?.pallets ?? []).filter(slot => !palletRead(session,slot)))
+      ].filter(slot => slot.palletType);
+      if (typedSlots.some(slot => matchesPalletIdentifier(slot.palletType,pallet.identifier) &&
+          catalog.filter(row => row.status === 'On hand' && matchesPalletIdentifier(slot.palletType,row.identifier)).length <=
+          typedSlots.filter(other => other.palletType === slot.palletType).length)) {
+        fail('This pallet type is needed for an open manifest or session.');
+      }
+      db.prepare('UPDATE pallet_inventory SET removed=1 WHERE epc=?').run(pallet.epc);
+      stockOps.recordPalletRemoval(user,pallet,reason);
+      return {reference:pallet.reference};
+    }
+    if (input.action === 'register-pallet') {
+      if (!deviceId || user.role !== 'operator') fail('Operator access on the handheld is required.',403);
+      const epc = normalizeEpc(input.epc);
+      const {palletMaterials,palletSizes} = inventoryOptions();
+      const material = palletMaterials.find(option => !option.archived && option.code === input.material);
+      const size = palletSizes.find(option => !option.archived && option.code === input.size);
+      if (!validEpc(epc) || !material || !size) fail('Choose a configured material and size, and scan a valid EPC.',400);
+      const conflict = tagConflict(epc,null,verificationClaims(),palletClaims());
+      if (conflict) fail(conflict);
+      const identifier = 'PAL-' + material.code + '-' + size.code;
+      const existing = db.prepare('SELECT * FROM pallet_inventory WHERE epc=?').get(epc);
+      if (existing?.removed) fail('This pallet was removed from inventory.');
+      if (existing && catalogPallet(existing).identifier === identifier) return palletCatalog().find(row => row.epc === epc);
+      if (existing) fail('This pallet EPC is already registered.');
+      palletAvailable(epc);
+      const reference = 'PAL-' + epc.slice(-6);
+      if (db.prepare('SELECT 1 FROM pallet_inventory WHERE reference=?').get(reference)) {
+        fail('Another pallet already uses reference ' + reference + '.');
+      }
+      db.prepare('INSERT INTO pallet_inventory (epc,reference,sku,size,material) VALUES (?,?,?,?,?)')
+        .run(epc,reference,identifier,size.label,material.label);
+      return catalogPallet({epc,reference,sku:identifier,size:size.label,material:material.label});
+    }
     if (['import-pallets','sku-pallet'].includes(input.action)) {
       if (deviceId || user.role !== 'admin') fail('Administrator access required.',403);
       if (input.action === 'import-pallets') return importPallets(input.csv);
       const draft = input.id ? manifests().find(row => row.id === input.id && row.status === 'Manifest ready' && row.matchBy === 'sku') : null;
       if (input.id && !draft) fail('Open a ready SKU manifest before adding a pallet.');
-      const pallet = palletCatalog().find(row => row.epc === normalizeEpc(input.palletEpc) && row.status === 'On hand');
+      const slots = new Set(draft && draftPallets(draft).map(pallet => pallet.palletEpc));
+      const pallet = palletCatalog().find(row => row.status === 'On hand' && !slots.has(row.epc) &&
+        (input.palletType ? row.identifier === input.palletType : row.epc === normalizeEpc(input.palletEpc)));
       if (!pallet) fail('Select a pallet currently on hand.');
       if (!Array.isArray(input.requirements) || !input.requirements.length) fail('Enter at least one carton quantity.',400);
       const requirements = input.requirements.map(row => ({sku:skuProduct(row.sku),quantity:row.quantity}));
-      if (requirements.some(row => !eligible.has(row.sku) || !Number.isInteger(row.quantity) || row.quantity < 1 || row.quantity > 499) ||
+      if (requirements.some(row => !eligible.has(productFamily(row.sku)) || !Number.isInteger(row.quantity) || row.quantity < 1 || row.quantity > 499) ||
           new Set(requirements.map(row => row.sku)).size !== requirements.length) fail('Enter one whole quantity per product SKU.',400);
-      const next = {pallet:pallet.reference,palletEpc:pallet.epc,cartons:[],requirements};
+      const next = {pallet:pallet.reference,palletEpc:pallet.epc,cartons:[],requirements,...(input.palletType ? {palletType:pallet.identifier} : {})};
       const base = draft ?? {id:randomUUID(),reference:pallet.reference,matchBy:'sku',createdAt:time(),by:user.name};
       return savePalletManifest(readyManifest(base,[...draftPallets(base),next]));
     }
@@ -532,7 +687,7 @@ export function createWorkspace(path, hardwareCsv = '') {
         palletAvailable(pallet.palletEpc,draft.id);
         if (pallet.cartons.some(carton => stock(carton.epc)?.state !== 'available')) fail('A manifest carton is no longer available.');
       }
-      const session = create(user,{testId:input.testId,location:stockOps.chooseLocation(input),source:'C72 hardware',csv:draft.csv},[draft.id]);
+      const session = create(user,{testId:input.testId,location:input.location,source:'C72 hardware',csv:draft.csv},[draft.id]);
       return savePalletManifest({...draft,sessionId:session.id,sessionRemovedAt:undefined,status:'Session created'});
     }
     fail('This action is unavailable for the pallet manifest.');
@@ -556,8 +711,10 @@ export function createWorkspace(path, hardwareCsv = '') {
       if (user.role !== 'admin') fail(s.testId + ' needs dispatch approval from the Administrator or Reviewer.');
       approveDispatch(s,user);
     }
+    const cartons = verifiedCartons(s);
+    stockOps.stageOutbound(user,s,cartons.map(carton => carton.epc));
     const deduct = db.prepare("UPDATE cartons SET state='dispatched', reservation=NULL WHERE epc=? AND state='available'");
-    for (const carton of verifiedCartons(s)) {
+    for (const carton of cartons) {
       const before = stock(carton.epc);
       if (deduct.run(carton.epc).changes !== 1) fail('Carton ' + carton.epc + ' is no longer on hand for ' + s.testId + '.');
       stockOps.dispatch(user,s,before,stock(carton.epc));
@@ -593,25 +750,41 @@ export function createWorkspace(path, hardwareCsv = '') {
   function create(user, input, ignoreDrafts = []) {
     if (user.role !== 'admin') fail('Administrator access required.',403);
     const testId = String(input.testId ?? '').trim();
-    const location = String(input.location ?? '').trim();
-    if (!testId || testId.length > 80 || !location || location.length > 100) fail('Enter a valid test ID and location.',400);
-    if (activeSessions().some(s => s.testId === testId)) fail('That test ID already exists.');
+    const location = stockOps.chooseLocation({location:String(input.location ?? '').trim()});
+    if (!testId || testId.length > 80) fail('Enter a valid session ID.',400);
+    if (activeSessions().some(s => s.testId === testId)) fail('That session ID already exists.');
     if (!['C72 hardware','Simulation'].includes(input.source)) fail('Choose a valid reader source.',400);
     const csv = input.csv || (input.sample ? sample(input.source) : '');
     const manifest = csv ? parseManifest(csv) : null;
     let savedDraft;
     if (manifest?.matchBy === 'sku') {
       savedDraft = manifests().find(draft => draft.status === 'Manifest ready' &&
-        draft.matchBy === 'sku' && draft.csv === skuManifestCsv(manifest.pallets));
+        draft.matchBy === 'sku' && skuManifestCsv(draftPallets(draft)) === skuManifestCsv(manifest.pallets));
       if (savedDraft) ignoreDrafts = [...new Set([...ignoreDrafts,savedDraft.id])];
       for (const pallet of manifest.pallets) {
-        const registered = palletCatalog().find(row => row.epc === pallet.palletEpc && row.reference === pallet.pallet);
+        if (pallet.palletType) {
+          const required = manifest.pallets.filter(row => row.palletType === pallet.palletType).length;
+          if (palletCatalog().filter(row => matchesPalletIdentifier(pallet.palletType,row.identifier) && row.status === 'On hand').length < required) {
+            fail('Too few pallets on hand for ' + pallet.palletType + '.');
+          }
+          continue;
+        }
+        const registered = palletCatalog().find(row => row.epc === pallet.palletEpc);
         if (!registered || (registered.status !== 'On hand' && !(savedDraft && registered.status === 'In manifest'))) {
           fail('Pallet ' + pallet.pallet + ' is unavailable in pallet inventory.');
         }
       }
     }
-    if (manifest) checkStock(manifest,undefined,ignoreDrafts);
+    if (manifest) {
+      checkStock(manifest,undefined,ignoreDrafts);
+      const owners = palletClaims();
+      for (const pallet of manifest.pallets) {
+        if (pallet.palletType) continue;
+        const owner = owners[pallet.palletEpc];
+        if (owner?.status === 'Dispatched') fail('Pallet already dispatched.');
+        if (owner && !ignoreDrafts.includes(owner.id)) fail('Pallet assigned to ' + owner.reference + '.');
+      }
+    }
     const s = {
       id:input.id ?? randomUUID(), testId, location, level:'Ground', product:'Mixed cartons', palletType:'Mixed',
       label:'UHF', placement:'Long side', wrapping:'Unwrapped', shielding:'Not tested', method:'Walk around the pallet',
@@ -669,9 +842,23 @@ export function createWorkspace(path, hardwareCsv = '') {
     } else fail('Action is unavailable for this role or session state.',403);
     return write(s,s.workspaceRevision + 1);
   }
-  const hasPalletRead = (s,pallet) => s.palletAttempts?.some(attempt =>
+  function verificationClaims() {
+    return Object.fromEntries([
+      ...manifests().filter(draft => draft.status === 'Manifest ready').flatMap(draft => cartonsOf(draft).map(carton => [carton.epc,draft.id])),
+      ...activeSessions().filter(session => !session.dispatchedAt).flatMap(session => verifiedCartons(session).map(carton => [carton.epc,session.id]))
+    ]);
+  }
+  function tagConflict(epc,sessionId,cartonClaims,palletOwners) {
+    const pallet = palletOwners[epc], owner = cartonClaims[epc];
+    if (pallet?.status === 'Dispatched' || stock(epc)?.state === 'dispatched') return 'Tag already dispatched.';
+    if (pallet && pallet.id !== sessionId) return 'Pallet assigned to ' + (pallet.reference || 'another session') + '.';
+    if (owner && owner !== sessionId) return 'Carton assigned to another session or manifest.';
+    return '';
+  }
+  const palletRead = (s,pallet) => s.palletAttempts?.findLast(attempt =>
     attempt.manifestRevision === s.manifest.revision && attempt.palletEpc === pallet.palletEpc &&
-    Object.hasOwn(attempt.observations ?? {},pallet.palletEpc));
+    Object.hasOwn(attempt.observations ?? {},pallet.palletType ? attempt.actualPalletEpc : pallet.palletEpc));
+  const hasPalletRead = (s,pallet) => Boolean(palletRead(s,pallet));
   function syncOne(user, change) {
     if (user.role === 'reviewer') fail('Reviewer access is read-only.',403);
     const incoming = change.session;
@@ -685,11 +872,13 @@ export function createWorkspace(path, hardwareCsv = '') {
     let s = readSession(incoming.id);
     if (!s) {
       if (change.revision !== 0) fail('Session no longer exists.');
-      s = create(user,incoming);
+      s = create(user,{...incoming,location:incoming.location === 'Demo staging area' ? OUTBOUND_STAGING : incoming.location});
     } else if (s.removedAt || s.workspaceRevision !== change.revision || s.closedAt ||
         ((s.dispatchedAt || s.acceptedAt) && !incoming.closedAt)) {
       fail('Server session changed. Local evidence is still on the handheld.');
     }
+    const wasConfirmed = Boolean(s.confirmedAt);
+    let scanConflict;
     // Once approved, a closure may be recorded without touching the accepted evidence.
     const evidenceEditable = !s.dispatchedAt && !s.acceptedAt;
     if (evidenceEditable && user.role === 'admin') {
@@ -723,16 +912,55 @@ export function createWorkspace(path, hardwareCsv = '') {
         return s;
       }
       const multi = s.manifest.pallets.length > 1;
+      const cartonOwners = verificationClaims(), palletOwners = palletClaims();
+      const conflict = epc => tagConflict(epc,s.id,cartonOwners,palletOwners);
       const found = incoming.manifest?.palletEpc;
+      const rejected = extraAttempts.find(attempt => {
+        const epc = attempt.actualPalletEpc ?? attempt.palletEpc ?? (!multi && incoming.identified ? found : null);
+        return epc && conflict(epc) && (attempt.result === 'Identified' || incoming.identified);
+      });
+      if (rejected) {
+        scanConflict = conflict(rejected.actualPalletEpc ?? rejected.palletEpc ?? found);
+        s.identified = false;
+        (s.palletAttempts ??= []).push(...extraAttempts.map(attempt => ({
+          ...attempt, result:'Unconfirmed', palletEpc:undefined, actualPalletEpc:undefined, actor:user.name
+        })));
+        for (const run of newRuns) {
+          const epcs = Object.keys(run.observations ?? {}).map(normalizeEpc);
+          const target = s.manifest.pallets.find(pallet => pallet.palletEpc === run.palletEpc);
+          const manifest = target ? lockTo(s.manifest,target) : s.manifest;
+          s.runs.push({...run,operator:user.name,state:'Interrupted',error:scanConflict,
+            result:compareOutbound(manifest,epcs,[],new Set(epcs))});
+        }
+        audit(s,user,'Pallet scan blocked',scanConflict);
+        db.prepare('INSERT INTO operations VALUES (?,?,?)').run(change.operationId,user.id,s.id);
+        return {...write(s,s.workspaceRevision + 1),scanConflict};
+      }
       if (!multi && !s.identified && incoming.identified && found) {
         const locked = s.manifest.pallets.find(p => p.palletEpc === found);
         const observation = incoming.palletAttempts?.at(-1)?.observations ?? {};
-        if (locked && [locked.palletEpc,...locked.cartons.map(c => c.epc)].some(epc => Object.hasOwn(observation,epc))) {
+        if (locked && (locked.palletType ? extraAttempts.some(attempt => attempt.palletEpc === found && attempt.actualPalletEpc) :
+            (!conflict(locked.palletEpc) && [locked.palletEpc,...locked.cartons.map(c => c.epc)]
+              .some(epc => Object.hasOwn(observation,epc) && !conflict(epc))))) {
           s.manifest = {...s.manifest,...locked};
           s.identified = true;
         }
       }
-      if (extraAttempts.length) s.palletAttempts = [...previousAttempts,...extraAttempts.map(attempt => ({...attempt,actor:user.name}))];
+      for (const attempt of extraAttempts) {
+        const target = s.manifest.pallets.find(p => p.palletEpc === attempt.palletEpc);
+        if (target?.palletType) {
+          const actual = normalizeEpc(attempt.actualPalletEpc);
+          const registered = palletCatalog().find(row => row.epc === actual);
+          const blocked = conflict(actual);
+          if (blocked) fail(blocked);
+          const sameSlot = palletRead(s,target)?.actualPalletEpc === actual;
+          const alreadyUsed = s.manifest.pallets.some(p => p !== target && palletRead(s,p)?.actualPalletEpc === actual);
+          if (attempt.manifestRevision !== s.manifest.revision || attempt.result !== 'Identified' ||
+              !Object.hasOwn(attempt.observations ?? {},actual) || !registered || !matchesPalletIdentifier(target.palletType,registered.identifier) ||
+              (registered.status !== 'On hand' && !sameSlot) || alreadyUsed) fail('Pallet EPC is unavailable or does not match the required pallet type.');
+        }
+        (s.palletAttempts ??= []).push({...attempt,actor:user.name});
+      }
       const skuConfirmedIds = new Set([...Object.values(s.palletMatches ?? {}),...Object.values(incoming.palletMatches ?? {})]);
       const skuTaken = new Map();
       const rememberSkuMatch = run => {
@@ -746,20 +974,24 @@ export function createWorkspace(path, hardwareCsv = '') {
         runIds.add(incomingRun.id);
         const target = s.manifest.pallets.find(pallet => pallet.palletEpc === incomingRun.palletEpc);
         const identified = multi ? target && !s.palletMatches?.[target.palletEpc] && hasPalletRead(s,target) : s.identified;
+        const planned = target ?? (!multi ? s.manifest : null);
+        const actual = planned?.palletType ? palletRead(s,planned)?.actualPalletEpc : planned?.palletEpc;
+        if (actual && conflict(actual)) fail(conflict(actual));
         if (!identified || incomingRun.manifestRevision !== s.manifest.revision ||
             !['Finished','Interrupted'].includes(incomingRun.state) || incomingRun.source !== s.source) fail('Run does not match the current verified manifest.');
         const observations = incomingRun.observations ?? {};
-        const manifest = multi ? lockTo(s.manifest,target) : s.manifest;
-        let inventory;
-        if (manifest.requirements) {
-          const blocked = new Set(activeSessions().filter(other => other.id !== s.id && !other.dispatchedAt).flatMap(verifiedCartons).map(c => c.epc));
-          for (const draft of manifests().filter(row => row.status === 'Manifest ready')) {
-            for (const carton of cartonsOf(draft)) blocked.add(carton.epc);
-          }
-          inventory = stockOps.inventory().filter(c => !blocked.has(c.epc) &&
-            (!skuTaken.has(c.epc) || skuTaken.get(c.epc) === incomingRun.palletEpc));
-        }
-        const result = compare(manifest,Object.keys(observations).map(normalizeEpc),inventory);
+        const manifest = multi ? lockTo(s.manifest,target) : {...s.manifest};
+        if (target?.palletType) manifest.actualPalletEpc = actual;
+        const epcs = Object.keys(observations).map(normalizeEpc);
+        const blocked = new Set(epcs.filter(epc => conflict(epc) ||
+          (skuTaken.has(epc) && skuTaken.get(epc) !== incomingRun.palletEpc)));
+        const result = compareOutbound(manifest,epcs,manifest.requirements ? stockOps.inventory() : [],blocked);
+        if (blocked.size) scanConflict ??= [...blocked].map(conflict).find(Boolean) || 'Carton already used on another pallet in this session.';
+        const knownExtras = result.extra.flatMap(epc => {
+          const carton = stock(epc);
+          return carton ? [[epc,demoSku(cartonSku(carton))]] : [];
+        });
+        if (knownExtras.length) result.extraSkus = Object.fromEntries(knownExtras);
         const run = {...incomingRun,operator:user.name,observations,result};
         s.runs.push(run);
         rememberSkuMatch(run);
@@ -788,7 +1020,10 @@ export function createWorkspace(path, hardwareCsv = '') {
         s.confirmedAt ??= time();
       }
     }
-    if (incoming.closedAt) {
+    if (!wasConfirmed && hasVerifiedMatch(s)) {
+      stockOps.stageOutbound(user,s,verifiedCartons(s).map(carton => carton.epc));
+    }
+    if (incoming.closedAt && !(scanConflict && !hasVerifiedMatch(s))) {
       const review = incoming.closure;
       if (typeof review?.coverage !== 'string' || review.coverage.length > 500 ||
           review.reviewed !== true || !canClose(s,review,user.role)) {
@@ -799,10 +1034,17 @@ export function createWorkspace(path, hardwareCsv = '') {
       audit(s,user,'Session closed',s.closure.coverage);
     }
     db.prepare('INSERT INTO operations VALUES (?,?,?)').run(change.operationId,user.id,s.id);
-    return write(s,s.workspaceRevision + 1);
+    const saved = write(s,s.workspaceRevision + 1);
+    return scanConflict ? {...saved,scanConflict} : saved;
   }
   return {
     close:() => db.close(),
+    dashboardSessionValid:(id,now) => Boolean(db.prepare('SELECT 1 FROM dashboard_sessions WHERE id=? AND expires>?').get(id,now)),
+    addDashboardSession:(id,now,expires) => {
+      db.prepare('DELETE FROM dashboard_sessions WHERE expires<=?').run(now);
+      db.prepare('INSERT INTO dashboard_sessions (id,expires) VALUES (?,?)').run(id,expires);
+    },
+    removeDashboardSession:id => db.prepare('DELETE FROM dashboard_sessions WHERE id=?').run(id),
     records:() => ({sessions:activeSessions()}),
     removedSessions:() => sessions().filter(session => session.removedAt).map(session => session.id),
     outbound:(user,records) => ({
@@ -812,6 +1054,7 @@ export function createWorkspace(path, hardwareCsv = '') {
     }),
     sample,
     settings,
+    outboundLocations:stockOps.outboundLocations,
     palletCatalog,
     skuAvailability:() => Object.fromEntries(skuCapacity()),
     generation,
@@ -820,13 +1063,12 @@ export function createWorkspace(path, hardwareCsv = '') {
     reset:(user,input) => atomic(() => reset(user,input)),
     inventory:stockOps.inventory,
     stockTasks:() => ({tasks:stockOps.tasks().map(stockOps.tagged),locations:stockOps.locations(),
-      locationRecords:stockOps.locationRecords(),warehouseLocations:stockOps.warehouseLocations(),stagingLocation:stockOps.preferredLocation('Staging'),events:stockOps.events()}),
+      locationRecords:stockOps.locationRecords(),warehouseLocations:stockOps.warehouseLocations(),countLocations:stockOps.countLocations(),
+      outboundLocations:stockOps.outboundLocations(),stagingLocation:OUTBOUND_STAGING,events:stockOps.events()}),
     palletManifests:manifests,
     assignedCartonEpcs:() => [...assignedCartonEpcs()],
-    verificationClaims:() => Object.fromEntries([
-      ...manifests().filter(draft => draft.status === 'Manifest ready').flatMap(draft => cartonsOf(draft).map(carton => [carton.epc,draft.id])),
-      ...activeSessions().filter(s => !s.dispatchedAt).flatMap(s => verifiedCartons(s).map(carton => [carton.epc,s.id]))
-    ]),
+    verificationClaims,
+    palletClaims,
     existingPallets,
     palletManifest:(user,input,deviceId,devices) => atomic(() => {
       const result = palletManifest(user,input,deviceId,devices);
@@ -836,13 +1078,30 @@ export function createWorkspace(path, hardwareCsv = '') {
     stockHistory:stockOps.events,
     stockReport:stockOps.report,
     stockCommand:(user,input,dashboard) => atomic(() => {
+      if (input.action === 'receive-carton') {
+        const epc = normalizeEpc(input.epc);
+        const conflict = tagConflict(epc,null,verificationClaims(),palletClaims());
+        if (conflict) fail(conflict);
+        if (db.prepare('SELECT 1 FROM pallet_inventory WHERE epc=?').get(epc)) fail('This EPC is already registered to a pallet.');
+      }
       const location = dashboard && user.role === 'admin' && ['archive-location','rename-location'].includes(input.action) ?
-        stockOps.locationRecords().find(row => row.id === input.locationId && !row.archived && row.id !== 'Hold') : null;
+        stockOps.locationRecords().find(row => row.id === input.locationId && !row.archived && !row.protected) : null;
       const sessionsAtLocation = location ? activeSessions().filter(s => !s.closedAt && !s.dispatchedAt && s.location === location.name) : [];
       if (input.action === 'archive-location' && sessionsAtLocation.length) fail('Close the outbound sessions at this location before archiving.');
+      if (input.action === 'receive-carton') {
+        const sizes = inventoryOptions().cartonSizes.filter(option => !option.archived);
+        const size = input.size || (sizes.find(option => option.code === 'M') ?? sizes[0]).code;
+        if (!input.variantSku && !sizes.some(option => option.code === size)) fail('Choose a configured carton size.',400);
+        input = {...input,size,cartonSizes:sizes};
+      }
+      const capacityBefore = input.action === 'remove-carton' ? skuCapacity() : null;
       const result = stockOps.command(user,input,create,dashboard,epc =>
-        activeSessions().some(s => verifiedCartons(s).some(c => c.epc === epc)) ||
+        activeSessions().some(s => (!s.dispatchedAt || input.action === 'untag') &&
+          [...verifiedCartons(s),...cartonsOf(s.manifest)].some(c => c.epc === epc)) ||
         manifests().some(d => !['Cancelled','Session created'].includes(d.status) && draftPallets(d).some(p => p.cartons.some(c => c.epc === epc))));
+      if (capacityBefore && [...skuCapacity()].some(([sku,count]) => count < Math.min(0,capacityBefore.get(sku) ?? 0))) {
+        fail('This SKU is needed for an open manifest or session.');
+      }
       if (input.action === 'rename-location' && result.reference && result.reference !== location?.name) {
         for (const session of sessionsAtLocation) {
           session.location = result.reference;
@@ -854,7 +1113,7 @@ export function createWorkspace(path, hardwareCsv = '') {
     }),
     create:(user,input) => atomic(() => {
       if (user.role !== 'admin') fail('Administrator access required.',403);
-      return create(user,{...input,location:stockOps.chooseLocation(input)});
+      return create(user,input);
     }),
     action:(user,input,dashboard) => atomic(() => action(user,input,dashboard)),
     dispatchSelected:(user,input) => atomic(() => dispatchSelected(user,input)),
