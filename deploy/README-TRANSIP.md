@@ -21,5 +21,5 @@ In phpMyAdmin (for database `abiote_keypharm`):
 - Dashboard URL: `https://web.abiot.eu/keypharm/` (`testing` / `testing123`)
 - Direct protection check: `https://web.abiot.eu/keypharm/app_php/config.local.php` must return `403`.
 - Rebuilt APK: `build/keypharm-poc-0.9.36-transip-debug.apk`
-- Package ID: `be.keypharm.rfid.poc.transip` (Label: `Keypharm RFID TransIP` — installs alongside Dev app).
+- Package ID: `be.keypharm.rfid.poc.transip` (Label: `Keypharm IOT`).
 - Handheld API endpoint baked in: `https://web.abiot.eu/keypharm/api/`
