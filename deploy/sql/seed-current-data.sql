@@ -203,7 +203,7 @@ INSERT INTO `audit` (`id`, `at`, `actor`, `action`, `session`, `role`, `actor_na
 INSERT INTO `audit` (`id`, `at`, `actor`, `action`, `session`, `role`, `actor_name`, `detail`) VALUES (32, '2026-11-27T08:34:38.287Z', 'testing', 'Manifest register-pallet', '', 'operator', 'Operator', 'PAL-C76466');
 
 DELETE FROM `devices`;
-INSERT INTO `devices` (`device_id`, `first_seen_at`, `last_contact_at`, `last_role`, `last_actor`) VALUES ('04594b8b6e79427f', '2026-11-27T06:19:38.040Z', '2026-11-27T08:42:38.845Z', 'operator', 'Operator');
+INSERT INTO `devices` (`device_id`, `first_seen_at`, `last_contact_at`, `last_role`, `last_actor`) VALUES ('04594b8b6e79427f', '2026-11-27T06:19:38.040Z', '2026-11-27T09:20:01.740Z', 'operator', 'Operator');
 
 DELETE FROM `settings_history`;
 INSERT INTO `settings_history` (`id`, `at`, `actor`, `role`, `revision`, `controls_json`) VALUES (16, '2026-11-27T07:55:57.510Z', 'Administrator', 'admin', 1, '{"revision":1,"plan":[],"power":null,"inventoryOptions":{"palletMaterials":[{"code":"PLAS","label":"Plastic"},{"code":"MET","label":"Metal"},{"code":"WOOD","label":"Wood"}],"palletSizes":[{"code":"S","label":"S"},{"code":"M","label":"M"},{"code":"L","label":"L"}],"cartonSizes":[{"code":"XS","label":"XS"},{"code":"S","label":"S"},{"code":"M","label":"M"},{"code":"L","label":"L"},{"code":"EXTRA","label":"Extra Large","archived":true},{"code":"XLA","label":"Extra Largesas","archived":true},{"code":"XL","label":"Extra Largesa","archived":true}]},"sessionPowers":{"402a52e3-f931-429d-a45a-2a84e500b2c7":12},"lastOperation":"a1446d5c-be7b-43a5-a991-ad844ca87156"}');

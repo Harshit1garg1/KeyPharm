@@ -138,23 +138,23 @@ final class WorkspaceAuth
         return $this->userForRole($role);
     }
 
-    public function setDashboardCookie(string $value): void
+    public function setDashboardCookie(string $value, string $cookiePath = '/'): void
     {
-        $flags = DASHBOARD_COOKIE . '=' . $value . '; Path=/; Max-Age=' . DASHBOARD_SESSION_SECONDS . '; HttpOnly; SameSite=Strict';
+        $flags = DASHBOARD_COOKIE . '=' . $value . '; Path=' . $cookiePath . '; Max-Age=' . DASHBOARD_SESSION_SECONDS . '; HttpOnly; SameSite=Strict';
         if (isHttpsRequest()) {
             $flags .= '; Secure';
         }
         header('Set-Cookie: ' . $flags, false);
     }
 
-    public function startDashboardSession(): string
+    public function startDashboardSession(string $cookiePath = '/'): string
     {
         $nowMs = (int)floor(microtime(true) * 1000);
         $expires = $nowMs + DASHBOARD_SESSION_SECONDS * 1000;
         $id = base64UrlEncode(random_bytes(24));
         $this->db->run('DELETE FROM `dashboard_sessions` WHERE `expires` <= ?', [$nowMs]);
         $this->db->run('INSERT INTO `dashboard_sessions` (`id`, `expires`) VALUES (?, ?)', [$id, $expires]);
-        $this->setDashboardCookie($id);
+        $this->setDashboardCookie($id, $cookiePath);
         return $id;
     }
 

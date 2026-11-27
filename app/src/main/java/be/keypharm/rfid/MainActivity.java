@@ -386,7 +386,7 @@ public final class MainActivity extends Activity {
             workspaceNetwork.execute(() -> {
                 HttpURLConnection connection = null;
                 try {
-                    connection = (HttpURLConnection) new URL("https://keypharm.abiot.eu/api/" + path).openConnection();
+                    connection = (HttpURLConnection) new URL("https://web.abiot.eu/keypharm/api/" + path).openConnection();
                     connection.setConnectTimeout(5000);
                     connection.setReadTimeout(9000);
                     connection.setInstanceFollowRedirects(false);

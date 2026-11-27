@@ -1,18 +1,11 @@
 <?php
-// Local test router for `php -S 127.0.0.1:8791 deploy/public/router.php`
-$path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
-$staticMimes = [
-    'css' => 'text/css; charset=utf-8',
-    'mjs' => 'text/javascript; charset=utf-8',
-    'png' => 'image/png',
-    'svg' => 'image/svg+xml',
-    'woff2' => 'font/woff2',
-];
-if ($path !== '/' && $path !== '/dashboard.css' && $path !== '/dashboard-theme.mjs' && $path !== '/InterVariable.woff2') {
-    $target = __DIR__ . $path;
-    $ext = pathinfo($path, PATHINFO_EXTENSION);
-    if (isset($staticMimes[$ext]) && is_file($target)) {
-        // Still pass through index.php so auth guard & Cache-Control headers match production.
+// Local test router for `php -S 127.0.0.1:18791 deploy/public/router.php`
+// Emulates subfolder hosting when KEYPHARM_TEST_BASE=/keypharm is set.
+$base = getenv('KEYPHARM_TEST_BASE') ?: '';
+if ($base !== '') {
+    $uriPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+    if (str_starts_with($uriPath, $base)) {
+        $_SERVER['SCRIPT_NAME'] = $base . '/index.php';
     }
 }
 require __DIR__ . '/index.php';

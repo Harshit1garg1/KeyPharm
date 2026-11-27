@@ -31,15 +31,22 @@ $sendCsv = static function (string $filename, string $content): never {
     exit;
 };
 
-$dashboardSignIn = static function (string $message = ''): never {
+$basePath = rtrim(str_replace('\\', '/', dirname((string)($_SERVER['SCRIPT_NAME'] ?? ''))), '/');
+if ($basePath === '.') {
+    $basePath = '';
+}
+$cookiePath = $basePath . '/';
+$signInUrl = $basePath . '/dashboard/sign-in';
+
+$dashboardSignIn = static function (string $message = '') use ($basePath, $signInUrl): never {
     http_response_code($message !== '' ? 401 : 200);
     header('Content-Type: text/html; charset=utf-8');
     $alert = $message !== '' ? '<p role="alert">' . htmlspecialchars($message, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</p>' : '';
     echo '<!doctype html><html lang="en" data-theme="light"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-        . '<title>Sign in | KeyPharm</title><link rel="stylesheet" href="/dashboard.css"><script type="module" src="/dashboard-theme.mjs"></script><main class="dashboard-sign-in">'
+        . '<title>Sign in | KeyPharm</title><link rel="stylesheet" href="' . $basePath . '/dashboard.css"><script type="module" src="' . $basePath . '/dashboard-theme.mjs"></script><main class="dashboard-sign-in">'
         . '<header><h1>Sign in</h1><div class="dashboard-toolbar-actions"><button type="button" id="dashboard-theme" aria-label="Dark mode" title="Dark mode" hidden></button></div></header>'
         . $alert
-        . '<form method="post" action="/dashboard/sign-in">'
+        . '<form method="post" action="' . $signInUrl . '">'
         . '<label>Username<input name="username" autocomplete="username" required></label>'
         . '<label>Password<input name="password" type="password" autocomplete="current-password" required></label>'
         . '<button class="primary-button">Sign in</button></form></main></html>';
@@ -59,7 +66,14 @@ try {
     $workspace = new WorkspaceStore($db, $hardwareCsv);
 
     $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
-    $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+    $rawPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+    if ($method === 'GET' && $basePath !== '' && $rawPath === $basePath) {
+        header('Location: ' . $cookiePath, true, 301);
+        exit;
+    }
+    $path = ($basePath !== '' && str_starts_with($rawPath, $basePath))
+        ? (substr($rawPath, strlen($basePath)) ?: '/')
+        : $rawPath;
     $authorization = authorizationHeader();
     $role = (string)($_SERVER['HTTP_X_KEYPHARM_ROLE'] ?? 'operator');
     $handheld = str_starts_with($authorization, 'Bearer ');
@@ -101,14 +115,14 @@ try {
             if (!empty($dashboardId)) {
                 $auth->removeDashboardSession($dashboardId);
             }
-            $auth->startDashboardSession();
-            header('Location: /', true, 303);
+            $auth->startDashboardSession($cookiePath);
+            header('Location: ' . $cookiePath, true, 303);
         } else {
             if (!empty($dashboardId)) {
                 $auth->removeDashboardSession($dashboardId);
             }
-            $auth->setDashboardCookie('signed-out');
-            header('Location: /dashboard/sign-in', true, 303);
+            $auth->setDashboardCookie('signed-out', $cookiePath);
+            header('Location: ' . $signInUrl, true, 303);
         }
         exit;
     }
@@ -120,7 +134,7 @@ try {
     $signInAsset = $method === 'GET' && in_array($path, ['/dashboard.css', '/dashboard-theme.mjs', '/InterVariable.woff2'], true);
     if ($user === null && !$signInAsset) {
         if ($path === '/' && $method === 'GET') {
-            header('Location: /dashboard/sign-in', true, 303);
+            header('Location: ' . $signInUrl, true, 303);
             exit;
         }
         $sendJson(401, ['message' => 'Sign in with a KeyPharm demo account.']);
@@ -253,7 +267,7 @@ try {
             $content = (string)file_get_contents($file);
             if ($path === '/') {
                 if (empty($dashboardId) && !$handheld) {
-                    $auth->startDashboardSession();
+                    $auth->startDashboardSession($cookiePath);
                 }
                 $content = str_replace('</head>', '<script type="module" src="workspace-dashboard.mjs"></script></head>', $content);
             }
